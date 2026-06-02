@@ -13,6 +13,7 @@ class CategoryOut(BaseModel):
 
 
 class ContactCreate(BaseModel):
+    owner_id: str | None = Field(default="demo-user", max_length=80)
     name: str = Field(min_length=2, max_length=120)
     phone: str = Field(min_length=4, max_length=40)
     service: str = Field(min_length=2, max_length=160)
@@ -25,6 +26,7 @@ class ContactCreate(BaseModel):
 
 class ContactOut(BaseModel):
     id: int
+    owner_id: str
     name: str
     phone: str
     service: str
@@ -96,6 +98,13 @@ class UserOut(BaseModel):
 class LoginIn(BaseModel):
     email: str = Field(min_length=4, max_length=160)
     password: str = Field(min_length=1, max_length=160)
+
+
+class GoogleLoginIn(BaseModel):
+    sub: str = Field(min_length=2, max_length=160)
+    email: str = Field(min_length=4, max_length=160)
+    name: str = Field(min_length=1, max_length=120)
+    picture: str | None = Field(default="", max_length=300)
 
 
 class AddressOptionOut(BaseModel):

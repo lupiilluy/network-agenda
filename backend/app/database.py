@@ -171,10 +171,13 @@ def init_db() -> None:
         ensure_contact_columns(connection)
         ensure_user_columns(connection)
         seed_db(connection)
+        assign_demo_contacts(connection)
 
 
 def ensure_contact_columns(connection: sqlite3.Connection) -> None:
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(contacts)").fetchall()}
+    if "owner_id" not in columns:
+        connection.execute("ALTER TABLE contacts ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'demo-user'")
     if "address" not in columns:
         connection.execute("ALTER TABLE contacts ADD COLUMN address TEXT NOT NULL DEFAULT ''")
         connection.execute("UPDATE contacts SET address = city WHERE address = ''")
@@ -242,6 +245,12 @@ def seed_db(connection: sqlite3.Connection) -> None:
                 "role": "user",
             },
         )
+
+
+def assign_demo_contacts(connection: sqlite3.Connection) -> None:
+    first_user = connection.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+    if first_user is not None:
+        connection.execute("UPDATE contacts SET owner_id = ? WHERE owner_id = 'demo-user'", (str(first_user["id"]),))
     admin_exists = connection.execute("SELECT COUNT(*) FROM users WHERE email = ?", ("admin@network.local",)).fetchone()[0]
     if admin_exists == 0:
         upsert_user(
@@ -346,6 +355,27 @@ def upsert_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
     return connection.execute("SELECT * FROM users WHERE email = ?", (payload["email"],)).fetchone()
 
 
+def upsert_google_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
+    existing = connection.execute("SELECT * FROM users WHERE lower(email) = lower(?)", (payload["email"],)).fetchone()
+    if existing is not None:
+        return existing
+
+    password_hash = hash_password(secrets.token_urlsafe(24))
+    phone_digits_value = f"google:{payload['sub']}"
+    connection.execute(
+        """
+        INSERT INTO users (
+          name, birth_date, email, password_hash, phone, phone_digits, cep, address,
+          city, state, address_visible, interests, is_collaborator, offered_services,
+          service_address, service_address_visible, role
+        )
+        VALUES (?, '', ?, ?, '', ?, '', '', '', '', 0, '[]', 0, '', '', 1, 'user')
+        """,
+        (payload["name"], payload["email"], password_hash, phone_digits_value),
+    )
+    return connection.execute("SELECT * FROM users WHERE email = ?", (payload["email"],)).fetchone()
+
+
 def find_user_by_phone(connection: sqlite3.Connection, phone: str) -> sqlite3.Row | None:
     digits = phone_digits(phone)
     if not digits:
@@ -387,6 +417,7 @@ def row_to_user(row: sqlite3.Row) -> dict:
 
 
 def insert_contact(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
+    owner_id = str(payload.get("owner_id") or "demo-user")
     category = classify_service(payload["service"])
     note = ""
     city = payload.get("city") or "Minha regiao"
@@ -397,10 +428,11 @@ def insert_contact(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row
 
     cursor = connection.execute(
         """
-        INSERT INTO contacts (name, phone, service, note, city, address, trust, source, category_id, category_label, category_group, search_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO contacts (owner_id, name, phone, service, note, city, address, trust, source, category_id, category_label, category_group, search_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            owner_id,
             payload["name"],
             payload["phone"],
             payload["service"],
@@ -419,6 +451,7 @@ def insert_contact(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row
 
 
 def update_contact(connection: sqlite3.Connection, contact_id: int, payload: dict) -> sqlite3.Row | None:
+    owner_id = str(payload.get("owner_id") or "demo-user")
     category = classify_service(payload["service"])
     note = ""
     city = payload.get("city") or "Minha regiao"
@@ -442,7 +475,7 @@ def update_contact(connection: sqlite3.Connection, contact_id: int, payload: dic
             category_label = ?,
             category_group = ?,
             search_text = ?
-        WHERE id = ?
+        WHERE id = ? AND owner_id = ?
         """,
         (
             payload["name"],
@@ -458,6 +491,7 @@ def update_contact(connection: sqlite3.Connection, contact_id: int, payload: dic
             category.group,
             search_text,
             contact_id,
+            owner_id,
         ),
     )
     if cursor.rowcount == 0:
@@ -468,6 +502,7 @@ def update_contact(connection: sqlite3.Connection, contact_id: int, payload: dic
 def row_to_contact(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
+        "owner_id": row["owner_id"],
         "name": row["name"],
         "phone": row["phone"],
         "service": row["service"],

@@ -19,9 +19,10 @@ from .database import (
     row_to_public_profile,
     row_to_user,
     update_contact,
+    upsert_google_user,
     upsert_user,
 )
-from .schemas import AddressLookupOut, CategoryOut, ContactCreate, ContactOut, LoginIn, PublicProfileOut, SearchOut, UserCreate, UserOut
+from .schemas import AddressLookupOut, CategoryOut, ContactCreate, ContactOut, GoogleLoginIn, LoginIn, PublicProfileOut, SearchOut, UserCreate, UserOut
 
 app = FastAPI(title="Network Agenda API", version="0.1.0")
 
@@ -54,10 +55,15 @@ def categories() -> list[dict]:
 def contacts(
     query: str = Query(default=""),
     category: str = Query(default="all"),
+    user_id: str = Query(default="demo-user"),
 ) -> list[dict]:
     normalized_query = normalize(query)
+    owner_id = str(user_id or "demo-user")
     with get_connection() as connection:
-        rows = connection.execute("SELECT * FROM contacts ORDER BY datetime(created_at) DESC, id DESC").fetchall()
+        rows = connection.execute(
+            "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC, id DESC",
+            (owner_id,),
+        ).fetchall()
 
     results = []
     for row in rows:
@@ -103,9 +109,9 @@ def edit_contact(contact_id: int, payload: ContactCreate) -> dict:
 
 
 @app.delete("/api/contacts/{contact_id}", status_code=204, response_class=Response)
-def delete_contact(contact_id: int) -> Response:
+def delete_contact(contact_id: int, user_id: str = Query(default="demo-user")) -> Response:
     with get_connection() as connection:
-        cursor = connection.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+        cursor = connection.execute("DELETE FROM contacts WHERE id = ? AND owner_id = ?", (contact_id, str(user_id or "demo-user")))
         connection.commit()
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Contato não encontrado.")
@@ -129,6 +135,14 @@ def login(payload: LoginIn) -> dict:
         row = authenticate_user(connection, payload.email, payload.password)
         if row is None:
             raise HTTPException(status_code=401, detail="Email ou senha inválidos.")
+        return row_to_user(row)
+
+
+@app.post("/api/google-login", response_model=UserOut)
+def google_login(payload: GoogleLoginIn) -> dict:
+    with get_connection() as connection:
+        row = upsert_google_user(connection, payload.model_dump())
+        connection.commit()
         return row_to_user(row)
 
 
@@ -195,7 +209,7 @@ def public_profiles(query: str = Query(default="")) -> list[dict]:
 
 @app.get("/api/search", response_model=SearchOut)
 def search(query: str = Query(default="")) -> dict:
-    private_results = contacts(query=query, category="all")
+    private_results = contacts(query=query, category="all", user_id="demo-user")
     public_results = public_profiles(query=query)
     return {
         "query": query,

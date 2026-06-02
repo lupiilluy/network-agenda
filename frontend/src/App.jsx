@@ -41,6 +41,8 @@ import {
 
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8005'
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? ''
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? ''
+const GOOGLE_CONTACTS_SCOPE = 'openid email profile https://www.googleapis.com/auth/contacts.readonly'
 
 const ROUTES = {
   AGENDA: '/agenda',
@@ -423,9 +425,10 @@ function parsePath() {
 
 function loadStoredUser() {
   try {
-    return normalizeUserDraft(JSON.parse(localStorage.getItem('network-agenda-user')) ?? defaultUser)
+    const stored = localStorage.getItem('network-agenda-user')
+    return stored ? normalizeUserDraft(JSON.parse(stored)) : null
   } catch {
-    return defaultUser
+    return null
   }
 }
 
@@ -453,7 +456,7 @@ function normalizeUserDraft(user) {
     id: user?.id ?? null,
     cep: formatCep(user?.cep ?? defaultUser.cep),
     serviceCep: formatCep(user?.serviceCep ?? ''),
-    address: personalAddress || user?.address || defaultUser.address,
+    address: personalAddress || user?.address || (user ? '' : defaultUser.address),
     serviceAddress: serviceAddress || user?.serviceAddress || '',
     interests: Array.isArray(user?.interests) ? user.interests : defaultUser.interests,
     isCollaborator: Boolean(user?.isCollaborator),
@@ -568,6 +571,10 @@ function apiUserToLocal(user) {
   })
 }
 
+function contactOwnerId(owner) {
+  return String(owner?.id ?? owner?.email ?? 'demo-user')
+}
+
 function parseImportedContacts(text) {
   return text
     .split(/\r?\n/)
@@ -587,6 +594,23 @@ function parseImportedContacts(text) {
     .slice(0, 200)
 }
 
+function googlePersonToContact(person, index) {
+  const phone = person.phoneNumbers?.[0]?.canonicalForm || person.phoneNumbers?.[0]?.value || ''
+  const name = person.names?.[0]?.displayName || person.emailAddresses?.[0]?.value || `Contato Google ${index + 1}`
+  const occupation = person.occupations?.[0]?.value
+  const organization = person.organizations?.[0]?.title || person.organizations?.[0]?.name
+  const address = person.addresses?.[0]?.formattedValue || ''
+
+  return {
+    name,
+    phone: phone || `google-${index + 1}`,
+    service: occupation || organization || 'contato importado',
+    city: '',
+    address,
+    source: 'Google People API',
+  }
+}
+
 function loadRecentSearches() {
   try {
     return JSON.parse(localStorage.getItem('network-agenda-recents')) ?? ['eletricista', 'advogada', 'contador']
@@ -596,6 +620,73 @@ function loadRecentSearches() {
 }
 
 let googleMapsPromise
+let googleIdentityPromise
+
+function loadGoogleIdentity() {
+  if (window.google?.accounts?.oauth2) return Promise.resolve(window.google)
+  if (!GOOGLE_CLIENT_ID) return Promise.reject(new Error('Configure VITE_GOOGLE_CLIENT_ID para usar login e contatos do Google.'))
+
+  if (!googleIdentityPromise) {
+    googleIdentityPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script')
+      script.src = 'https://accounts.google.com/gsi/client'
+      script.async = true
+      script.defer = true
+      script.onload = () => resolve(window.google)
+      script.onerror = () => reject(new Error('Não foi possível carregar o login do Google.'))
+      document.head.appendChild(script)
+    })
+  }
+
+  return googleIdentityPromise
+}
+
+async function requestGoogleToken() {
+  const google = await loadGoogleIdentity()
+  return new Promise((resolve, reject) => {
+    const client = google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: GOOGLE_CONTACTS_SCOPE,
+      prompt: 'consent',
+      callback: (response) => {
+        if (response?.access_token) {
+          resolve(response.access_token)
+        } else {
+          reject(new Error(response?.error_description || 'Permissão do Google não concluída.'))
+        }
+      },
+      error_callback: () => reject(new Error('Permissão do Google cancelada.')),
+    })
+    client.requestAccessToken()
+  })
+}
+
+async function fetchGoogleProfile(accessToken) {
+  const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!response.ok) throw new Error('Não foi possível ler o perfil do Google.')
+  return response.json()
+}
+
+async function fetchGoogleContacts(accessToken) {
+  const params = new URLSearchParams({
+    personFields: 'names,phoneNumbers,addresses,emailAddresses,occupations,organizations',
+    pageSize: '200',
+  })
+  const response = await fetch(`https://people.googleapis.com/v1/people/me/connections?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!response.ok) throw new Error('Não foi possível ler os contatos do Google.')
+  const data = await response.json()
+  return (data.connections ?? []).map(googlePersonToContact).filter((contact) => contact.name && contact.phone)
+}
+
+async function getGoogleProfileAndContacts() {
+  const accessToken = await requestGoogleToken()
+  const [profile, contacts] = await Promise.all([fetchGoogleProfile(accessToken), fetchGoogleContacts(accessToken)])
+  return { profile, contacts }
+}
 
 function loadGoogleMaps() {
   if (window.google?.maps) return Promise.resolve(window.google.maps)
@@ -627,6 +718,14 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
 
   if (isAdmin) {
     tabs.push({ label: 'Conexões', path: ROUTES.CONNECTIONS, icon: ShieldCheck, page: 'connections' })
+  }
+
+  if (isAuthPage) {
+    return (
+      <div className="min-h-screen bg-[#060d1a] text-slate-100">
+        <main className="mx-auto min-w-0 max-w-6xl px-4 py-6 sm:px-6">{children}</main>
+      </div>
+    )
   }
 
   return (
@@ -1651,7 +1750,7 @@ function geocodeAddress(geocoder, address) {
   })
 }
 
-function LoginPage({ onLogin, onSaveUser, onImportContacts, onNavigate }) {
+function LoginPage({ onLogin, onGoogleLogin, onSaveUser, onImportContacts, onImportGoogleContacts }) {
   const [mode, setMode] = useState('login')
   const [email, setEmail] = useState('ana@network.local')
   const [password, setPassword] = useState('')
@@ -1709,23 +1808,39 @@ function LoginPage({ onLogin, onSaveUser, onImportContacts, onNavigate }) {
             <LogIn size={18} />
             Entrar
           </button>
+          <button
+            type="button"
+            onClick={async () => {
+              setStatus('')
+              try {
+                await onGoogleLogin()
+              } catch (error) {
+                setStatus(error.message || 'Não foi possível entrar com Google.')
+              }
+            }}
+            className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 text-sm font-black text-slate-200"
+          >
+            <Cloud size={18} />
+            Entrar com Google
+          </button>
         </form>
       ) : (
         <UserProfileForm
           initialUser={defaultUser}
           submitLabel="Criar cadastro"
-          onSubmit={(nextUser) => onSaveUser({ ...nextUser, role: 'user' })}
+          onSubmit={(nextUser, pendingContacts) => onSaveUser({ ...nextUser, role: 'user' }, pendingContacts)}
           onImportContacts={onImportContacts}
+          onImportGoogleContacts={onImportGoogleContacts}
         />
       )}
     </AuthLayout>
   )
 }
 
-function RegisterPage({ user, onSaveUser, onImportContacts, onNavigate }) {
+function RegisterPage({ user, onSaveUser, onImportContacts, onImportGoogleContacts, onNavigate }) {
   return (
     <AuthLayout title="Perfil" description="Atualize seus dados, endereço, interesses e se você também oferece serviços na rede.">
-      <UserProfileForm initialUser={user ?? defaultUser} submitLabel={user ? 'Salvar perfil' : 'Criar cadastro'} onSubmit={onSaveUser} onImportContacts={onImportContacts} />
+      <UserProfileForm initialUser={user ?? defaultUser} submitLabel={user ? 'Salvar perfil' : 'Criar cadastro'} onSubmit={onSaveUser} onImportContacts={onImportContacts} onImportGoogleContacts={onImportGoogleContacts} />
       <button type="button" onClick={() => onNavigate(ROUTES.LOGIN)} className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-slate-800 text-sm font-black text-slate-300">
         <LogIn size={17} />
         Trocar usuário
@@ -1734,12 +1849,12 @@ function RegisterPage({ user, onSaveUser, onImportContacts, onNavigate }) {
   )
 }
 
-function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts }) {
+function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts, onImportGoogleContacts }) {
   const [draft, setDraft] = useState(normalizeUserDraft(initialUser))
   const [cepStatus, setCepStatus] = useState({ personal: '', service: '' })
   const [importStatus, setImportStatus] = useState('')
+  const [pendingImportedContacts, setPendingImportedContacts] = useState([])
   const [errors, setErrors] = useState({})
-  const googleFileRef = useRef(null)
   const isCreating = submitLabel.toLowerCase().includes('criar')
 
   function updateDraft(field, value) {
@@ -1823,6 +1938,11 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts 
         city: 'Minha região',
         address: '',
       }))
+      if (isCreating) {
+        setPendingImportedContacts((current) => [...current, ...contacts])
+        setImportStatus(`${contacts.length} contato${contacts.length === 1 ? '' : 's'} do telefone será importado após salvar o cadastro.`)
+        return
+      }
       await onImportContacts?.(contacts)
       setImportStatus(`${contacts.length} contato${contacts.length === 1 ? '' : 's'} importado${contacts.length === 1 ? '' : 's'} do telefone.`)
     } catch {
@@ -1830,13 +1950,24 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts 
     }
   }
 
-  async function importGoogleFile(event) {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (!file) return
-    const contacts = parseImportedContacts(await file.text())
-    await onImportContacts?.(contacts)
-    setImportStatus(`${contacts.length} contato${contacts.length === 1 ? '' : 's'} importado${contacts.length === 1 ? '' : 's'} do Google.`)
+  async function importGoogleContacts() {
+    try {
+      setImportStatus('Abrindo permissão do Google...')
+      const contacts = await onImportGoogleContacts?.()
+      if (!contacts?.length) {
+        setImportStatus('Nenhum contato do Google disponível para importar.')
+        return
+      }
+      if (isCreating) {
+        setPendingImportedContacts((current) => [...current, ...contacts])
+        setImportStatus(`${contacts.length} contato${contacts.length === 1 ? '' : 's'} do Google será importado após salvar o cadastro.`)
+        return
+      }
+      await onImportContacts?.(contacts)
+      setImportStatus(`${contacts.length} contato${contacts.length === 1 ? '' : 's'} importado${contacts.length === 1 ? '' : 's'} do Google.`)
+    } catch (error) {
+      setImportStatus(error.message || 'Não foi possível importar contatos do Google.')
+    }
   }
 
   function toggleInterest(id) {
@@ -1881,7 +2012,7 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts 
       return
     }
 
-    onSubmit(normalizeUserDraft(draft))
+    onSubmit(normalizeUserDraft(draft), pendingImportedContacts)
   }
 
   return (
@@ -1890,9 +2021,9 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts 
         <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Comece pela agenda</p>
         <p className="mt-1 text-sm font-semibold text-slate-400">Importe contatos no início do cadastro para separar tudo por tags e categorias automaticamente.</p>
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          <input ref={googleFileRef} type="file" accept=".csv,.txt,.vcf" onChange={importGoogleFile} className="hidden" />
-          <button type="button" onClick={() => googleFileRef.current?.click()} className="h-10 rounded-lg border border-slate-800 bg-[#0d1a2e] px-3 text-sm font-black text-slate-200">
-            Importar Google
+          <button type="button" onClick={importGoogleContacts} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-800 bg-[#0d1a2e] px-3 text-sm font-black text-slate-200">
+            <Cloud size={17} />
+            Google
           </button>
           <button type="button" onClick={importPhoneContacts} className="h-10 rounded-lg border border-slate-800 bg-[#0d1a2e] px-3 text-sm font-black text-slate-200">
             Contatos do telefone
@@ -2259,7 +2390,12 @@ export default function App() {
 
     async function loadData() {
       try {
-        const [remoteContacts, remoteProfiles, remoteUsers] = await Promise.all([apiRequest('/api/contacts'), apiRequest('/api/public-profiles'), apiRequest('/api/users')])
+        const contactsPath = user ? `/api/contacts?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
+        const [remoteContacts, remoteProfiles, remoteUsers] = await Promise.all([
+          contactsPath ? apiRequest(contactsPath) : Promise.resolve([]),
+          apiRequest('/api/public-profiles'),
+          apiRequest('/api/users'),
+        ])
         if (cancelled) return
         setContacts(remoteContacts)
         setPublicProfiles(remoteProfiles)
@@ -2274,7 +2410,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [user?.id, user?.email])
 
   useEffect(() => {
     if (!toast) return undefined
@@ -2311,9 +2447,10 @@ export default function App() {
     setForm((current) => ({ ...current, [field]: value }))
   }
 
-  async function saveImportedContact(payload) {
+  async function saveImportedContact(payload, owner = user) {
     let newContact = {
       id: Date.now() + Math.floor(Math.random() * 1000),
+      owner_id: contactOwnerId(owner),
       city: payload.city || 'Minha região',
       address: payload.address || payload.city || '',
       trust: 'Novo',
@@ -2344,6 +2481,10 @@ export default function App() {
       showToast('Nenhum contato encontrado para importar.')
       return
     }
+    if (!user) {
+      showToast('Entre ou crie um cadastro antes de salvar contatos.')
+      return
+    }
     const saved = []
     for (const item of items) {
       saved.push(await saveImportedContact(item))
@@ -2353,10 +2494,30 @@ export default function App() {
     showToast(`${saved.length} contato${saved.length === 1 ? '' : 's'} importado${saved.length === 1 ? '' : 's'}.`)
   }
 
+  async function importContactsForOwner(items, owner) {
+    if (!items?.length || !owner) return []
+    const saved = []
+    for (const item of items) {
+      saved.push(await saveImportedContact(item, owner))
+    }
+    setContacts((current) => [...saved, ...current])
+    setNewCount((count) => count + saved.length)
+    return saved
+  }
+
+  async function requestGoogleContacts() {
+    const { contacts: googleContacts } = await getGoogleProfileAndContacts()
+    return googleContacts
+  }
+
   async function handleImportFile(event) {
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
+    if (!user) {
+      showToast('Entre ou crie um cadastro antes de importar contatos.')
+      return
+    }
 
     setIsImporting(true)
     try {
@@ -2391,6 +2552,7 @@ export default function App() {
 
     let newContact = {
       id: Date.now(),
+      owner_id: contactOwnerId(user),
       name: form.name.trim(),
       phone: form.phone.trim(),
       service: form.service.trim(),
@@ -2420,7 +2582,7 @@ export default function App() {
 
   async function deleteContact(id) {
     try {
-      await apiRequest(`/api/contacts/${id}`, { method: 'DELETE' })
+      await apiRequest(`/api/contacts/${id}?user_id=${encodeURIComponent(contactOwnerId(user))}`, { method: 'DELETE' })
       setBackendOnline(true)
     } catch {
       setBackendOnline(false)
@@ -2437,6 +2599,7 @@ export default function App() {
 
     const payload = {
       name: nextContact.name.trim(),
+      owner_id: contactOwnerId(user),
       phone: nextContact.phone.trim(),
       service: nextContact.service.trim(),
       note: '',
@@ -2480,7 +2643,32 @@ export default function App() {
     navigate(ROUTES.AGENDA)
   }
 
-  async function saveUser(nextUser) {
+  async function loginWithGoogle() {
+    const { profile, contacts: googleContacts } = await getGoogleProfileAndContacts()
+    const response = await apiRequest('/api/google-login', {
+      method: 'POST',
+      body: JSON.stringify({
+        sub: profile.sub,
+        email: profile.email,
+        name: profile.name || profile.email,
+        picture: profile.picture || '',
+      }),
+    })
+    const loggedUser = apiUserToLocal(response)
+    if (!loggedUser) throw new Error('Usuário Google não encontrado.')
+    setBackendOnline(true)
+    setUser(loggedUser)
+    setNetworkUsers((current) => {
+      const others = current.filter((item) => normalize(item.email) !== normalize(loggedUser.email))
+      return [loggedUser, ...others]
+    })
+    localStorage.setItem('network-agenda-user', JSON.stringify(loggedUser))
+    const imported = await importContactsForOwner(googleContacts, loggedUser)
+    showToast(imported.length ? `Login Google realizado e ${imported.length} contatos importados.` : 'Login Google realizado.')
+    navigate(ROUTES.AGENDA)
+  }
+
+  async function saveUser(nextUser, pendingContacts = []) {
     let savedUser = normalizeUserDraft(nextUser)
     try {
       const response = await apiRequest('/api/users', {
@@ -2498,6 +2686,9 @@ export default function App() {
       return [savedUser, ...others]
     })
     localStorage.setItem('network-agenda-user', JSON.stringify(savedUser))
+    if (pendingContacts.length) {
+      await importContactsForOwner(pendingContacts, savedUser)
+    }
     showToast('Cadastro salvo.')
     navigate(ROUTES.AGENDA)
   }
@@ -2529,17 +2720,19 @@ export default function App() {
   )
 
   const inferredCategory = form.service ? classifyService(form.service) : null
+  const isAuthRoute = route.page === 'login' || route.page === 'register'
+  const effectiveRoute = !user && !isAuthRoute ? { page: 'login', categoryId: null } : route
 
   let page
-  if (route.page === 'login') {
-    page = <LoginPage onLogin={loginUser} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onNavigate={navigate} />
-  } else if (route.page === 'register') {
-    page = <RegisterPage user={user} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onNavigate={navigate} />
-  } else if (route.page === 'agenda') {
+  if (effectiveRoute.page === 'login') {
+    page = <LoginPage onLogin={loginUser} onGoogleLogin={loginWithGoogle} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} />
+  } else if (effectiveRoute.page === 'register') {
+    page = <RegisterPage user={user} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onNavigate={navigate} />
+  } else if (effectiveRoute.page === 'agenda') {
     page = (
       <AgendaPage
         contacts={contactsWithCategory}
-        activeCategory={route.categoryId ?? 'all'}
+        activeCategory={effectiveRoute.categoryId ?? 'all'}
         queryDraft={queryDraft}
         setQueryDraft={setQueryDraft}
         onSearch={onSearch}
@@ -2552,11 +2745,11 @@ export default function App() {
         isImporting={isImporting}
       />
     )
-  } else if (route.page === 'new') {
+  } else if (effectiveRoute.page === 'new') {
     page = <NewContactPage form={form} updateForm={updateForm} addContact={addContact} inferredCategory={inferredCategory} onNavigate={navigate} />
-  } else if (route.page === 'map') {
+  } else if (effectiveRoute.page === 'map') {
     page = <MapPage contacts={contactsWithCategory} users={networkUsers} user={user} onNavigate={navigate} />
-  } else if (route.page === 'groups') {
+  } else if (effectiveRoute.page === 'groups') {
     page = (
       <GroupsPage
         publicProfiles={publicProfilesWithCategory}
@@ -2569,14 +2762,14 @@ export default function App() {
         onOpenGroup={setSelectedGroup}
       />
     )
-  } else if (route.page === 'connections') {
+  } else if (effectiveRoute.page === 'connections') {
     page = <ConnectionsPage user={user} contacts={contactsWithCategory} publicProfiles={publicProfilesWithCategory} backendOnline={backendOnline} onNavigate={navigate} />
   } else {
     page = <AgendaPage contacts={contactsWithCategory} activeCategory="all" queryDraft={queryDraft} setQueryDraft={setQueryDraft} onSearch={onSearch} recents={recents} onDelete={deleteContact} onEdit={setEditingContact} onToast={showToast} onNavigate={navigate} onImport={handleImportFile} isImporting={isImporting} />
   }
 
   return (
-    <Shell user={user} route={route} online={backendOnline} unread={newCount} onNavigate={navigate} onLogout={logout}>
+    <Shell user={user} route={effectiveRoute} online={backendOnline} unread={newCount} onNavigate={navigate} onLogout={logout}>
       <Toast message={toast} />
       {page}
       {editingContact ? <EditContactModal contact={editingContact} onClose={() => setEditingContact(null)} onSave={saveEditedContact} /> : null}
