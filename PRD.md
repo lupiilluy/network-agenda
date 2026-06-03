@@ -1,294 +1,253 @@
 # PRD - Network Agenda
 
-## 1. Visão Geral
+## 1. Visao Geral
 
-Network Agenda é um webapp PWA-first, mobile-first e multiusuário para gestão inteligente de contatos e networking.
+Network Agenda e um webapp PWA-first, mobile-first e multiusuario para gestao inteligente de contatos, CRM pessoal e networking.
 
-O produto combina uma agenda privada de contatos com recursos de rede: categorias, importação, perfis públicos opcionais, grupos compartilhados, mapa e futura visualização em grafo.
+O produto combina:
+
+- agenda privada de contatos por usuario;
+- importacao de contatos;
+- categorizacao por servicos e tags;
+- CRM de relacionamento e follow-ups;
+- mapa/grafo de proximidade;
+- chat de copiloto;
+- rede publica opcional com perfis visiveis;
+- servicos oferecidos exibidos por tags na rede publica.
 
 ## 2. Objetivo
 
-Permitir que cada usuário organize sua rede pessoal/profissional e encontre rapidamente pessoas úteis para indicações, serviços, oportunidades e conexões.
+Permitir que cada usuario organize sua rede pessoal/profissional e encontre rapidamente pessoas uteis para indicacoes, servicos, oportunidades e conexoes.
 
-O sistema deve ajudar o usuário a:
+O sistema deve ajudar o usuario a:
 
-- organizar contatos;
-- encontrar pessoas por serviço, categoria ou contexto;
-- importar contatos de fontes externas;
-- visualizar conexões em mapa e futuramente em grafo;
-- participar de uma rede compartilhada com perfis e grupos.
+- organizar contatos privados;
+- encontrar pessoas por servico, categoria, tag, cidade ou contexto;
+- importar contatos do Google, CSV e cadastro manual;
+- visualizar contatos em lista, CRM, dashboard e mapa/grafo;
+- controlar follow-ups e conversas;
+- escolher se quer aparecer na rede publica;
+- descobrir servicos oferecidos por tags.
 
-## 3. Tipos de Usuário
+## 3. Tipos de Usuario
 
 ### Visitante
 
 - Acessa apenas login/cadastro.
 
-### Usuário padrão
+### Usuario padrao
 
-- Gerencia sua própria agenda privada.
+- Gerencia sua propria agenda privada.
 - Importa contatos.
 - Edita perfil.
-- Pode marcar se é colaborador.
-- Acessa mapa e grupos recomendados.
+- Usa CRM, dashboard, mapa/grafo e chat.
+- Pode ativar perfil publico.
 
 ### Admin
 
-- Tem as permissões do usuário padrão.
-- Acessa área administrativa.
-- Futuramente cria e gerencia grupos compartilhados.
-
-### Membro de grupo
-
-- Acessa grupos dos quais faz parte.
-- Pesquisa contatos/perfis dentro do grupo.
+- Tem as permissoes do usuario padrao.
+- Acessa area administrativa.
 
 ## 4. Escopos de Dados
 
-O produto possui três escopos principais:
+O produto possui tres escopos principais:
 
-1. **Contatos privados:** base pessoal de cada usuário.
-2. **Grupos compartilhados:** bases administradas por usuários admin.
-3. **Rede pública opcional:** perfis de usuários que optam por serem vistos na rede.
+1. **Contatos privados:** base pessoal de cada usuario.
+2. **Rede publica opcional:** perfis de usuarios que optam por serem vistos na plataforma.
+3. **Servicos oferecidos:** agrupamentos iniciais por tags/servicos dentro da rede publica.
 
-Contatos privados nunca devem se misturar entre usuários.
+Contatos privados nunca devem se misturar entre usuarios.
 
 ## 5. MVP Atual
 
-Funcionalidades já previstas/implementadas no MVP:
+Funcionalidades implementadas:
 
-- Login e cadastro.
-- Senha obrigatória.
-- Tela de autenticação isolada.
-- Agenda privada por usuário.
-- Cadastro rápido de contato.
-- Nome, telefone e serviço obrigatórios.
-- Endereço opcional no contato.
-- Busca de endereço com opções para escolha.
-- Edição e exclusão de contatos.
-- Filtros por categoria dentro da agenda.
-- Importação por telefone quando suportado pelo navegador.
-- Integração de teste com Google Identity Services e Google People API.
-- Perfil com CEP, endereço, interesses e opção de colaborador.
-- Mapa com contatos e perfis cadastrados.
-- Grupos recomendados.
-- Área administrativa visível apenas para admin.
-- Backend com OpenAPI/Swagger.
+- Login por email/senha.
+- Login Google com Google Identity Services.
+- Cadastro com dados do Google quando disponiveis.
+- Sessao local com validade de 24 horas.
+- Agenda privada por usuario.
+- Cadastro, edicao, exclusao e detalhe completo de contatos.
+- Campos ricos no contato: descricao, tags, demanda atual, problema que resolve, links e campos personalizados.
+- Importacao por Google Contacts, CSV e cadastro manual.
+- Categorias automaticas por servico/nome/metadados.
+- Deduplicacao por telefone/email com aprovacao manual.
+- Dashboard com metricas e atalhos.
+- CRM com status, prioridade, follow-up com horario, concluir, alterar e cancelar.
+- Chat operacional preparado para IA, com acoes de categoria, tags e CRM.
+- Mapa/grafo 3D com contatos filtrados por tags.
+- Perfil publico opcional.
+- Rede publica com pessoas visiveis e servicos oferecidos por tags.
+- Configuracoes com perfil, importacao Google, duplicados, exportacao e sessao.
+- Area administrativa basica.
+- Backend com OpenAPI/Swagger automatico do FastAPI.
 
-## 6. Funcionalidades Futuras
+## 6. Ajustes de Produto Decididos
 
-- Dashboard com métricas e insights.
-- Tags livres ilimitadas.
-- Campos personalizados por usuário e por grupo.
-- Detalhe completo do contato.
-- Deduplicação e sugestão de merge.
-- Grupos compartilhados reais.
-- Perfil público visível na rede.
-- Grafo interno, público e por grupo.
-- Chat preparado para IA/copiloto.
-- Login por magic link.
-- Apple login como coming soon.
-- Migração para Supabase/Postgres em produção.
+- A aba independente de grupos foi removida.
+- A antiga ideia de grupos recomendados foi reposicionada como **Servicos oferecidos** dentro da Rede Publica.
+- O CTA desses cards agora e **Verificar**, nao "Abrir grupo".
+- A experiencia principal deve priorizar Agenda, CRM, Mapa, Chat, Rede Publica e Configuracoes.
 
 ## 7. Modelo de Contato
 
-### MVP
-
-Cada contato possui:
+Cada contato suporta:
 
 - id;
 - owner_id;
 - nome;
 - telefone;
-- serviço;
+- servico;
+- nota;
 - cidade;
-- endereço;
+- endereco;
 - origem;
 - categoria;
-- data de criação.
-
-### Evolução
-
-O contato deve evoluir para suportar:
-
-- avatar/foto;
-- descrição;
-- tags ilimitadas;
-- múltiplos telefones;
-- múltiplos emails;
-- DDD derivado do telefone;
-- links sociais;
-- o que demanda atualmente;
+- descricao;
+- demanda atual;
 - problema que resolve;
-- notas internas;
+- tags;
+- email;
+- WhatsApp;
+- Instagram;
+- LinkedIn;
+- URL customizada;
 - campos personalizados;
-- vínculo com usuário real da plataforma;
-- vínculo com grupos e perfil público.
+- status CRM;
+- prioridade CRM;
+- ultimo contato;
+- proximo follow-up;
+- nota CRM;
+- data de criacao.
 
-## 8. Importação
+## 8. Rede Publica
 
-### MVP
+Usuarios podem ativar a opcao **Quero ser vista na rede publica**.
+
+Quando ativa, o perfil publico pode exibir:
+
+- nome;
+- regiao;
+- descricao publica;
+- demanda atual;
+- problema que resolve;
+- tags publicas;
+- WhatsApp;
+- Instagram;
+- LinkedIn;
+- URL customizada.
+
+Links sociais so aparecem quando preenchidos.
+
+## 9. Servicos Oferecidos
+
+Dentro da Rede Publica, os servicos sao exibidos como cards por tags.
+
+Cada card mostra:
+
+- nome do servico/tema;
+- categoria;
+- tags;
+- tamanho da rede;
+- tempo de resposta;
+- score;
+- botao **Verificar**.
+
+## 10. Importacao
+
+### Implementado
 
 - Manual.
-- CSV/TXT/VCF como alternativa.
-- Contact Picker API quando disponível.
-- Google People API em modo de teste.
+- CSV/TXT.
+- Google People API via OAuth.
 
 ### Regra importante
 
-Google não deve ser tratado como upload de arquivo. Login/importação Google devem usar OAuth e consentimento do usuário.
+Google nao deve ser tratado como upload de arquivo. Login/importacao Google usam OAuth e consentimento do usuario.
 
-## 9. Autenticação
+## 11. Autenticacao
 
-### MVP
+### Implementado
 
 - Email e senha.
-- Senha obrigatória.
 - Senha armazenada com hash e salt.
-- Usuário não autenticado não acessa áreas internas.
+- Google login.
+- Usuario nao autenticado nao acessa areas internas.
+- Sessao local expira em 24 horas.
 
 ### Futuro
 
 - Supabase Auth ou equivalente.
-- Google login em produção.
 - Magic link.
-- Apple login.
-- Sessão/token seguro.
+- Apple login como placeholder.
+- Sessao/token seguro de producao.
 
-## 10. PWA e UX
+## 12. PWA e UX
 
-O app deve priorizar celular, mas funcionar bem no desktop.
+Requisitos de UX:
 
-Requisitos:
-
-- dark mode como padrão;
-- layout responsivo;
-- navegação app-like;
+- dark mode como padrao;
+- layout responsivo para Android e desktop;
+- navegacao app-like;
 - bottom tab bar no mobile;
 - visual moderno e premium;
 - service worker;
 - manifest;
-- preparação para offline básico;
-- preparação para push notifications futuras.
+- preparacao para offline basico.
 
-## 11. Mapa e Grafo
+## 13. Mapa e Grafo
 
-### Mapa
+### Implementado
 
-O mapa deve exibir:
+- Grafo 3D interativo com Three.js.
+- Exibicao de contatos com tags.
+- Filtro por servico.
+- Localizacao por endereco/cidade/DDD quando possivel.
+- Abertura de localizacao no Google Maps.
 
-- origem pelo endereço do usuário;
-- contatos da agenda;
-- perfis cadastrados;
-- distâncias quando possível.
+### Evolucao
 
-### Grafo Futuro
+- Melhorar geocodificacao com API Google configurada.
+- Criar camadas de nos para tags, fontes, DDDs, demandas e problemas resolvidos.
+- Melhorar performance para redes maiores.
 
-O grafo deve ser visualmente forte, com estética de network intelligence.
+## 14. Chat Preparado para IA
 
-Nós planejados:
+O chat deve atuar como copiloto operacional.
 
-- contatos;
-- usuários;
-- grupos;
-- tags;
-- fontes;
-- DDDs;
-- demandas;
-- problemas resolvidos.
+No MVP, ele pode:
 
-Relações planejadas:
+- buscar contatos;
+- sugerir categorias;
+- adicionar tags;
+- marcar CRM/follow-up;
+- concluir follow-up;
+- cancelar ou alterar follow-up;
+- responder em formato conversacional.
 
-- possui tag;
-- importado de fonte;
-- pertence a grupo;
-- demanda algo;
-- resolve algo;
-- tem DDD;
-- vinculado a usuário da plataforma.
+No futuro, pode usar agente externo para acoes mais complexas, sempre com confirmacao.
 
-## 12. Grupos Compartilhados
+## 15. Integracoes
 
-Grupos representam comunidades, eventos, hubs ou redes específicas.
-
-Funcionalidades futuras:
-
-- criar grupo;
-- editar grupo;
-- convidar membros;
-- remover membros;
-- gerenciar contatos do grupo;
-- campos personalizados do grupo;
-- grafo do grupo;
-- busca dentro do grupo.
-
-## 13. Chat Preparado para IA
-
-O app deve ter um módulo de chat com UX de copiloto.
-
-No MVP/fase inicial, o chat deve ser preparado para responder buscas estruturadas, como:
-
-- “quem presta serviço de limpeza?”
-- “quem resolve problema jurídico?”
-- “quem está buscando investimento?”
-
-No futuro, o chat poderá editar dados com confirmação do usuário.
-
-## 14. Integrações
-
-- ViaCEP para endereço por CEP.
-- Nominatim/OpenStreetMap para busca textual de endereço.
-- Google Maps para mapa e distâncias.
+- ViaCEP para endereco por CEP.
+- Nominatim/OpenStreetMap para busca textual de endereco.
+- Google Maps para mapa e distancias.
 - Google Identity Services para login Google.
 - Google People API para importar contatos.
+- OpenAI opcional para chat.
 - OpenAPI/Swagger via FastAPI.
 
-## 15. Critérios de Aceite do MVP
+## 16. Criterios de Aceite do MVP
 
-- Visitante não acessa agenda sem login.
-- Cadastro exige senha.
-- Campos obrigatórios ficam destacados.
-- Cada usuário vê apenas seus contatos.
-- Contato exige nome, telefone e serviço.
-- Endereço do contato é opcional.
-- Busca de endereço mostra opções.
-- Filtros ficam dentro da agenda.
-- Google não usa upload de arquivo como fluxo principal.
-- Mapa inclui contatos e perfis.
-- Admin vê área administrativa.
-- Projeto roda localmente com frontend e backend.
-
-## 16. Roadmap Resumido
-
-### Fase 1 - MVP
-
-- Login/cadastro.
-- Agenda privada.
-- Contatos por usuário.
-- Categorias.
-- Importação inicial.
-- Perfil.
-- Mapa.
-- Admin básico.
-
-### Fase 2 - CRM de networking
-
-- Tags.
-- Campos personalizados.
-- Dashboard.
-- Deduplicação.
-- Detalhe completo do contato.
-
-### Fase 3 - Rede compartilhada
-
-- Perfis públicos.
-- Grupos reais.
-- Membros.
-- Base compartilhada.
-
-### Fase 4 - Inteligência
-
-- Grafos.
-- Chat IA.
-- Busca em linguagem natural.
-- Recomendações de conexões.
+- Visitante nao acessa app interno sem login.
+- Cadastro exige campos principais.
+- Cada usuario ve apenas seus contatos.
+- Google login funciona com OAuth configurado.
+- Importacao Google salva contatos no usuario correto.
+- Contato possui detalhe completo e campos ricos.
+- Duplicados sao sugeridos, nunca mesclados automaticamente.
+- CRM salva follow-ups e mostra no CRM.
+- Chat aplica acoes no banco e reflete no CRM.
+- Rede publica so mostra usuarios que ativaram visibilidade.
+- Servicos oferecidos aparecem dentro da Rede Publica, por tags.
+- App roda localmente com frontend `5174` e backend `8006`.

@@ -22,6 +22,21 @@ class ContactCreate(BaseModel):
     address: str | None = Field(default=None, max_length=240)
     trust: str | None = Field(default="Novo", max_length=40)
     source: str | None = Field(default="Manual", max_length=80)
+    description: str | None = Field(default="", max_length=1200)
+    demand: str | None = Field(default="", max_length=800)
+    solves: str | None = Field(default="", max_length=800)
+    tags: str | None = Field(default="", max_length=500)
+    email: str | None = Field(default="", max_length=160)
+    whatsapp: str | None = Field(default="", max_length=80)
+    instagram: str | None = Field(default="", max_length=160)
+    linkedin: str | None = Field(default="", max_length=200)
+    custom_url: str | None = Field(default="", max_length=240)
+    custom_fields: str | None = Field(default="[]", max_length=2000)
+    crm_status: str | None = Field(default="Novo", max_length=40)
+    crm_priority: str | None = Field(default="Média", max_length=20)
+    last_contact_at: str | None = Field(default="", max_length=20)
+    next_follow_up_at: str | None = Field(default="", max_length=32)
+    crm_note: str | None = Field(default="", max_length=500)
 
 
 class ContactOut(BaseModel):
@@ -35,6 +50,21 @@ class ContactOut(BaseModel):
     address: str
     trust: str
     source: str
+    description: str
+    demand: str
+    solves: str
+    tags: str
+    email: str
+    whatsapp: str
+    instagram: str
+    linkedin: str
+    custom_url: str
+    custom_fields: str
+    crm_status: str
+    crm_priority: str
+    last_contact_at: str
+    next_follow_up_at: str
+    crm_note: str
     category: CategoryOut
     created_at: str
 
@@ -47,6 +77,18 @@ class PublicProfileOut(BaseModel):
     people: int
     response: str
     score: float
+    kind: str = "group"
+    description: str = ""
+    demand: str = ""
+    solves: str = ""
+    tags: str = ""
+    phone: str = ""
+    email: str = ""
+    whatsapp: str = ""
+    instagram: str = ""
+    linkedin: str = ""
+    custom_url: str = ""
+    source_user_id: int | None = None
     category: CategoryOut
 
 
@@ -55,6 +97,50 @@ class SearchOut(BaseModel):
     private_results: list[ContactOut]
     public_results: list[PublicProfileOut]
     has_private_results: bool
+
+
+class AiSuggestionOut(BaseModel):
+    contact_id: int
+    name: str
+    current_service: str
+    suggested_service: str
+    category_id: str
+    category_label: str
+    reason: str
+    action: str = "categorize"
+    label: str | None = ""
+    crm_status: str | None = ""
+    crm_priority: str | None = ""
+    last_contact_at: str | None = ""
+    next_follow_up_at: str | None = ""
+    crm_note: str | None = ""
+
+
+class AiChatIn(BaseModel):
+    user_id: str = Field(default="demo-user", max_length=80)
+    message: str = Field(min_length=1, max_length=1200)
+    target_contact_id: int | None = None
+
+
+class AiChatOut(BaseModel):
+    answer: str
+    suggestions: list[AiSuggestionOut] = []
+    provider: str = "local"
+
+
+class MergeSuggestionOut(BaseModel):
+    id: str
+    owner_id: str
+    match_type: str
+    match_value: str
+    primary_contact: ContactOut
+    duplicate_contact: ContactOut
+
+
+class MergeDecisionIn(BaseModel):
+    owner_id: str = Field(default="demo-user", max_length=80)
+    primary_contact_id: int
+    duplicate_contact_id: int
 
 
 class UserCreate(BaseModel):
@@ -73,6 +159,15 @@ class UserCreate(BaseModel):
     offered_services: str | None = Field(default="", max_length=300)
     service_address: str | None = Field(default="", max_length=240)
     service_address_visible: bool = True
+    public_visible: bool = False
+    public_description: str | None = Field(default="", max_length=1200)
+    public_demand: str | None = Field(default="", max_length=800)
+    public_solves: str | None = Field(default="", max_length=800)
+    public_tags: str | None = Field(default="", max_length=500)
+    public_whatsapp: str | None = Field(default="", max_length=80)
+    public_instagram: str | None = Field(default="", max_length=160)
+    public_linkedin: str | None = Field(default="", max_length=200)
+    public_url: str | None = Field(default="", max_length=240)
     role: str | None = Field(default="user", max_length=40)
 
 
@@ -92,6 +187,15 @@ class UserOut(BaseModel):
     offered_services: str
     service_address: str
     service_address_visible: bool = True
+    public_visible: bool = False
+    public_description: str = ""
+    public_demand: str = ""
+    public_solves: str = ""
+    public_tags: str = ""
+    public_whatsapp: str = ""
+    public_instagram: str = ""
+    public_linkedin: str = ""
+    public_url: str = ""
     role: str
 
 
@@ -112,6 +216,8 @@ class AddressOptionOut(BaseModel):
     city: str
     state: str
     cep: str
+    lat: float | None = None
+    lng: float | None = None
 
 
 class AddressLookupOut(BaseModel):

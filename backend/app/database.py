@@ -3,10 +3,11 @@ from __future__ import annotations
 import sqlite3
 import json
 import hashlib
+import re
 import secrets
 from pathlib import Path
 
-from .categories import CATEGORY_CATALOG, category_to_dict, classify_service, normalize
+from .categories import CATEGORY_CATALOG, category_to_dict, classify_service, infer_service_from_contact, normalize
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -124,6 +125,21 @@ def init_db() -> None:
               address TEXT NOT NULL DEFAULT '',
               trust TEXT NOT NULL DEFAULT 'Novo',
               source TEXT NOT NULL DEFAULT 'Manual',
+              description TEXT NOT NULL DEFAULT '',
+              demand TEXT NOT NULL DEFAULT '',
+              solves TEXT NOT NULL DEFAULT '',
+              tags TEXT NOT NULL DEFAULT '',
+              email TEXT NOT NULL DEFAULT '',
+              whatsapp TEXT NOT NULL DEFAULT '',
+              instagram TEXT NOT NULL DEFAULT '',
+              linkedin TEXT NOT NULL DEFAULT '',
+              custom_url TEXT NOT NULL DEFAULT '',
+              custom_fields TEXT NOT NULL DEFAULT '[]',
+              crm_status TEXT NOT NULL DEFAULT 'Novo',
+              crm_priority TEXT NOT NULL DEFAULT 'Média',
+              last_contact_at TEXT NOT NULL DEFAULT '',
+              next_follow_up_at TEXT NOT NULL DEFAULT '',
+              crm_note TEXT NOT NULL DEFAULT '',
               category_id TEXT NOT NULL,
               category_label TEXT NOT NULL,
               category_group TEXT NOT NULL,
@@ -163,8 +179,29 @@ def init_db() -> None:
               offered_services TEXT NOT NULL DEFAULT '',
               service_address TEXT NOT NULL DEFAULT '',
               service_address_visible INTEGER NOT NULL DEFAULT 1,
+              public_visible INTEGER NOT NULL DEFAULT 0,
+              public_description TEXT NOT NULL DEFAULT '',
+              public_demand TEXT NOT NULL DEFAULT '',
+              public_solves TEXT NOT NULL DEFAULT '',
+              public_tags TEXT NOT NULL DEFAULT '',
+              public_whatsapp TEXT NOT NULL DEFAULT '',
+              public_instagram TEXT NOT NULL DEFAULT '',
+              public_linkedin TEXT NOT NULL DEFAULT '',
+              public_url TEXT NOT NULL DEFAULT '',
               role TEXT NOT NULL DEFAULT 'user',
               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS merge_suggestions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              owner_id TEXT NOT NULL,
+              primary_contact_id INTEGER NOT NULL,
+              duplicate_contact_id INTEGER NOT NULL,
+              match_type TEXT NOT NULL,
+              match_value TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(owner_id, primary_contact_id, duplicate_contact_id, match_type, match_value)
             );
             """
         )
@@ -172,6 +209,7 @@ def init_db() -> None:
         ensure_user_columns(connection)
         seed_db(connection)
         assign_demo_contacts(connection)
+        reclassify_contacts(connection)
 
 
 def ensure_contact_columns(connection: sqlite3.Connection) -> None:
@@ -181,13 +219,53 @@ def ensure_contact_columns(connection: sqlite3.Connection) -> None:
     if "address" not in columns:
         connection.execute("ALTER TABLE contacts ADD COLUMN address TEXT NOT NULL DEFAULT ''")
         connection.execute("UPDATE contacts SET address = city WHERE address = ''")
-    connection.execute("UPDATE contacts SET note = '' WHERE note <> ''")
+    if "crm_status" not in columns:
+        connection.execute("ALTER TABLE contacts ADD COLUMN crm_status TEXT NOT NULL DEFAULT 'Novo'")
+    if "crm_priority" not in columns:
+        connection.execute("ALTER TABLE contacts ADD COLUMN crm_priority TEXT NOT NULL DEFAULT 'Média'")
+    if "last_contact_at" not in columns:
+        connection.execute("ALTER TABLE contacts ADD COLUMN last_contact_at TEXT NOT NULL DEFAULT ''")
+    if "next_follow_up_at" not in columns:
+        connection.execute("ALTER TABLE contacts ADD COLUMN next_follow_up_at TEXT NOT NULL DEFAULT ''")
+    if "crm_note" not in columns:
+        connection.execute("ALTER TABLE contacts ADD COLUMN crm_note TEXT NOT NULL DEFAULT ''")
+    for column, default in (
+        ("description", ""),
+        ("demand", ""),
+        ("solves", ""),
+        ("tags", ""),
+        ("email", ""),
+        ("whatsapp", ""),
+        ("instagram", ""),
+        ("linkedin", ""),
+        ("custom_url", ""),
+        ("custom_fields", "[]"),
+    ):
+        if column not in columns:
+            connection.execute(f"ALTER TABLE contacts ADD COLUMN {column} TEXT NOT NULL DEFAULT '{default}'")
+    connection.execute("UPDATE contacts SET crm_priority = 'Média' WHERE crm_priority = 'MÃ©dia'")
 
 
 def ensure_user_columns(connection: sqlite3.Connection) -> None:
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
     if "password_hash" not in columns:
         connection.execute("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
+    for column, column_type, default in (
+        ("public_visible", "INTEGER", "0"),
+        ("public_description", "TEXT", ""),
+        ("public_demand", "TEXT", ""),
+        ("public_solves", "TEXT", ""),
+        ("public_tags", "TEXT", ""),
+        ("public_whatsapp", "TEXT", ""),
+        ("public_instagram", "TEXT", ""),
+        ("public_linkedin", "TEXT", ""),
+        ("public_url", "TEXT", ""),
+    ):
+        if column not in columns:
+            if column_type == "INTEGER":
+                connection.execute(f"ALTER TABLE users ADD COLUMN {column} INTEGER NOT NULL DEFAULT {default}")
+            else:
+                connection.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT NOT NULL DEFAULT '{default}'")
     default_hash = hash_password("123456")
     connection.execute("UPDATE users SET password_hash = ? WHERE password_hash = ''", (default_hash,))
 
@@ -247,6 +325,48 @@ def seed_db(connection: sqlite3.Connection) -> None:
         )
 
 
+def reclassify_contacts(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("SELECT * FROM contacts").fetchall()
+    generated_services = {normalize(category.label) for category in CATEGORY_CATALOG}
+    generated_services.add(normalize("contato para revisar"))
+    generated_services.add(normalize("servicos gerais"))
+    for row in rows:
+        should_reinfer = row["source"] == "Google People API" and normalize(row["service"]) in generated_services
+        if should_reinfer:
+            service = infer_service_from_contact(row["name"], "", row["note"], "")
+        else:
+            service = infer_service_from_contact(row["name"], row["service"], row["note"], row["source"])
+        category = classify_service(" ".join([service, row["name"], row["note"], row["source"]]))
+        search_text = normalize(
+            " ".join(
+                [
+                    row["name"],
+                    row["phone"],
+                    service,
+                    row["note"],
+                    row["city"],
+                    row["address"],
+                    row["trust"],
+                    row["source"],
+                    category.label,
+                    category.group,
+                ]
+            )
+        )
+        connection.execute(
+            """
+            UPDATE contacts
+            SET service = ?,
+                category_id = ?,
+                category_label = ?,
+                category_group = ?,
+                search_text = ?
+            WHERE id = ?
+            """,
+            (service, category.id, category.label, category.group, search_text, row["id"]),
+        )
+
+
 def assign_demo_contacts(connection: sqlite3.Connection) -> None:
     first_user = connection.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
     if first_user is not None:
@@ -278,6 +398,15 @@ def assign_demo_contacts(connection: sqlite3.Connection) -> None:
 
 def phone_digits(value: str) -> str:
     return "".join(char for char in str(value or "") if char.isdigit())
+
+
+def extract_contact_emails(row: sqlite3.Row | dict) -> set[str]:
+    text = " ".join([str(row["note"] or ""), str(row["search_text"] or "")])
+    return {match.lower() for match in re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", text)}
+
+
+def merge_key(primary_id: int, duplicate_id: int) -> tuple[int, int]:
+    return (primary_id, duplicate_id) if primary_id < duplicate_id else (duplicate_id, primary_id)
 
 
 def hash_password(password: str) -> str:
@@ -322,6 +451,15 @@ def upsert_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
         payload.get("offered_services") or "",
         payload.get("service_address") or "",
         1 if payload.get("service_address_visible", True) else 0,
+        1 if payload.get("public_visible") else 0,
+        payload.get("public_description") or "",
+        payload.get("public_demand") or "",
+        payload.get("public_solves") or "",
+        payload.get("public_tags") or "",
+        payload.get("public_whatsapp") or "",
+        payload.get("public_instagram") or "",
+        payload.get("public_linkedin") or "",
+        payload.get("public_url") or "",
         payload.get("role") or "user",
     )
     connection.execute(
@@ -329,9 +467,10 @@ def upsert_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
         INSERT INTO users (
           name, birth_date, email, password_hash, phone, phone_digits, cep, address, city, state,
           address_visible, interests, is_collaborator, offered_services,
-          service_address, service_address_visible, role
+          service_address, service_address_visible, public_visible, public_description, public_demand,
+          public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url, role
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(email) DO UPDATE SET
           name = excluded.name,
           birth_date = excluded.birth_date,
@@ -348,6 +487,15 @@ def upsert_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
           offered_services = excluded.offered_services,
           service_address = excluded.service_address,
           service_address_visible = excluded.service_address_visible,
+          public_visible = excluded.public_visible,
+          public_description = excluded.public_description,
+          public_demand = excluded.public_demand,
+          public_solves = excluded.public_solves,
+          public_tags = excluded.public_tags,
+          public_whatsapp = excluded.public_whatsapp,
+          public_instagram = excluded.public_instagram,
+          public_linkedin = excluded.public_linkedin,
+          public_url = excluded.public_url,
           role = excluded.role
         """,
         values,
@@ -367,9 +515,10 @@ def upsert_google_user(connection: sqlite3.Connection, payload: dict) -> sqlite3
         INSERT INTO users (
           name, birth_date, email, password_hash, phone, phone_digits, cep, address,
           city, state, address_visible, interests, is_collaborator, offered_services,
-          service_address, service_address_visible, role
+          service_address, service_address_visible, public_visible, public_description, public_demand,
+          public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url, role
         )
-        VALUES (?, '', ?, ?, '', ?, '', '', '', '', 0, '[]', 0, '', '', 1, 'user')
+        VALUES (?, '', ?, ?, '', ?, '', '', '', '', 0, '[]', 0, '', '', 1, 0, '', '', '', '', '', '', '', '', 'user')
         """,
         (payload["name"], payload["email"], password_hash, phone_digits_value),
     )
@@ -412,35 +561,87 @@ def row_to_user(row: sqlite3.Row) -> dict:
         "offered_services": row["offered_services"],
         "service_address": row["service_address"],
         "service_address_visible": bool(row["service_address_visible"]),
+        "public_visible": bool(row["public_visible"]),
+        "public_description": row["public_description"],
+        "public_demand": row["public_demand"],
+        "public_solves": row["public_solves"],
+        "public_tags": row["public_tags"],
+        "public_whatsapp": row["public_whatsapp"],
+        "public_instagram": row["public_instagram"],
+        "public_linkedin": row["public_linkedin"],
+        "public_url": row["public_url"],
         "role": row["role"],
     }
 
 
 def insert_contact(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
     owner_id = str(payload.get("owner_id") or "demo-user")
-    category = classify_service(payload["service"])
-    note = ""
+    note = payload.get("note") or ""
+    incoming_service = payload.get("service")
+    generated_services = {normalize(category.label) for category in CATEGORY_CATALOG}
+    generated_services.add(normalize("contato para revisar"))
+    generated_services.add(normalize("servicos gerais"))
+    if payload.get("source") == "Google People API" and normalize(incoming_service) in generated_services:
+        service = infer_service_from_contact(payload["name"], "", note, "")
+    else:
+        service = infer_service_from_contact(payload["name"], incoming_service, note, payload.get("source"))
+    category = classify_service(" ".join([service, payload["name"], note, payload.get("source") or ""]))
     city = payload.get("city") or "Minha regiao"
     address = payload.get("address") or city
     trust = payload.get("trust") or "Novo"
     source = payload.get("source") or "Manual"
-    search_text = normalize(" ".join([payload["name"], payload["phone"], payload["service"], note, city, address, trust, source, category.label, category.group]))
+    description = payload.get("description") or ""
+    demand = payload.get("demand") or ""
+    solves = payload.get("solves") or ""
+    tags = payload.get("tags") or ""
+    email = payload.get("email") or ""
+    whatsapp = payload.get("whatsapp") or ""
+    instagram = payload.get("instagram") or ""
+    linkedin = payload.get("linkedin") or ""
+    custom_url = payload.get("custom_url") or ""
+    custom_fields = payload.get("custom_fields") or "[]"
+    crm_status = payload.get("crm_status") or "Novo"
+    crm_priority = payload.get("crm_priority") or "Média"
+    last_contact_at = payload.get("last_contact_at") or ""
+    next_follow_up_at = payload.get("next_follow_up_at") or ""
+    crm_note = payload.get("crm_note") or ""
+    search_text = normalize(" ".join([payload["name"], payload["phone"], service, note, city, address, trust, source, description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, custom_fields, crm_status, crm_priority, crm_note, category.label, category.group]))
 
     cursor = connection.execute(
         """
-        INSERT INTO contacts (owner_id, name, phone, service, note, city, address, trust, source, category_id, category_label, category_group, search_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO contacts (
+            owner_id, name, phone, service, note, city, address, trust, source,
+            description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, custom_fields,
+            crm_status, crm_priority, last_contact_at, next_follow_up_at, crm_note,
+            category_id, category_label, category_group, search_text
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             owner_id,
             payload["name"],
             payload["phone"],
-            payload["service"],
+            service,
             note,
             city,
             address,
             trust,
             source,
+            description,
+            demand,
+            solves,
+            tags,
+            email,
+            whatsapp,
+            instagram,
+            linkedin,
+            custom_url,
+            custom_fields,
+            crm_status,
+            crm_priority,
+            last_contact_at,
+            next_follow_up_at,
+            crm_note,
             category.id,
             category.label,
             category.group,
@@ -452,13 +653,29 @@ def insert_contact(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row
 
 def update_contact(connection: sqlite3.Connection, contact_id: int, payload: dict) -> sqlite3.Row | None:
     owner_id = str(payload.get("owner_id") or "demo-user")
-    category = classify_service(payload["service"])
-    note = ""
+    note = payload.get("note") or ""
+    service = infer_service_from_contact(payload["name"], payload.get("service"), note, payload.get("source"))
+    category = classify_service(" ".join([service, payload["name"], note, payload.get("source") or ""]))
     city = payload.get("city") or "Minha regiao"
     address = payload.get("address") or city
     trust = payload.get("trust") or "Novo"
     source = payload.get("source") or "Manual"
-    search_text = normalize(" ".join([payload["name"], payload["phone"], payload["service"], note, city, address, trust, source, category.label, category.group]))
+    description = payload.get("description") or ""
+    demand = payload.get("demand") or ""
+    solves = payload.get("solves") or ""
+    tags = payload.get("tags") or ""
+    email = payload.get("email") or ""
+    whatsapp = payload.get("whatsapp") or ""
+    instagram = payload.get("instagram") or ""
+    linkedin = payload.get("linkedin") or ""
+    custom_url = payload.get("custom_url") or ""
+    custom_fields = payload.get("custom_fields") or "[]"
+    crm_status = payload.get("crm_status") or "Novo"
+    crm_priority = payload.get("crm_priority") or "Média"
+    last_contact_at = payload.get("last_contact_at") or ""
+    next_follow_up_at = payload.get("next_follow_up_at") or ""
+    crm_note = payload.get("crm_note") or ""
+    search_text = normalize(" ".join([payload["name"], payload["phone"], service, note, city, address, trust, source, description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, custom_fields, crm_status, crm_priority, crm_note, category.label, category.group]))
 
     cursor = connection.execute(
         """
@@ -471,6 +688,21 @@ def update_contact(connection: sqlite3.Connection, contact_id: int, payload: dic
             address = ?,
             trust = ?,
             source = ?,
+            description = ?,
+            demand = ?,
+            solves = ?,
+            tags = ?,
+            email = ?,
+            whatsapp = ?,
+            instagram = ?,
+            linkedin = ?,
+            custom_url = ?,
+            custom_fields = ?,
+            crm_status = ?,
+            crm_priority = ?,
+            last_contact_at = ?,
+            next_follow_up_at = ?,
+            crm_note = ?,
             category_id = ?,
             category_label = ?,
             category_group = ?,
@@ -480,12 +712,27 @@ def update_contact(connection: sqlite3.Connection, contact_id: int, payload: dic
         (
             payload["name"],
             payload["phone"],
-            payload["service"],
+            service,
             note,
             city,
             address,
             trust,
             source,
+            description,
+            demand,
+            solves,
+            tags,
+            email,
+            whatsapp,
+            instagram,
+            linkedin,
+            custom_url,
+            custom_fields,
+            crm_status,
+            crm_priority,
+            last_contact_at,
+            next_follow_up_at,
+            crm_note,
             category.id,
             category.label,
             category.group,
@@ -497,6 +744,135 @@ def update_contact(connection: sqlite3.Connection, contact_id: int, payload: dic
     if cursor.rowcount == 0:
         return None
     return connection.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+
+
+def ignored_merge_pairs(connection: sqlite3.Connection, owner_id: str) -> set[tuple[int, int, str, str]]:
+    rows = connection.execute(
+        """
+        SELECT primary_contact_id, duplicate_contact_id, match_type, match_value
+        FROM merge_suggestions
+        WHERE owner_id = ? AND status IN ('ignored', 'merged')
+        """,
+        (owner_id,),
+    ).fetchall()
+    return {
+        (*merge_key(row["primary_contact_id"], row["duplicate_contact_id"]), row["match_type"], row["match_value"])
+        for row in rows
+    }
+
+
+def list_merge_suggestions(connection: sqlite3.Connection, owner_id: str) -> list[dict]:
+    rows = connection.execute(
+        "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) ASC, id ASC",
+        (owner_id,),
+    ).fetchall()
+    ignored = ignored_merge_pairs(connection, owner_id)
+    suggestions: list[dict] = []
+    seen: set[tuple[int, int, str, str]] = set()
+    seen_pairs: set[tuple[int, int]] = set()
+
+    by_phone: dict[str, list[sqlite3.Row]] = {}
+    by_email: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        digits = phone_digits(row["phone"])
+        if len(digits) >= 8:
+            by_phone.setdefault(digits, []).append(row)
+        for email in extract_contact_emails(row):
+            by_email.setdefault(email, []).append(row)
+
+    def add_pairs(groups: dict[str, list[sqlite3.Row]], match_type: str) -> None:
+        for value, contacts in groups.items():
+            if len(contacts) < 2:
+                continue
+            ordered = sorted(contacts, key=lambda item: item["id"])
+            primary = ordered[0]
+            for duplicate in ordered[1:]:
+                primary_id, duplicate_id = merge_key(primary["id"], duplicate["id"])
+                key = (primary_id, duplicate_id, match_type, value)
+                pair_key = (primary_id, duplicate_id)
+                if key in ignored or key in seen or pair_key in seen_pairs:
+                    continue
+                seen.add(key)
+                seen_pairs.add(pair_key)
+                suggestions.append(
+                    {
+                        "id": f"{match_type}:{value}:{primary_id}:{duplicate_id}",
+                        "owner_id": owner_id,
+                        "match_type": match_type,
+                        "match_value": value,
+                        "primary_contact": row_to_contact(primary if primary["id"] == primary_id else duplicate),
+                        "duplicate_contact": row_to_contact(duplicate if duplicate["id"] == duplicate_id else primary),
+                    }
+                )
+
+    add_pairs(by_phone, "phone")
+    add_pairs(by_email, "email")
+    return suggestions
+
+
+def ignore_merge_suggestion(connection: sqlite3.Connection, owner_id: str, primary_id: int, duplicate_id: int) -> None:
+    rows = connection.execute(
+        "SELECT * FROM contacts WHERE owner_id = ? AND id IN (?, ?)",
+        (owner_id, primary_id, duplicate_id),
+    ).fetchall()
+    if len(rows) != 2:
+        raise ValueError("Sugestao de duplicidade nao encontrada.")
+    primary_id, duplicate_id = merge_key(primary_id, duplicate_id)
+    for suggestion in list_merge_suggestions(connection, owner_id):
+        if suggestion["primary_contact"]["id"] == primary_id and suggestion["duplicate_contact"]["id"] == duplicate_id:
+            connection.execute(
+                """
+                INSERT INTO merge_suggestions (owner_id, primary_contact_id, duplicate_contact_id, match_type, match_value, status)
+                VALUES (?, ?, ?, ?, ?, 'ignored')
+                ON CONFLICT(owner_id, primary_contact_id, duplicate_contact_id, match_type, match_value)
+                DO UPDATE SET status = 'ignored'
+                """,
+                (owner_id, primary_id, duplicate_id, suggestion["match_type"], suggestion["match_value"]),
+            )
+
+
+def merge_contacts(connection: sqlite3.Connection, owner_id: str, primary_id: int, duplicate_id: int) -> sqlite3.Row:
+    primary_id, duplicate_id = merge_key(primary_id, duplicate_id)
+    primary = connection.execute("SELECT * FROM contacts WHERE owner_id = ? AND id = ?", (owner_id, primary_id)).fetchone()
+    duplicate = connection.execute("SELECT * FROM contacts WHERE owner_id = ? AND id = ?", (owner_id, duplicate_id)).fetchone()
+    if primary is None or duplicate is None:
+        raise ValueError("Contatos duplicados nao encontrados.")
+
+    def choose(field: str) -> str:
+        return primary[field] or duplicate[field] or ""
+
+    notes = [primary["note"], duplicate["note"]]
+    merged_note = " | ".join(dict.fromkeys(item for item in notes if item))[:500]
+    merged_source = " + ".join(dict.fromkeys(item for item in [primary["source"], duplicate["source"]] if item))[:80]
+    payload = {
+        "owner_id": owner_id,
+        "name": choose("name"),
+        "phone": choose("phone"),
+        "service": choose("service"),
+        "note": merged_note,
+        "city": choose("city"),
+        "address": choose("address"),
+        "trust": primary["trust"] if primary["trust"] != "Novo" else duplicate["trust"],
+        "source": merged_source or "Merge",
+    }
+    updated = update_contact(connection, primary_id, payload)
+    if updated is None:
+        raise ValueError("Nao foi possivel mesclar os contatos.")
+
+    suggestions = list_merge_suggestions(connection, owner_id)
+    for suggestion in suggestions:
+        if suggestion["primary_contact"]["id"] == primary_id and suggestion["duplicate_contact"]["id"] == duplicate_id:
+            connection.execute(
+                """
+                INSERT INTO merge_suggestions (owner_id, primary_contact_id, duplicate_contact_id, match_type, match_value, status)
+                VALUES (?, ?, ?, ?, ?, 'merged')
+                ON CONFLICT(owner_id, primary_contact_id, duplicate_contact_id, match_type, match_value)
+                DO UPDATE SET status = 'merged'
+                """,
+                (owner_id, primary_id, duplicate_id, suggestion["match_type"], suggestion["match_value"]),
+            )
+    connection.execute("DELETE FROM contacts WHERE owner_id = ? AND id = ?", (owner_id, duplicate_id))
+    return connection.execute("SELECT * FROM contacts WHERE id = ?", (primary_id,)).fetchone()
 
 
 def row_to_contact(row: sqlite3.Row) -> dict:
@@ -511,6 +887,21 @@ def row_to_contact(row: sqlite3.Row) -> dict:
         "address": row["address"],
         "trust": row["trust"],
         "source": row["source"],
+        "description": row["description"],
+        "demand": row["demand"],
+        "solves": row["solves"],
+        "tags": row["tags"],
+        "email": row["email"],
+        "whatsapp": row["whatsapp"],
+        "instagram": row["instagram"],
+        "linkedin": row["linkedin"],
+        "custom_url": row["custom_url"],
+        "custom_fields": row["custom_fields"],
+        "crm_status": row["crm_status"],
+        "crm_priority": row["crm_priority"],
+        "last_contact_at": row["last_contact_at"],
+        "next_follow_up_at": row["next_follow_up_at"],
+        "crm_note": row["crm_note"],
         "created_at": row["created_at"],
         "category": {
             "id": row["category_id"],
@@ -532,10 +923,84 @@ def row_to_public_profile(row: sqlite3.Row) -> dict:
         "people": row["people"],
         "response": row["response"],
         "score": row["score"],
+        "kind": "group",
+        "description": "",
+        "demand": "",
+        "solves": "",
+        "tags": "",
+        "phone": "",
+        "email": "",
+        "whatsapp": "",
+        "instagram": "",
+        "linkedin": "",
+        "custom_url": "",
+        "source_user_id": None,
         "category": {
             "id": row["category_id"],
             "label": row["category_label"],
             "group": row["category_group"],
+            "keywords": [],
+            "synonyms": [],
+            "count": 0,
+        },
+    }
+
+
+def row_to_public_user_profile(row: sqlite3.Row) -> dict:
+    service = row["offered_services"] or row["public_solves"] or "Perfil público"
+    try:
+        interests = json.loads(row["interests"] or "[]")
+    except json.JSONDecodeError:
+        interests = []
+    tags = row["public_tags"] or ", ".join(interests)
+    category = classify_service(" ".join([service, tags, row["public_description"], row["public_solves"]]))
+    area = row["city"] or row["state"] or "Rede pública"
+    address = row["service_address"] if row["is_collaborator"] and row["service_address_visible"] else row["address"]
+    if row["address_visible"] and address:
+        area = address
+    search_text = normalize(
+        " ".join(
+            [
+                row["name"],
+                service,
+                area,
+                row["public_description"],
+                row["public_demand"],
+                row["public_solves"],
+                tags,
+                row["email"],
+                row["public_instagram"],
+                row["public_linkedin"],
+                category.label,
+                category.group,
+            ]
+        )
+    )
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "service": service,
+        "area": area,
+        "people": 1,
+        "response": "perfil",
+        "score": 5.0 if row["is_collaborator"] else 4.6,
+        "kind": "person",
+        "description": row["public_description"],
+        "demand": row["public_demand"],
+        "solves": row["public_solves"],
+        "tags": tags,
+        "phone": row["phone"],
+        "email": row["email"],
+        "whatsapp": row["public_whatsapp"] or row["phone"],
+        "instagram": row["public_instagram"],
+        "linkedin": row["public_linkedin"],
+        "custom_url": row["public_url"],
+        "source_user_id": row["id"],
+        "search_text": search_text,
+        "category": {
+            "id": category.id,
+            "label": category.label,
+            "group": category.group,
             "keywords": [],
             "synonyms": [],
             "count": 0,

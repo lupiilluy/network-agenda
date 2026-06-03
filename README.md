@@ -1,29 +1,44 @@
 # Network Agenda
 
-Aplicativo mobile-first para agenda inteligente de contatos, networking e indicação de serviços. A ideia é unir uma agenda privada, parecida com contatos do celular, com recursos de rede: categorias automáticas, grupos recomendados, mapa de proximidade e perfis de usuários que também podem oferecer serviços.
+Webapp PWA-first para gestao inteligente de contatos, CRM pessoal e networking. O produto combina uma agenda privada por usuario com organizacao por categorias, importacao de contatos, mapa/grafo de proximidade, CRM de follow-ups, chat operacional e uma rede publica opcional com perfis visiveis e servicos oferecidos.
 
 ## Objetivo
 
-O Network Agenda resolve um problema simples: guardar contatos úteis de forma rápida, mas com contexto suficiente para encontrar a pessoa certa depois.
+O Network Agenda ajuda cada usuario a organizar sua propria rede pessoal/profissional e encontrar rapidamente quem pode ajudar, prestar um servico, resolver um problema ou receber uma indicacao.
 
-Em vez de salvar apenas nome e telefone, cada contato recebe um serviço. A partir desse serviço, o app classifica automaticamente em categorias como casa e manutenção, jurídico, saúde, tecnologia, educação, veículos e negócios. Cada usuário tem sua própria agenda privada, e os contatos não se misturam entre contas.
+O MVP atual prioriza:
+
+- base privada de contatos por usuario;
+- importacao via Google Contacts, CSV e cadastro manual;
+- categorizacao por servicos/tags;
+- CRM com follow-ups, prioridade, status e conclusao;
+- chat preparado para acionar organizacao e CRM;
+- mapa/grafo interativo com contatos filtrados por tags;
+- rede publica opcional para usuarios que querem aparecer dentro da plataforma;
+- servicos oferecidos na rede publica apresentados por tags.
 
 ## Funcionalidades
 
-- Login e cadastro de usuários.
-- Senha obrigatória no cadastro e autenticação por email/senha.
-- Tela de login/cadastro isolada do restante do app.
-- Agenda privada separada por usuário.
-- Cadastro rápido de contatos com nome, telefone e serviço obrigatórios.
-- Endereço opcional no contato, com busca de opções para o usuário escolher.
-- Edição e remoção de contatos.
-- Filtros de categoria dentro da agenda.
-- Importação de contatos do telefone quando o navegador suporta Contact Picker API.
-- Integração de teste com Google Identity Services e Google People API para login rápido e importação de contatos.
-- Perfil com endereço via CEP, interesses e opção de colaborador.
-- Mapa da rede com contatos e perfis cadastrados.
-- Grupos recomendados de acordo com interesses e categorias.
-- Área administrativa para conexões, visível apenas para admin.
+- Login por email/senha.
+- Login com Google OAuth.
+- Importacao real de contatos via Google People API.
+- Cadastro com dados preenchidos pelo Google quando disponiveis.
+- Sessao local com expiracao em 24 horas.
+- Agenda privada separada por usuario.
+- Cadastro, edicao, remocao e detalhe completo de contatos.
+- Campos ricos no contato: descricao, demanda atual, problema que resolve, tags, links sociais, email e campos personalizados.
+- Deduplicacao por telefone/email com revisao manual.
+- Dashboard com totais, pendencias, follow-ups e atalhos.
+- CRM com abas de contatos ativos, com tags, sem tags e todos.
+- Follow-up com data/hora, concluir, alterar e cancelar.
+- Chat de copiloto para localizar contatos, ajustar categorias e acionar CRM.
+- Mapa/grafo 3D com contatos que possuem tags.
+- Distancias aproximadas por DDD/localizacao quando possivel.
+- Perfil publico opcional: "quero ser vista na rede publica".
+- Rede publica com cards de pessoas visiveis e servicos oferecidos.
+- Servicos oferecidos exibidos como tags, com acao de verificar.
+- Configuracoes com perfil, importacao Google, duplicados, exportacao e sessao.
+- PWA basico com manifest e service worker.
 
 ## Stack
 
@@ -33,7 +48,8 @@ Em vez de salvar apenas nome e telefone, cada contato recebe um serviço. A part
 - Vite
 - Tailwind CSS
 - Lucide React
-- PWA básico com manifesto e service worker
+- Three.js
+- PWA basico
 
 ### Backend
 
@@ -75,13 +91,13 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8005
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8006
 ```
 
 A API fica em:
 
 ```text
-http://127.0.0.1:8005
+http://127.0.0.1:8006
 ```
 
 ### Frontend
@@ -89,7 +105,7 @@ http://127.0.0.1:8005
 ```powershell
 cd frontend
 npm install
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 5174
 ```
 
 O app fica em:
@@ -98,87 +114,109 @@ O app fica em:
 http://127.0.0.1:5174
 ```
 
-## Variáveis de Ambiente
+## Variaveis de Ambiente
 
-O frontend usa valores padrão para desenvolvimento local, mas aceita variáveis do Vite:
+Crie os arquivos locais a partir dos exemplos:
 
-```env
-VITE_API_URL=http://127.0.0.1:8005
-VITE_GOOGLE_MAPS_API_KEY=sua_chave_google_maps
-VITE_GOOGLE_CLIENT_ID=seu_client_id_google
+```powershell
+Copy-Item frontend/.env.example frontend/.env.local
+Copy-Item backend/.env.example backend/.env.local
 ```
 
-### Google
+Frontend:
 
-Para testar login e importação de contatos pelo Google:
+```env
+VITE_API_URL=http://127.0.0.1:8006
+VITE_GOOGLE_CLIENT_ID=seu_client_id_google
+VITE_GOOGLE_MAPS_API_KEY=sua_chave_google_maps
+```
+
+Backend:
+
+```env
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+```
+
+## Google
+
+Para testar login e importacao de contatos pelo Google:
 
 1. Crie um projeto no Google Cloud.
 2. Ative a Google People API.
-3. Crie um OAuth Client ID para aplicação web.
-4. Adicione a origem local, por exemplo `http://127.0.0.1:5174`.
-5. Configure `VITE_GOOGLE_CLIENT_ID`.
+3. Configure a tela de consentimento OAuth.
+4. Adicione seu email como usuario de teste enquanto o app estiver em modo teste.
+5. Crie credenciais OAuth do tipo **Web application**.
+6. Em **Authorized JavaScript origins**, adicione `http://127.0.0.1:5174`.
+7. Copie o **Client ID** para `VITE_GOOGLE_CLIENT_ID` em `frontend/.env.local`.
+8. Reinicie o frontend.
 
-Sem `VITE_GOOGLE_CLIENT_ID`, o app continua funcionando com login por email/senha, mas o botão Google mostra uma mensagem pedindo configuração.
+O fluxo usa Google Identity Services no navegador e Google People API para contatos.
 
-### Google Maps
+## IA / Chat
 
-Para carregar o mapa completo com geocodificação e distâncias:
+O chat funciona mesmo sem chave externa, usando regras locais para:
 
-1. Crie uma chave de API no Google Cloud.
-2. Ative Maps JavaScript API, Geocoding API e Distance Matrix API.
-3. Configure `VITE_GOOGLE_MAPS_API_KEY`.
+- buscar contatos;
+- sugerir categorias;
+- adicionar tags;
+- marcar, alterar, concluir ou cancelar follow-ups;
+- atualizar dados de CRM com confirmacao.
 
-Sem a chave, o app mostra um mapa incorporado simples e uma lista com fallback de distância quando possível.
+Com `OPENAI_API_KEY`, o backend pode usar modelo externo para melhorar a conversa.
 
 ## Banco de Dados
 
-O SQLite é criado automaticamente em:
+O SQLite e criado automaticamente em:
 
 ```text
 backend/data/network_agenda.sqlite3
 ```
 
-Esse arquivo não deve ir para o GitHub. Ele está ignorado pelo `.gitignore`.
+Esse arquivo nao deve ir para o GitHub.
 
 Tabelas principais:
 
-- `users`: usuários, senha com hash, endereço, interesses e perfil de colaborador.
-- `contacts`: contatos privados, separados por `owner_id`.
-- `public_profiles`: grupos/perfis públicos usados como sugestões.
+- `users`: usuarios, dados de perfil, autenticacao, endereco e perfil publico.
+- `contacts`: contatos privados por `owner_id`.
+- `public_profiles`: servicos/rede publica usados como sugestoes iniciais.
+- `merge_suggestions`: sugestoes de duplicidade aprovadas/ignoradas.
 
 ## Endpoints Principais
 
 ```text
-GET  /api/health
-GET  /api/categories
-GET  /api/contacts?user_id=1
-POST /api/contacts
-PUT  /api/contacts/{contact_id}
+GET    /api/health
+GET    /api/categories
+GET    /api/contacts?user_id=1
+POST   /api/contacts
+PUT    /api/contacts/{contact_id}
 DELETE /api/contacts/{contact_id}?user_id=1
 
-POST /api/users
-POST /api/login
-POST /api/google-login
-GET  /api/users
-GET  /api/users/lookup?phone=...
+POST   /api/users
+POST   /api/login
+POST   /api/google-login
+GET    /api/users
+GET    /api/users/lookup?phone=...
 
-GET  /api/address/lookup?query=...
-GET  /api/public-profiles
-GET  /api/search?query=...
+GET    /api/address/lookup?query=...
+GET    /api/public-profiles
+GET    /api/merge-suggestions?user_id=1
+POST   /api/merge-suggestions/ignore
+POST   /api/merge-suggestions/merge
+POST   /api/ai/chat
+GET    /api/search?query=...
 ```
 
-## Usuários de Teste
+## Usuarios de Teste
 
-O banco cria usuários iniciais quando está vazio:
+Quando o banco esta vazio:
 
 ```text
 ana@network.local / 123456
 admin@network.local / admin123
 ```
 
-O usuário admin consegue acessar a área de conexões.
-
-## Build
+## Build e Validacao
 
 Frontend:
 
@@ -194,19 +232,6 @@ cd backend
 python -m compileall app
 ```
 
-## Status do Projeto
+## Status
 
-Este é um MVP funcional. Algumas integrações externas estão preparadas para teste, mas precisam de chaves reais:
-
-- Google Maps precisa de `VITE_GOOGLE_MAPS_API_KEY`.
-- Login/importação Google precisa de `VITE_GOOGLE_CLIENT_ID`.
-- A busca de endereço usa endpoint externo e pode variar conforme disponibilidade.
-
-## Próximos Passos
-
-- Criar autenticação com sessão/token real.
-- Adicionar migrations formais para o banco.
-- Melhorar importação de contatos com deduplicação.
-- Criar perfil público de colaborador com página própria.
-- Melhorar mapa com rotas e filtros por categoria.
-- Adicionar testes automatizados.
+MVP funcional em desenvolvimento local. Integracoes com Google, Google Maps e IA externa dependem de chaves reais. A prioridade atual e consolidar a experiencia de rede publica, CRM, importacao e grafo antes de migrar para uma infraestrutura de producao com banco gerenciado e autenticacao robusta.
