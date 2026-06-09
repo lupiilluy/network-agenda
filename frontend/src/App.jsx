@@ -1,5 +1,4 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
-import * as THREE from 'three'
 import {
   Activity,
   ArrowLeft,
@@ -61,11 +60,40 @@ const ROUTES = {
   SETTINGS: '/configuracoes',
   DUPLICATES: '/duplicados',
   CRM: '/crm',
+  PUBLIC_PROFILE: '/perfil-publico',
   CONTACT: '/contato',
   NEW: '/novo',
   LOGIN: '/login',
   REGISTER: '/cadastro',
   CONNECTIONS: '/admin/conexoes',
+}
+
+const CATS = [
+  { id: 'home', label: 'Casa', col: '#10b981' },
+  { id: 'legal', label: 'Juridico', col: '#3b82f6' },
+  { id: 'business', label: 'Negocios', col: '#f59e0b' },
+  { id: 'tech', label: 'Tech', col: '#06b6d4' },
+]
+
+const CONTACTS_SEED = [
+  { id: 'c1', name: 'Joao Martins', svc: 'eletricista residencial', city: 'São Paulo', trust: 'Recomendado', src: 'Google', note: 'Emergencia e instalacao de chuveiro', cat: 'home' },
+  { id: 'c2', name: 'Mariana Costa', svc: 'advogada trabalhista', city: 'Santo Andre', trust: 'Favorito', src: 'Manual', note: 'Contratos, rescisao e PME', cat: 'legal' },
+  { id: 'c3', name: 'Renato Lima', svc: 'contador para MEI', city: 'Rio de Janeiro', trust: 'Confiavel', src: 'Importado', note: 'Abertura de empresa e DAS mensal', cat: 'business' },
+  { id: 'c4', name: 'Aline Prado', svc: 'designer de site', city: 'São Paulo', trust: 'Novo', src: 'Indicacao', note: 'Landing pages e identidade visual', cat: 'tech' },
+  { id: 'c5', name: 'Carlos Nogueira', svc: 'pintor e reformas', city: 'Osasco', trust: 'Recomendado', src: 'iCloud', note: 'Apartamento e acabamento', cat: 'home' },
+]
+
+const GROUPS_SEED = [
+  { id: 'g1', name: 'Eletricistas SP', svc: 'eletricista · manutencao', people: 42, resp: '18 min', score: 4.8, cat: 'home' },
+  { id: 'g2', name: 'Rede Juridica PME', svc: 'juridico · contratos', people: 28, resp: '1 h', score: 4.7, cat: 'legal' },
+  { id: 'g3', name: 'Casa e Reforma', svc: 'pintura · reforma', people: 67, resp: '25 min', score: 4.6, cat: 'home' },
+  { id: 'g4', name: 'Tech Negocios', svc: 'site · software · design', people: 35, resp: '45 min', score: 4.9, cat: 'tech' },
+]
+
+const TRUST_COL = { Favorito: '#f59e0b', Recomendado: '#06b6d4', Confiavel: '#10b981', Novo: '#64748b' }
+
+function catCol(id) {
+  return CATS.find((category) => category.id === id)?.col ?? '#64748b'
 }
 
 const categoryCatalog = [
@@ -338,6 +366,9 @@ const defaultUser = {
   publicInstagram: '',
   publicLinkedin: '',
   publicUrl: '',
+  googleConnected: false,
+  googleContactsImportedAt: '',
+  googleProfileSyncedAt: '',
   role: 'user',
 }
 
@@ -379,6 +410,9 @@ const adminUser = {
   publicInstagram: '',
   publicLinkedin: '',
   publicUrl: '',
+  googleConnected: false,
+  googleContactsImportedAt: '',
+  googleProfileSyncedAt: '',
   role: 'admin',
 }
 
@@ -712,6 +746,16 @@ function hasCrmActivity(contact) {
     priority === 'baixa'
 }
 
+function targetContactServiceLabel(contact) {
+  const category = contact.category ?? categoryDetails(null, contact.service)
+  if (!category?.id || category.id === generalCategory.id || isGenericService(contact.service)) return 'Sem categoria'
+  return String(contact.service || category.label || 'Sem categoria').trim() || 'Sem categoria'
+}
+
+function targetContactOptionValue(contact) {
+  return `${contact.name} · ${targetContactServiceLabel(contact)}`
+}
+
 function parseCustomFields(value) {
   if (Array.isArray(value)) return value
   try {
@@ -798,6 +842,7 @@ function parsePath() {
     [ROUTES.SETTINGS]: 'settings',
     [ROUTES.DUPLICATES]: 'duplicates',
     [ROUTES.CRM]: 'crm',
+    [ROUTES.PUBLIC_PROFILE]: 'publicProfile',
     [ROUTES.NEW]: 'new',
     [ROUTES.LOGIN]: 'login',
     [ROUTES.REGISTER]: 'register',
@@ -848,29 +893,47 @@ function getStoredSessionExpiry() {
 }
 
 function normalizeUserDraft(user) {
-  const personalAddress = composeAddress({
-    addressLine: user?.addressLine,
-    addressNumber: user?.addressNumber,
-    addressComplement: user?.addressComplement,
-    neighborhood: user?.neighborhood,
-    city: user?.city,
-    state: user?.state,
-  })
-  const serviceAddress = composeAddress({
-    addressLine: user?.serviceAddressLine,
-    addressNumber: user?.serviceAddressNumber,
-    addressComplement: user?.serviceAddressComplement,
-    neighborhood: user?.serviceNeighborhood,
-    city: user?.serviceCity,
-    state: user?.serviceState,
-  })
+  const hasPersonalAddressDetails = [user?.addressLine, user?.addressNumber, user?.addressComplement, user?.neighborhood].some(Boolean)
+  const hasServiceAddressDetails = [user?.serviceAddressLine, user?.serviceAddressNumber, user?.serviceAddressComplement, user?.serviceNeighborhood].some(Boolean)
+  const personalAddress = hasPersonalAddressDetails
+    ? composeAddress({
+        addressLine: user?.addressLine,
+        addressNumber: user?.addressNumber,
+        addressComplement: user?.addressComplement,
+        neighborhood: user?.neighborhood,
+        city: user?.city,
+        state: user?.state,
+      })
+    : ''
+  const serviceAddress = hasServiceAddressDetails
+    ? composeAddress({
+        addressLine: user?.serviceAddressLine,
+        addressNumber: user?.serviceAddressNumber,
+        addressComplement: user?.serviceAddressComplement,
+        neighborhood: user?.serviceNeighborhood,
+        city: user?.serviceCity,
+        state: user?.serviceState,
+      })
+    : ''
 
   return {
     ...defaultUser,
     ...(user ?? {}),
     id: user?.id ?? null,
     cep: formatCep(user?.cep ?? defaultUser.cep),
+    addressLine: user?.addressLine ?? (user ? '' : defaultUser.addressLine),
+    addressNumber: user?.addressNumber ?? '',
+    addressComplement: user?.addressComplement ?? '',
+    neighborhood: user?.neighborhood ?? (user ? '' : defaultUser.neighborhood),
+    city: user?.city ?? (user ? '' : defaultUser.city),
+    state: user?.state ?? (user ? '' : defaultUser.state),
     serviceCep: formatCep(user?.serviceCep ?? ''),
+    serviceAddressLine: user?.serviceAddressLine ?? '',
+    serviceAddressNumber: user?.serviceAddressNumber ?? '',
+    serviceAddressComplement: user?.serviceAddressComplement ?? '',
+    serviceNeighborhood: user?.serviceNeighborhood ?? '',
+    serviceCity: user?.serviceCity ?? '',
+    serviceState: user?.serviceState ?? '',
     address: personalAddress || user?.address || (user ? '' : defaultUser.address),
     serviceAddress: serviceAddress || user?.serviceAddress || '',
     interests: Array.isArray(user?.interests) ? user.interests : defaultUser.interests,
@@ -887,8 +950,15 @@ function normalizeUserDraft(user) {
     publicInstagram: user?.publicInstagram ?? '',
     publicLinkedin: user?.publicLinkedin ?? '',
     publicUrl: user?.publicUrl ?? '',
+    googleConnected: Boolean(user?.googleConnected),
+    googleContactsImportedAt: user?.googleContactsImportedAt ?? '',
+    googleProfileSyncedAt: user?.googleProfileSyncedAt ?? '',
     role: user?.role ?? 'user',
   }
+}
+
+function hasGoogleConnection(user) {
+  return Boolean(user?.googleConnected || user?.googleProfileSyncedAt || user?.googleContactsImportedAt)
 }
 
 function onlyDigits(value) {
@@ -982,13 +1052,25 @@ function userToApiPayload(user) {
     phone: normalized.phone,
     cep: normalized.cep,
     address: normalized.address,
+    address_line: normalized.addressLine,
+    address_number: normalized.addressNumber,
+    address_complement: normalized.addressComplement,
+    neighborhood: normalized.neighborhood,
     city: normalized.city,
     state: normalized.state,
     address_visible: normalized.addressVisible,
     interests: normalized.interests,
     is_collaborator: normalized.isCollaborator,
     offered_services: normalized.offeredServices,
+    use_different_service_address: normalized.useDifferentServiceAddress,
+    service_cep: normalized.serviceCep,
     service_address: normalized.serviceAddress,
+    service_address_line: normalized.serviceAddressLine,
+    service_address_number: normalized.serviceAddressNumber,
+    service_address_complement: normalized.serviceAddressComplement,
+    service_neighborhood: normalized.serviceNeighborhood,
+    service_city: normalized.serviceCity,
+    service_state: normalized.serviceState,
     service_address_visible: normalized.serviceAddressVisible,
     public_visible: normalized.publicVisible,
     public_description: normalized.publicDescription,
@@ -999,6 +1081,9 @@ function userToApiPayload(user) {
     public_instagram: normalized.publicInstagram,
     public_linkedin: normalized.publicLinkedin,
     public_url: normalized.publicUrl,
+    google_connected: normalized.googleConnected,
+    google_contacts_imported_at: normalized.googleContactsImportedAt,
+    google_profile_synced_at: normalized.googleProfileSyncedAt,
     role: normalized.role,
   }
 }
@@ -1014,13 +1099,25 @@ function apiUserToLocal(user) {
     phone: user.phone,
     cep: user.cep,
     address: user.address,
+    addressLine: user.address_line,
+    addressNumber: user.address_number,
+    addressComplement: user.address_complement,
+    neighborhood: user.neighborhood,
     city: user.city,
     state: user.state,
     addressVisible: user.address_visible,
     interests: user.interests,
     isCollaborator: user.is_collaborator,
     offeredServices: user.offered_services,
+    useDifferentServiceAddress: user.use_different_service_address,
+    serviceCep: user.service_cep,
     serviceAddress: user.service_address,
+    serviceAddressLine: user.service_address_line,
+    serviceAddressNumber: user.service_address_number,
+    serviceAddressComplement: user.service_address_complement,
+    serviceNeighborhood: user.service_neighborhood,
+    serviceCity: user.service_city,
+    serviceState: user.service_state,
     serviceAddressVisible: user.service_address_visible,
     publicVisible: user.public_visible,
     publicDescription: user.public_description,
@@ -1031,6 +1128,9 @@ function apiUserToLocal(user) {
     publicInstagram: user.public_instagram,
     publicLinkedin: user.public_linkedin,
     publicUrl: user.public_url,
+    googleConnected: user.google_connected,
+    googleContactsImportedAt: user.google_contacts_imported_at,
+    googleProfileSyncedAt: user.google_profile_synced_at,
     role: user.role,
   })
 }
@@ -1267,6 +1367,7 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
     { label: 'Rede pública', path: ROUTES.PUBLIC, icon: Compass, page: 'public' },
     { label: 'Duplicados', path: ROUTES.DUPLICATES, icon: CheckCircle, page: 'duplicates' },
     { label: 'Perfil', path: ROUTES.REGISTER, icon: UserRound, page: 'register' },
+    { label: 'Perfil público', path: ROUTES.PUBLIC_PROFILE, icon: UsersRound, page: 'publicProfile' },
     { label: 'Config.', path: ROUTES.SETTINGS, icon: SlidersHorizontal, page: 'settings' },
   ]
 
@@ -1284,22 +1385,98 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
 
   if (isAuthPage) {
     return (
-      <div className="min-h-screen bg-[#060d1a] text-slate-100">
+      <div className="app-shell">
         <main className="mx-auto min-w-0 max-w-6xl px-4 py-6 sm:px-6">{children}</main>
       </div>
     )
   }
 
+  const sidebarPrimary = [
+    { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: LayoutGrid, page: 'dashboard' },
+    ...primaryTabs,
+    { label: 'Rede pública', path: ROUTES.PUBLIC, icon: Compass, page: 'public' },
+  ]
+  const sidebarSecondary = [
+    { label: 'Novo contato', path: ROUTES.NEW, icon: Plus, page: 'new' },
+    { label: 'Duplicados', path: ROUTES.DUPLICATES, icon: CheckCircle, page: 'duplicates' },
+    { label: 'Perfil', path: ROUTES.REGISTER, icon: UserRound, page: 'register' },
+    { label: 'Perfil público', path: ROUTES.PUBLIC_PROFILE, icon: UsersRound, page: 'publicProfile' },
+    { label: 'Configurações', path: ROUTES.SETTINGS, icon: SlidersHorizontal, page: 'settings' },
+    ...(isAdmin ? [{ label: 'Conexões', path: ROUTES.CONNECTIONS, icon: ShieldCheck, page: 'connections' }] : []),
+  ]
+  const desktopLinkClass = (page) => [
+    'sidebar-link flex h-11 items-center gap-3 rounded-lg px-3 text-sm font-black',
+    activePage === page || (page === 'settings' && menuActive) ? 'sidebar-link-active' : '',
+  ].join(' ')
+
   return (
-    <div className="min-h-screen bg-[#060d1a] text-slate-100">
-      <header className="sticky top-0 z-40 border-b border-[#1e293b] bg-[#060d1a]/95 backdrop-blur">
+    <div className="app-shell">
+      <aside className="desktop-sidebar fixed bottom-4 left-4 top-4 z-40 hidden w-64 flex-col rounded-xl p-3 lg:flex">
+        <button type="button" onClick={() => onNavigate(ROUTES.DASHBOARD)} className="flex min-w-0 items-center gap-3 rounded-lg px-2 py-2 text-left">
+          <span className="brand-mark flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
+            <Zap size={20} />
+          </span>
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-black text-slate-100">NETWORK<span className="text-cyan-300">.AGENDA</span></span>
+            <span className="block truncate text-[11px] font-bold uppercase tracking-widest text-slate-500">Command center</span>
+          </span>
+        </button>
+
+        <div className="mt-4 rounded-lg border border-cyan-400/10 bg-cyan-400/5 p-3">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Sistema</p>
+            <Circle size={8} className={online ? 'fill-emerald-400 text-emerald-400' : 'fill-slate-400 text-slate-400'} />
+          </div>
+          <p className="mt-2 text-sm font-black text-slate-100">{online ? 'Operando online' : 'Modo local'}</p>
+          <p className="mt-1 text-xs font-semibold text-slate-500">{unread > 0 ? `${unread} novo${unread === 1 ? '' : 's'} contato${unread === 1 ? '' : 's'}` : 'Rede pronta para busca'}</p>
+        </div>
+
+        <nav className="mt-4 grid gap-1">
+          {sidebarPrimary.map((tab) => (
+            <button key={tab.path} type="button" onClick={() => go(tab.path)} className={desktopLinkClass(tab.page)}>
+              <tab.icon size={18} className="shrink-0" />
+              <span className="truncate">{tab.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="my-4 h-px bg-slate-800/70" />
+
+        <nav className="grid gap-1">
+          {sidebarSecondary.map((tab) => (
+            <button key={tab.path} type="button" onClick={() => go(tab.path)} className={desktopLinkClass(tab.page === 'duplicates' || tab.page === 'register' ? 'settings' : tab.page)}>
+              <tab.icon size={18} className="shrink-0" />
+              <span className="truncate">{tab.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="mt-auto rounded-lg border border-slate-800/80 bg-slate-950/35 p-3">
+          <button type="button" onClick={() => onNavigate(ROUTES.SETTINGS)} className="flex w-full min-w-0 items-center gap-3 text-left">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-cyan-400/10 text-sm font-black text-cyan-100">{initials(user?.name ?? 'EU')}</span>
+            <span className="min-w-0">
+              <span className="block truncate text-sm font-black text-slate-100">{user?.name ?? 'Entrar'}</span>
+              <span className="block truncate text-xs font-semibold text-slate-500">{user?.email ?? 'Conta local'}</span>
+            </span>
+          </button>
+          {user ? (
+            <button type="button" onClick={onLogout} className="secondary-button mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg text-xs font-black">
+              <LogOut size={15} />
+              Sair
+            </button>
+          ) : null}
+        </div>
+      </aside>
+
+      <div className="min-h-screen lg:pl-[18rem]">
+        <header className="app-header sticky top-0 z-40 lg:hidden">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-3 px-4 sm:h-16 sm:px-6">
           <button type="button" onClick={() => onNavigate(ROUTES.DASHBOARD)} className="flex min-w-0 items-center gap-2">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-cyan-500/40 bg-cyan-500/10 text-cyan-300">
+            <span className="brand-mark flex h-9 w-9 shrink-0 items-center justify-center rounded-lg">
               <Zap size={19} />
             </span>
-            <span className="truncate text-sm font-black tracking-normal">
-              NETWORK<span className="text-cyan-400">.AGENDA</span>
+            <span className="truncate text-sm font-black tracking-normal text-slate-100">
+              NETWORK<span className="text-cyan-300">.AGENDA</span>
             </span>
           </button>
 
@@ -1310,8 +1487,8 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
                 type="button"
                 onClick={() => go(tab.path)}
                 className={[
-                  'inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-bold transition',
-                  activePage === tab.page ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 hover:bg-slate-900 hover:text-cyan-300',
+                  'inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-bold',
+                  activePage === tab.page ? 'nav-pill-active' : 'nav-pill',
                 ].join(' ')}
               >
                 <tab.icon size={17} />
@@ -1323,21 +1500,21 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
                 type="button"
                 onClick={() => setMenuOpen((current) => !current)}
                 className={[
-                  'inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-bold transition',
-                  menuActive ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 hover:bg-slate-900 hover:text-cyan-300',
+                  'inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-bold',
+                  menuActive ? 'nav-pill-active' : 'nav-pill',
                 ].join(' ')}
               >
                 <Menu size={17} />
                 Menu
               </button>
               {menuOpen ? (
-                <div className="absolute right-0 top-12 z-50 w-56 overflow-hidden rounded-lg border border-slate-800 bg-[#0d1a2e] p-1.5 shadow-2xl shadow-black/40">
+                <div className="glass-panel absolute right-0 top-12 z-50 w-56 overflow-hidden rounded-lg p-1.5">
                   {menuTabs.map((tab) => (
                     <button
                       key={tab.path}
                       type="button"
                       onClick={() => go(tab.path)}
-                      className="flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-sm font-bold text-slate-300 hover:bg-slate-900 hover:text-cyan-300"
+                      className="flex h-10 w-full items-center gap-2 rounded-lg px-3 text-left text-sm font-bold text-slate-300 hover:bg-cyan-500/10 hover:text-cyan-200"
                     >
                       <tab.icon size={17} />
                       {tab.label}
@@ -1349,44 +1526,60 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
           </nav>
 
           <div className="flex items-center gap-2">
-            <span className="hidden items-center gap-2 rounded-lg border border-slate-800 bg-[#0d1a2e] px-2.5 py-1.5 text-xs font-bold text-slate-400 sm:inline-flex">
+            <span className="glass-panel-soft hidden items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-400 sm:inline-flex">
               <Circle size={9} className={online ? 'fill-emerald-500 text-emerald-500' : 'fill-slate-300 text-slate-300'} />
               {online ? 'online' : 'offline'}
             </span>
-            <button type="button" className="relative rounded-lg border border-slate-800 bg-[#0d1a2e] p-2 text-slate-400" aria-label="Atividade">
+            <button type="button" className="secondary-button relative rounded-lg p-2 text-slate-400" aria-label="Atividade">
               <Bell size={18} />
               {unread > 0 ? <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-cyan-500 px-1 text-[10px] font-black text-white">{unread}</span> : null}
             </button>
             <button
               type="button"
               onClick={() => onNavigate(user ? ROUTES.SETTINGS : ROUTES.LOGIN)}
-              className="hidden h-10 items-center gap-2 rounded-lg border border-slate-800 bg-[#0d1a2e] px-2.5 text-sm font-bold text-slate-300 sm:inline-flex"
+              className="secondary-button hidden h-10 items-center gap-2 rounded-lg px-2.5 text-sm font-bold sm:inline-flex"
             >
-              <span className="flex h-7 w-7 items-center justify-center rounded-md bg-slate-900 text-xs font-black">{initials(user?.name ?? 'EU')}</span>
+              <span className="flex h-7 w-7 items-center justify-center rounded-md bg-cyan-500/10 text-xs font-black text-cyan-200">{initials(user?.name ?? 'EU')}</span>
               {user?.name ?? 'Entrar'}
             </button>
             {user ? (
-              <button type="button" onClick={onLogout} className="hidden rounded-lg border border-slate-800 bg-[#0d1a2e] p-2 text-slate-400 sm:inline-flex" aria-label="Sair">
+              <button type="button" onClick={onLogout} className="secondary-button hidden rounded-lg p-2 text-slate-400 sm:inline-flex" aria-label="Sair">
                 <LogOut size={18} />
               </button>
             ) : null}
           </div>
         </div>
-      </header>
+        </header>
 
-      <main className="mx-auto min-w-0 max-w-6xl px-4 pb-24 pt-4 sm:px-6 sm:pb-10 sm:pt-6">{children}</main>
+        <main className="mx-auto min-w-0 max-w-[1380px] px-4 pb-24 pt-4 sm:px-6 sm:pb-10 sm:pt-6 lg:px-8 lg:py-6">
+          <div className="workspace-bar mb-5 hidden items-center justify-between rounded-xl px-4 py-3 lg:flex">
+            <div>
+              <p className="text-[11px] font-black uppercase tracking-[0.28em] text-cyan-200">Workspace</p>
+              <p className="mt-1 text-sm font-black text-slate-100">Rede privada, CRM e descoberta pública em uma única visão.</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="rounded-lg border border-slate-800/80 bg-slate-950/40 px-3 py-2 text-xs font-black text-slate-400">{online ? 'API conectada' : 'API offline'}</span>
+              <button type="button" onClick={() => onNavigate(ROUTES.CHAT)} className="primary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+                <Sparkles size={16} />
+                Copiloto
+              </button>
+            </div>
+          </div>
+          {children}
+        </main>
+      </div>
 
       {!isAuthPage ? (
         <>
           {menuOpen ? (
-            <div className="fixed inset-x-3 bottom-20 z-50 overflow-hidden rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-2 shadow-2xl shadow-black/40 md:hidden">
+            <div className="glass-panel fixed inset-x-3 bottom-20 z-50 overflow-hidden rounded-lg p-2 md:hidden">
               <div className="grid grid-cols-2 gap-2">
                 {menuTabs.map((tab) => (
                   <button
                     key={tab.path}
                     type="button"
                     onClick={() => go(tab.path)}
-                    className="flex h-12 min-w-0 items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/35 px-3 text-left text-xs font-black text-slate-300"
+                    className="action-card flex h-12 min-w-0 items-center gap-2 rounded-lg px-3 text-left text-xs font-black text-slate-300"
                   >
                     <tab.icon size={17} className="shrink-0 text-cyan-300" />
                     <span className="truncate">{tab.label}</span>
@@ -1395,7 +1588,7 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
               </div>
             </div>
           ) : null}
-          <nav className="fixed inset-x-3 bottom-3 z-40 grid grid-cols-5 rounded-lg border border-[#1e293b] bg-[#0d1a2e]/95 p-1.5 shadow-lg shadow-black/30 backdrop-blur md:hidden">
+          <nav className="glass-panel fixed inset-x-3 bottom-3 z-40 grid grid-cols-5 rounded-lg p-1.5 md:hidden">
             {primaryTabs.map((tab) => (
               <button
                 key={tab.path}
@@ -1403,7 +1596,7 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
                 onClick={() => go(tab.path)}
                 className={[
                   'flex h-12 min-w-0 flex-col items-center justify-center gap-0.5 rounded-lg text-[11px] font-bold transition',
-                  activePage === tab.page ? 'bg-cyan-500 text-slate-950' : 'text-slate-400',
+                  activePage === tab.page ? 'nav-pill-active' : 'text-slate-400',
                 ].join(' ')}
               >
                 <tab.icon size={18} />
@@ -1415,7 +1608,7 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
               onClick={() => setMenuOpen((current) => !current)}
               className={[
                 'flex h-12 min-w-0 flex-col items-center justify-center gap-0.5 rounded-lg text-[11px] font-bold transition',
-                menuActive ? 'bg-cyan-500 text-slate-950' : 'text-slate-400',
+                menuActive ? 'nav-pill-active' : 'text-slate-400',
               ].join(' ')}
             >
               <Menu size={18} />
@@ -1460,7 +1653,7 @@ function SearchBox({ value, onChange, onSearch, recents, contacts, onFocusChange
 
   return (
     <div ref={boxRef} className="relative min-w-0">
-      <div className="flex min-w-0 items-center gap-2 rounded-lg border border-slate-800 bg-[#0d1a2e] px-3 shadow-sm focus-within:border-cyan-500">
+      <div className="glass-panel flex min-w-0 items-center gap-2 rounded-lg px-3 focus-within:border-cyan-400">
         <Search size={19} className="shrink-0 text-slate-500" />
         <input
           value={value}
@@ -1492,7 +1685,7 @@ function SearchBox({ value, onChange, onSearch, recents, contacts, onFocusChange
       </div>
 
       {focused ? (
-        <div className="absolute left-0 right-0 top-[calc(100%+8px)] z-30 overflow-hidden rounded-lg border border-slate-800 bg-[#0d1a2e] shadow-xl shadow-black/30">
+        <div className="glass-panel absolute left-0 right-0 top-[calc(100%+8px)] z-30 overflow-hidden rounded-lg">
           {!typed ? (
             <div className="border-b border-slate-800 p-3">
             <p className="mb-2 text-xs font-black uppercase tracking-widest text-slate-500">Recentes</p>
@@ -1546,11 +1739,11 @@ function SearchBox({ value, onChange, onSearch, recents, contacts, onFocusChange
 
 function PageTitle({ eyebrow, title, description, action }) {
   return (
-    <div className="mb-4 flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+    <div className="mb-5 flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div className="min-w-0">
-        {eyebrow ? <p className="text-xs font-black uppercase tracking-widest text-cyan-400">{eyebrow}</p> : null}
-        <h1 className="mt-1 text-2xl font-black tracking-normal text-slate-100 sm:text-3xl">{title}</h1>
-        {description ? <p className="mt-1 max-w-2xl break-words text-sm font-medium text-slate-500">{description}</p> : null}
+        {eyebrow ? <p className="text-xs font-black uppercase tracking-widest text-cyan-300">{eyebrow}</p> : null}
+        <h1 className="constellation-title mt-1 text-2xl font-black tracking-normal sm:text-3xl">{title}</h1>
+        {description ? <p className="text-balance mt-2 max-w-2xl break-words text-sm font-medium text-slate-400">{description}</p> : null}
       </div>
       {action}
     </div>
@@ -1573,8 +1766,8 @@ function CategoryButtons({ contacts, activeCategory = 'all', onNavigate, onSelec
         type="button"
         onClick={() => (onSelect ? onSelect('all') : onNavigate('/categoria/all'))}
         className={[
-          'flex min-h-20 min-w-0 flex-col justify-between rounded-lg border p-3 text-left transition',
-          activeCategory === 'all' ? 'border-cyan-500 bg-cyan-500/10 text-cyan-200' : 'border-[#1e293b] bg-[#0d1a2e] text-slate-300 hover:border-cyan-500/50',
+          'flex min-h-20 min-w-0 flex-col justify-between rounded-lg p-3 text-left',
+          activeCategory === 'all' ? 'nav-pill-active' : 'action-card text-slate-300',
         ].join(' ')}
       >
         <LayoutGrid size={18} />
@@ -1598,8 +1791,8 @@ function CategoryButton({ category, count, active, onNavigate, onSelect }) {
       type="button"
       onClick={() => (onSelect ? onSelect(category.id) : onNavigate(`/categoria/${category.id}`))}
       className={[
-        'flex min-h-20 min-w-0 flex-col justify-between rounded-lg border p-3 text-left transition',
-        active ? 'border-cyan-500 bg-cyan-500/10 text-cyan-200' : 'border-[#1e293b] bg-[#0d1a2e] text-slate-300 hover:border-cyan-500/50',
+        'flex min-h-20 min-w-0 flex-col justify-between rounded-lg p-3 text-left',
+        active ? 'nav-pill-active' : 'action-card text-slate-300',
       ].join(' ')}
     >
       <Icon size={18} style={{ color: category.color }} />
@@ -1614,7 +1807,7 @@ function CategoryButton({ category, count, active, onNavigate, onSelect }) {
 function ContactAvatar({ contact }) {
   const category = contact.category ?? classifyService(contact.service)
   return (
-    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-black text-white sm:h-11 sm:w-11" style={{ backgroundColor: category.color }}>
+    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-black text-white shadow-lg shadow-black/25 ring-1 ring-white/10 sm:h-11 sm:w-11" style={{ backgroundColor: category.color }}>
       {initials(contact.name)}
     </span>
   )
@@ -1640,7 +1833,7 @@ function ContactRow({ contact, onDelete, onToast, onEdit, onOpen }) {
   }
 
   return (
-    <article className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 border-b border-slate-800 bg-[#0d1a2e] px-3 py-3 last:border-b-0 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:gap-3 sm:px-4">
+    <article className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 border-b border-slate-800/70 bg-transparent px-3 py-3 transition hover:bg-cyan-500/[0.035] last:border-b-0 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:gap-3 sm:px-4">
       <ContactAvatar contact={contact} />
       <button type="button" onClick={() => (onOpen ? onOpen(contact) : onEdit(contact))} className="min-w-0 flex-1 text-left" aria-label={`Abrir ${contact.name}`}>
         <div className="flex items-center gap-2">
@@ -1649,21 +1842,21 @@ function ContactRow({ contact, onDelete, onToast, onEdit, onOpen }) {
         </div>
         <p className="truncate text-sm font-semibold text-slate-400">{contact.service}</p>
         <p className="truncate text-xs font-medium text-slate-500">{contact.phone} - {contact.city}</p>
-        <span className="mt-1 inline-flex max-w-full items-center gap-1 rounded-md bg-slate-950/60 px-2 py-0.5 text-[11px] font-black text-slate-400">
+        <span className="mt-1 inline-flex max-w-full items-center gap-1 rounded-md bg-slate-950/60 px-2 py-0.5 text-[11px] font-black text-cyan-100/75">
           {contact.crm_status ?? 'Novo'}{contact.next_follow_up_at ? ` · ${formatFollowUp(contact.next_follow_up_at)}` : ''}
         </span>
       </button>
       <div className="hidden shrink-0 items-center gap-1 sm:flex">
-        <button type="button" onClick={() => onEdit(contact)} className="rounded-lg bg-slate-900 p-2 text-slate-300" aria-label={`Editar ${contact.name}`}>
+        <button type="button" onClick={() => onEdit(contact)} className="secondary-button rounded-lg p-2 text-slate-300" aria-label={`Editar ${contact.name}`}>
           <Pencil size={16} />
         </button>
-        <button type="button" onClick={callContact} className="rounded-lg bg-slate-900 p-2 text-slate-300" aria-label={`Ligar para ${contact.name}`}>
+        <button type="button" onClick={callContact} className="secondary-button rounded-lg p-2 text-slate-300" aria-label={`Ligar para ${contact.name}`}>
           <Phone size={17} />
         </button>
-        <button type="button" onClick={openWhatsApp} className="rounded-lg bg-emerald-50 p-2 text-emerald-700" aria-label={`WhatsApp de ${contact.name}`}>
+        <button type="button" onClick={openWhatsApp} className="rounded-lg border border-emerald-400/25 bg-emerald-400/10 p-2 text-emerald-200" aria-label={`WhatsApp de ${contact.name}`}>
           <MessageCircle size={17} />
         </button>
-        <button type="button" onClick={() => onDelete(contact.id)} className="hidden rounded-lg bg-rose-50 p-2 text-rose-700 sm:inline-flex" aria-label={`Remover ${contact.name}`}>
+        <button type="button" onClick={() => onDelete(contact.id)} className="hidden rounded-lg border border-rose-400/25 bg-rose-400/10 p-2 text-rose-200 sm:inline-flex" aria-label={`Remover ${contact.name}`}>
           <X size={17} />
         </button>
       </div>
@@ -1688,7 +1881,7 @@ function ContactList({ contacts, onDelete, onToast, onEdit = () => {}, onOpen, e
   const letters = Object.keys(grouped).sort()
   if (!letters.length) {
     return (
-      <div className="rounded-lg border border-dashed border-slate-800 bg-[#0d1a2e] p-8 text-center">
+      <div className="glass-panel rounded-lg border-dashed p-8 text-center">
         <ContactRound className="mx-auto text-slate-700" size={34} />
         <p className="mt-3 text-sm font-black text-slate-200">{emptyLabel}</p>
       </div>
@@ -1696,10 +1889,10 @@ function ContactList({ contacts, onDelete, onToast, onEdit = () => {}, onOpen, e
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border border-[#1e293b] bg-[#0d1a2e]">
+    <div className="glass-panel overflow-hidden rounded-lg">
       {letters.map((letter) => (
         <section key={letter}>
-          <div className="border-b border-slate-800 bg-[#08111f] px-4 py-1.5 text-xs font-black text-slate-500">{letter}</div>
+          <div className="border-b border-slate-800/70 bg-slate-950/45 px-4 py-1.5 text-xs font-black text-slate-500">{letter}</div>
           {grouped[letter].map((contact) => (
             <ContactRow key={contact.id} contact={contact} onDelete={onDelete} onToast={onToast} onEdit={onEdit} onOpen={onOpen} />
           ))}
@@ -1740,7 +1933,7 @@ function CrmPage({ contacts, onEdit, onCompleteFollowUp, onCancelFollowUp, onNav
         title="Relacionamentos e follow-ups"
         description="Acompanhe conversas, oportunidades e próximos contatos da sua rede."
         action={
-          <button type="button" onClick={() => onNavigate(ROUTES.NEW)} className="inline-flex h-10 items-center gap-2 rounded-lg bg-cyan-500 px-3 text-sm font-black text-slate-950">
+          <button type="button" onClick={() => onNavigate(ROUTES.NEW)} className="primary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
             <Plus size={17} />
             Novo contato
           </button>
@@ -1755,7 +1948,7 @@ function CrmPage({ contacts, onEdit, onCompleteFollowUp, onCancelFollowUp, onNav
         <CrmMetric label="Alta prioridade" value={highPriority.length} tone={highPriority.length ? 'text-rose-300' : 'text-slate-100'} />
       </section>
 
-      <section className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-2.5">
+      <section className="glass-panel rounded-lg p-2.5">
         <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_280px]">
           <div className="flex gap-2 overflow-x-auto pb-1 thin-scrollbar">
             {scopeOptions.map((option) => {
@@ -1767,7 +1960,7 @@ function CrmPage({ contacts, onEdit, onCompleteFollowUp, onCancelFollowUp, onNav
                   onClick={() => setScope(option.id)}
                   className={[
                     'min-w-[136px] rounded-lg border px-3 py-2 text-left transition',
-                    active ? 'border-cyan-400 bg-cyan-500/10 text-cyan-100' : 'border-slate-800 bg-slate-950/30 text-slate-300 hover:border-slate-700',
+                    active ? 'nav-pill-active' : 'action-card text-slate-300',
                   ].join(' ')}
                 >
                   <span className="flex items-center justify-between gap-2">
@@ -1796,7 +1989,7 @@ function CrmPage({ contacts, onEdit, onCompleteFollowUp, onCancelFollowUp, onNav
           {crmStages.map((stage) => {
             const stageContacts = visibleContacts.filter((contact) => effectiveCrmStatus(contact) === stage.id)
             return (
-              <div key={stage.id} className="w-[280px] shrink-0 rounded-lg border border-[#1e293b] bg-[#0d1a2e] md:w-[300px]">
+              <div key={stage.id} className="glass-panel w-[280px] shrink-0 rounded-lg md:w-[300px]">
                 <div className="flex h-10 items-center justify-between border-b border-slate-800 px-3">
                   <span className="flex items-center gap-2 text-sm font-black text-slate-100">
                     <Circle size={10} className="fill-current" style={{ color: stage.color }} />
@@ -1817,19 +2010,19 @@ function CrmPage({ contacts, onEdit, onCompleteFollowUp, onCancelFollowUp, onNav
         </div>
 
         <aside className="grid gap-3 lg:grid-cols-3">
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e]">
+          <div className="glass-panel rounded-lg">
             <div className="border-b border-slate-800 px-3 py-2">
               <h2 className="text-sm font-black text-slate-100">Próximos follow-ups</h2>
             </div>
             <div className="grid max-h-[260px] gap-2 overflow-auto p-2 thin-scrollbar">
-              {followUpContacts.length ? followUpContacts.slice(0, 8).map((contact) => <CrmContactCard key={contact.id} contact={contact} onEdit={onEdit} onCompleteFollowUp={onCompleteFollowUp} onCancelFollowUp={onCancelFollowUp} compact />) : <p className="p-2 text-sm font-semibold text-slate-500">Nenhum follow-up marcado.</p>}
+              {followUpContacts.length ? followUpContacts.map((contact) => <CrmContactCard key={contact.id} contact={contact} onEdit={onEdit} onCompleteFollowUp={onCompleteFollowUp} onCancelFollowUp={onCancelFollowUp} compact />) : <p className="p-2 text-sm font-semibold text-slate-500">Nenhum follow-up marcado.</p>}
             </div>
           </div>
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+          <div className="glass-panel rounded-lg p-4">
             <h2 className="text-sm font-black text-slate-100">Fluxo recomendado</h2>
             <p className="mt-2 text-sm font-medium text-slate-500">Abra um contato e registre status, prioridade, último contato e próxima data. A lista de follow-ups passa a ordenar sua rotina.</p>
           </div>
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+          <div className="glass-panel rounded-lg p-4">
             <div className="flex items-center gap-2">
               <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-300">
                 <Sparkles size={18} />
@@ -1845,13 +2038,13 @@ function CrmPage({ contacts, onEdit, onCompleteFollowUp, onCancelFollowUp, onNav
                 'Quais contatos estão sem tags?',
                 'Sugira oportunidades entre meus contatos.',
               ].map((prompt) => (
-                <button key={prompt} type="button" onClick={() => askCrm(prompt)} disabled={isThinking} className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-left text-xs font-black text-slate-300 disabled:cursor-not-allowed disabled:opacity-60">
+                <button key={prompt} type="button" onClick={() => askCrm(prompt)} disabled={isThinking} className="action-card rounded-lg px-3 py-2 text-left text-xs font-black text-slate-300 disabled:cursor-not-allowed disabled:opacity-60">
                   {prompt}
                 </button>
               ))}
             </div>
-            {lastAssistant ? <p className="mt-3 line-clamp-5 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-xs font-semibold leading-relaxed text-slate-400">{lastAssistant.text}</p> : null}
-            <button type="button" onClick={() => onNavigate(ROUTES.CHAT)} className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg bg-slate-950 text-xs font-black text-slate-200">
+            {lastAssistant ? <p className="glass-panel-soft mt-3 line-clamp-5 rounded-lg p-3 text-xs font-semibold leading-relaxed text-slate-400">{lastAssistant.text}</p> : null}
+            <button type="button" onClick={() => onNavigate(ROUTES.CHAT)} className="secondary-button mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg text-xs font-black">
               Abrir chat completo
             </button>
           </div>
@@ -1863,7 +2056,7 @@ function CrmPage({ contacts, onEdit, onCompleteFollowUp, onCancelFollowUp, onNav
 
 function CrmMetric({ label, value, tone = 'text-slate-100' }) {
   return (
-    <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-3">
+    <div className="metric-card rounded-lg p-3">
       <p className="text-[11px] font-black uppercase tracking-widest text-slate-500">{label}</p>
       <p className={`mt-1 text-xl font-black ${tone}`}>{value}</p>
     </div>
@@ -1879,7 +2072,7 @@ function CrmContactCard({ contact, onEdit, onCompleteFollowUp, onCancelFollowUp,
   const hasConversation = status === 'Conversa iniciada'
   const showActions = hasFollowUp || hasConversation
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-2.5 text-left hover:border-cyan-500/50">
+    <div className="action-card rounded-lg p-2.5 text-left">
       <button type="button" onClick={() => onEdit(contact)} className="w-full text-left">
         <div className="flex items-start gap-2">
           <span className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: stage.color }} />
@@ -1949,6 +2142,103 @@ function DashboardPage({ contacts, duplicateCount, backendOnline, onNavigate, on
     .sort((a, b) => b.count - a.count)
     .slice(0, 6)
   const recentContacts = contacts.slice(0, 6)
+  const topCategory = categoryStats[0]
+  const nextFollowUp = followUps[0]
+  const graphInsights = [
+    {
+      id: 'agenda',
+      shortLabel: 'Agenda',
+      label: 'Agenda',
+      value: total,
+      helper: `${tagged.length} com tags`,
+      detail: total ? `${untagged.length} contato${untagged.length === 1 ? '' : 's'} ainda precisam de tags.` : 'Importe contatos para iniciar a rede.',
+      tone: 'cyan',
+      icon: ContactRound,
+      x: 50,
+      y: 49,
+      actionLabel: 'Ver agenda',
+      route: ROUTES.AGENDA,
+    },
+    {
+      id: 'crm',
+      shortLabel: 'CRM',
+      label: 'CRM',
+      value: activeCrm.length,
+      helper: `${highPriority.length} alta prioridade`,
+      detail: activeCrm.length ? 'Há conversas, status ou follow-ups em andamento.' : 'Nenhum contato entrou no pipeline ainda.',
+      tone: 'emerald',
+      icon: Activity,
+      x: 21,
+      y: 29,
+      actionLabel: 'Abrir CRM',
+      route: ROUTES.CRM,
+    },
+    {
+      id: 'followups',
+      shortLabel: 'F-ups',
+      label: 'Follow-ups',
+      value: followUps.length,
+      helper: dueFollowUps.length ? `${dueFollowUps.length} vencido${dueFollowUps.length === 1 ? '' : 's'}` : nextFollowUp ? formatFollowUp(nextFollowUp.next_follow_up_at) : 'nenhum marcado',
+      detail: dueFollowUps.length ? 'Priorize os vencidos antes de abrir novas conversas.' : 'O calendário de relacionamento está sob controle.',
+      tone: 'amber',
+      icon: Bell,
+      x: 76,
+      y: 28,
+      actionLabel: 'Revisar',
+      route: ROUTES.CRM,
+    },
+    {
+      id: 'categorias',
+      shortLabel: 'Cat.',
+      label: 'Categorias',
+      value: categoryStats.length,
+      helper: topCategory?.label ?? 'sem categoria forte',
+      detail: topCategory ? `${topCategory.count} contato${topCategory.count === 1 ? '' : 's'} em ${topCategory.label}.` : 'Categorias aparecem quando os contatos são classificados.',
+      tone: 'blue',
+      icon: LayoutGrid,
+      x: 28,
+      y: 76,
+      actionLabel: 'Explorar',
+      route: ROUTES.AGENDA,
+    },
+    {
+      id: 'qualidade',
+      shortLabel: 'Qual.',
+      label: 'Qualidade',
+      value: duplicateCount,
+      helper: duplicateCount ? 'duplicados' : 'sem alertas',
+      detail: duplicateCount ? 'Aprovar mesclas melhora busca, CRM e mapa.' : 'Nenhum duplicado pendente agora.',
+      tone: 'rose',
+      icon: ShieldCheck,
+      x: 80,
+      y: 72,
+      actionLabel: duplicateCount ? 'Resolver' : 'Conferir',
+      route: ROUTES.DUPLICATES,
+    },
+  ]
+  const flowSteps = [
+    {
+      label: '1. Limpar base',
+      value: `${untagged.length + duplicateCount}`,
+      helper: 'sem tags ou duplicados',
+      icon: ShieldCheck,
+      route: duplicateCount ? ROUTES.DUPLICATES : ROUTES.AGENDA,
+    },
+    {
+      label: '2. Priorizar CRM',
+      value: `${activeCrm.length}`,
+      helper: `${highPriority.length} alta prioridade`,
+      icon: Activity,
+      route: ROUTES.CRM,
+    },
+    {
+      label: '3. Expandir rede',
+      value: 'Mapa',
+      helper: topCategory?.label ?? 'categoria ou proximidade',
+      icon: Route,
+      route: ROUTES.MAP,
+    },
+  ]
 
   function askDashboard(prompt) {
     if (isThinking) return
@@ -1964,11 +2254,11 @@ function DashboardPage({ contacts, duplicateCount, backendOnline, onNavigate, on
         description="Acompanhe volume, organização, pendências de CRM e oportunidades de revisão."
         action={
           <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={() => onNavigate(ROUTES.NEW)} className="inline-flex h-10 items-center gap-2 rounded-lg bg-cyan-500 px-3 text-sm font-black text-slate-950">
+            <button type="button" onClick={() => onNavigate(ROUTES.NEW)} className="primary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
               <Plus size={17} />
               Novo contato
             </button>
-            <button type="button" onClick={() => onNavigate(ROUTES.CHAT)} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-800 bg-[#0d1a2e] px-3 text-sm font-black text-slate-300">
+            <button type="button" onClick={() => onNavigate(ROUTES.CHAT)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
               <MessageCircle size={17} />
               Abrir chat
             </button>
@@ -1976,17 +2266,50 @@ function DashboardPage({ contacts, duplicateCount, backendOnline, onNavigate, on
         }
       />
 
-      <section className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-        <DashboardMetric label="Contatos" value={total} helper={`${tagged.length} com tags`} />
-        <DashboardMetric label="CRM ativo" value={activeCrm.length} helper="Status, prioridade ou follow-up" />
-        <DashboardMetric label="Follow-ups" value={followUps.length} helper={`${dueFollowUps.length} vencidos`} tone={dueFollowUps.length ? 'text-amber-300' : 'text-slate-100'} />
-        <DashboardMetric label="Sem tags" value={untagged.length} helper="Para revisar" tone={untagged.length ? 'text-amber-300' : 'text-slate-100'} />
-        <DashboardMetric label="Duplicados" value={duplicateCount} helper="Sugestões pendentes" tone={duplicateCount ? 'text-rose-300' : 'text-slate-100'} />
+      <section className="command-hero rounded-xl p-5 sm:p-6">
+        <div className="command-ring" />
+        <div className="relative z-10 grid gap-6 lg:grid-cols-[minmax(0,1fr)_460px] lg:items-stretch">
+          <div className="flex min-h-full flex-col justify-end">
+            <p className="text-xs font-black uppercase tracking-[0.34em] text-cyan-200">Command center</p>
+            <h2 className="mt-3 max-w-2xl text-3xl font-black leading-tight text-slate-100 sm:text-4xl">
+              Sua rede virando uma base de oportunidades pesquisável.
+            </h2>
+            <p className="mt-3 max-w-xl text-sm font-medium leading-6 text-slate-400">
+              Priorize follow-ups, encontre pessoas por contexto e transforme contatos soltos em relacionamento acionável.
+            </p>
+            <div className="mt-5 flex flex-wrap gap-2">
+              <button type="button" onClick={() => onNavigate(ROUTES.CRM)} className="primary-button inline-flex h-11 items-center gap-2 rounded-lg px-4 text-sm font-black">
+                <Activity size={17} />
+                Abrir pipeline
+              </button>
+              <button type="button" onClick={() => askDashboard('Onde há oportunidade na minha rede?')} disabled={isThinking} className="secondary-button inline-flex h-11 items-center gap-2 rounded-lg px-4 text-sm font-black disabled:opacity-60">
+                <Sparkles size={17} />
+                Mapear oportunidade
+              </button>
+            </div>
+            <div className="mt-5 grid gap-2 sm:grid-cols-3">
+              {flowSteps.map((step) => {
+                const Icon = step.icon
+                return (
+                  <button key={step.label} type="button" onClick={() => onNavigate(step.route)} className="dashboard-flow-card rounded-lg p-3 text-left">
+                    <span className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                      <Icon size={14} className="text-cyan-300" />
+                      {step.label}
+                    </span>
+                    <span className="mt-2 block truncate text-lg font-black text-slate-100">{step.value}</span>
+                    <span className="mt-1 block truncate text-xs font-semibold text-slate-500">{step.helper}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+          <DashboardNetworkGraph insights={graphInsights} onNavigate={onNavigate} />
+        </div>
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
         <div className="space-y-4">
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e]">
+          <div className="glass-panel rounded-lg">
             <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
               <h2 className="text-sm font-black text-slate-100">Próximos movimentos</h2>
               <span className={['rounded-md px-2 py-1 text-[11px] font-black', backendOnline ? 'bg-emerald-500/10 text-emerald-300' : 'bg-amber-500/10 text-amber-300'].join(' ')}>
@@ -2001,7 +2324,7 @@ function DashboardPage({ contacts, duplicateCount, backendOnline, onNavigate, on
             </div>
           </div>
 
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e]">
+          <div className="glass-panel rounded-lg">
             <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
               <h2 className="text-sm font-black text-slate-100">Categorias fortes</h2>
               <button type="button" onClick={() => onNavigate(ROUTES.AGENDA)} className="text-xs font-black text-cyan-300">Ver agenda</button>
@@ -2011,7 +2334,7 @@ function DashboardPage({ contacts, duplicateCount, backendOnline, onNavigate, on
                 const Icon = category.icon
                 const width = total ? Math.max(8, Math.round((category.count / total) * 100)) : 0
                 return (
-                  <article key={category.id} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+                  <article key={category.id} className="action-card rounded-lg p-3">
                     <div className="flex items-center justify-between gap-2">
                       <span className="flex min-w-0 items-center gap-2">
                         <Icon size={17} style={{ color: category.color }} />
@@ -2030,13 +2353,13 @@ function DashboardPage({ contacts, duplicateCount, backendOnline, onNavigate, on
         </div>
 
         <aside className="space-y-4">
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e]">
+          <div className="glass-panel rounded-lg">
             <div className="border-b border-slate-800 px-4 py-3">
               <h2 className="text-sm font-black text-slate-100">Follow-ups</h2>
             </div>
             <div className="grid max-h-[300px] gap-2 overflow-auto p-3 thin-scrollbar">
               {followUps.length ? followUps.slice(0, 6).map((contact) => (
-                <button key={contact.id} type="button" onClick={() => onNavigate(ROUTES.CRM)} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3 text-left">
+                <button key={contact.id} type="button" onClick={() => onNavigate(ROUTES.CRM)} className="action-card rounded-lg p-3 text-left">
                   <span className="block truncate text-sm font-black text-slate-100">{contact.name}</span>
                   <span className={['mt-1 inline-flex rounded-md px-2 py-0.5 text-[11px] font-black', isDue(contact.next_follow_up_at) ? 'bg-amber-500/15 text-amber-200' : 'bg-slate-900 text-slate-400'].join(' ')}>
                     {formatFollowUp(contact.next_follow_up_at)}
@@ -2046,7 +2369,7 @@ function DashboardPage({ contacts, duplicateCount, backendOnline, onNavigate, on
             </div>
           </div>
 
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+          <div className="glass-panel rounded-lg p-4">
             <div className="flex items-center gap-2">
               <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-300">
                 <Sparkles size={18} />
@@ -2062,14 +2385,14 @@ function DashboardPage({ contacts, duplicateCount, backendOnline, onNavigate, on
                 'Quais contatos estão sem tags?',
                 'Onde há oportunidade na minha rede?',
               ].map((prompt) => (
-                <button key={prompt} type="button" onClick={() => askDashboard(prompt)} disabled={isThinking} className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-left text-xs font-black text-slate-300 disabled:cursor-not-allowed disabled:opacity-60">
+                <button key={prompt} type="button" onClick={() => askDashboard(prompt)} disabled={isThinking} className="action-card rounded-lg px-3 py-2 text-left text-xs font-black text-slate-300 disabled:cursor-not-allowed disabled:opacity-60">
                   {prompt}
                 </button>
               ))}
             </div>
           </div>
 
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e]">
+          <div className="glass-panel rounded-lg">
             <div className="border-b border-slate-800 px-4 py-3">
               <h2 className="text-sm font-black text-slate-100">Recentes</h2>
             </div>
@@ -2088,9 +2411,106 @@ function DashboardPage({ contacts, duplicateCount, backendOnline, onNavigate, on
   )
 }
 
+function DashboardNetworkGraph({ insights, onNavigate }) {
+  const [activeId, setActiveId] = useState(insights[0]?.id ?? '')
+  const activeInsight = insights.find((item) => item.id === activeId) ?? insights[0]
+  const center = insights.find((item) => item.id === 'agenda') ?? insights[0]
+  const linkedInsights = insights.filter((item) => item.id !== center?.id)
+
+  return (
+    <div className="dashboard-graph rounded-xl p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-[0.28em] text-cyan-200">Grafo da rede</p>
+          <h3 className="mt-1 text-base font-black text-slate-100">Leitura rápida do sistema</h3>
+        </div>
+        <span className="rounded-lg border border-cyan-400/15 bg-cyan-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-cyan-100">
+          interativo
+        </span>
+      </div>
+
+      <div className="dashboard-graph-map mt-3">
+        <svg className="dashboard-graph-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          {linkedInsights.map((item) => (
+            <line
+              key={item.id}
+              x1={center.x}
+              y1={center.y}
+              x2={item.x}
+              y2={item.y}
+              className={item.id === activeInsight?.id ? 'is-active' : ''}
+            />
+          ))}
+        </svg>
+
+        {insights.map((item) => {
+          const Icon = item.icon
+          const active = item.id === activeInsight?.id
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onMouseEnter={() => setActiveId(item.id)}
+              onFocus={() => setActiveId(item.id)}
+              onClick={() => setActiveId(item.id)}
+              className={['dashboard-graph-node', `dashboard-graph-node-${item.tone}`, active ? 'is-active' : ''].join(' ')}
+              style={{ '--x': `${item.x}%`, '--y': `${item.y}%` }}
+              aria-label={`${item.label}: ${item.value} ${item.helper}`}
+            >
+              <Icon size={15} />
+              <span>{item.value}</span>
+            </button>
+          )
+        })}
+
+        <div className="dashboard-graph-hint left-3 top-3">
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Passe nos nós</p>
+          <p className="mt-1 text-xs font-black text-cyan-100">cada área mostra uma ação</p>
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_120px]">
+        <div className="dashboard-graph-detail rounded-lg p-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">{activeInsight?.label}</p>
+              <p className="mt-1 truncate text-lg font-black text-slate-100">{activeInsight?.helper}</p>
+            </div>
+            <span className={`dashboard-graph-dot dashboard-graph-dot-${activeInsight?.tone}`} />
+          </div>
+          <p className="mt-2 line-clamp-2 text-xs font-semibold leading-5 text-slate-400">{activeInsight?.detail}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => activeInsight?.route && onNavigate(activeInsight.route)}
+          className="primary-button inline-flex h-full min-h-20 items-center justify-center rounded-lg px-3 text-xs font-black"
+        >
+          {activeInsight?.actionLabel}
+        </button>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
+        {insights.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onMouseEnter={() => setActiveId(item.id)}
+            onFocus={() => setActiveId(item.id)}
+            onClick={() => setActiveId(item.id)}
+            className={['dashboard-graph-chip rounded-lg px-2 py-2 text-left', item.id === activeInsight?.id ? 'is-active' : ''].join(' ')}
+          >
+            <span className="block truncate text-[10px] font-black uppercase tracking-widest text-slate-500">{item.shortLabel ?? item.label}</span>
+            <span className="mt-1 block truncate text-sm font-black text-slate-100">{item.value}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function DashboardMetric({ label, value, helper, tone = 'text-slate-100' }) {
   return (
-    <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-3">
+    <div className="metric-card rounded-lg p-3">
       <p className="text-[11px] font-black uppercase tracking-widest text-slate-500">{label}</p>
       <p className={`mt-1 text-2xl font-black ${tone}`}>{value}</p>
       <p className="mt-1 truncate text-xs font-semibold text-slate-500">{helper}</p>
@@ -2100,7 +2520,7 @@ function DashboardMetric({ label, value, helper, tone = 'text-slate-100' }) {
 
 function DashboardAction({ icon: Icon, title, description, onClick }) {
   return (
-    <button type="button" onClick={onClick} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3 text-left hover:border-cyan-500/50">
+    <button type="button" onClick={onClick} className="action-card rounded-lg p-3 text-left">
       <span className="flex items-center gap-2">
         <Icon size={17} className="text-cyan-300" />
         <span className="text-sm font-black text-slate-100">{title}</span>
@@ -2118,7 +2538,7 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
           <ArrowLeft size={16} />
           Agenda
         </button>
-        <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-5">
+        <div className="glass-panel rounded-lg p-5">
           <p className="text-sm font-black text-slate-100">Contato não encontrado.</p>
         </div>
       </div>
@@ -2148,7 +2568,7 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
         Agenda
       </button>
 
-      <section className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+      <section className="glass-panel rounded-lg p-4">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex min-w-0 items-start gap-3">
             <ContactAvatar contact={contact} />
@@ -2166,7 +2586,7 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
         </div>
         {tags.length ? (
           <div className="mt-4 flex flex-wrap gap-1.5">
-            {tags.map((tag) => <span key={tag} className="rounded-md bg-slate-950 px-2 py-1 text-xs font-black text-cyan-200">{tag}</span>)}
+            {tags.map((tag) => <span key={tag} className="rounded-md border border-cyan-400/10 bg-cyan-400/10 px-2 py-1 text-xs font-black text-cyan-100">{tag}</span>)}
           </div>
         ) : null}
       </section>
@@ -2178,7 +2598,7 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
             <ContactInfoBlock title="O que demanda atualmente" value={contact.demand || 'Sem demanda registrada.'} />
             <ContactInfoBlock title="Problema que resolve" value={contact.solves || 'Sem problema registrado.'} />
           </div>
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+          <div className="glass-panel rounded-lg p-4">
             <h2 className="text-sm font-black text-slate-100">Campos personalizados</h2>
             <div className="mt-3 grid gap-2">
               {fields.length ? fields.filter((field) => field.label || field.value).map((field, index) => (
@@ -2192,7 +2612,7 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
         </div>
 
         <aside className="space-y-4">
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+          <div className="glass-panel rounded-lg p-4">
             <h2 className="text-sm font-black text-slate-100">CRM</h2>
             <div className="mt-3 grid gap-2 text-sm">
               <DetailRow label="Status" value={contact.crm_status || 'Novo'} />
@@ -2200,10 +2620,10 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
               <DetailRow label="Último contato" value={contact.last_contact_at ? formatFollowUp(contact.last_contact_at) : 'Não registrado'} />
               <DetailRow label="Próximo follow-up" value={contact.next_follow_up_at ? formatFollowUp(contact.next_follow_up_at) : 'Não marcado'} />
             </div>
-            {contact.crm_note ? <p className="mt-3 rounded-lg bg-slate-950/40 p-3 text-sm font-medium text-slate-400">{contact.crm_note}</p> : null}
+            {contact.crm_note ? <p className="glass-panel-soft mt-3 rounded-lg p-3 text-sm font-medium text-slate-400">{contact.crm_note}</p> : null}
           </div>
 
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+          <div className="glass-panel rounded-lg p-4">
             <h2 className="text-sm font-black text-slate-100">Links</h2>
             <div className="mt-3 grid gap-2">
               {contact.email ? <DetailRow label="Email" value={contact.email} /> : null}
@@ -2219,7 +2639,7 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
             </div>
           </div>
 
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+          <div className="glass-panel rounded-lg p-4">
             <h2 className="text-sm font-black text-slate-100">Origem</h2>
             <div className="mt-3 grid gap-2 text-sm">
               <DetailRow label="Fonte" value={contact.source || 'Manual'} />
@@ -2235,7 +2655,7 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
 
 function ContactInfoBlock({ title, value }) {
   return (
-    <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+    <div className="glass-panel rounded-lg p-4">
       <h2 className="text-sm font-black text-slate-100">{title}</h2>
       <p className="mt-2 whitespace-pre-wrap text-sm font-medium leading-relaxed text-slate-400">{value}</p>
     </div>
@@ -2250,6 +2670,42 @@ function DetailRow({ label, value }) {
     </div>
   )
 }
+function GoogleRequiredPanel({ title, description, onNavigate }) {
+  return (
+    <div className="space-y-4">
+      <PageTitle
+        eyebrow="Google obrigatório"
+        title={title}
+        description={description}
+        action={
+          <button type="button" onClick={() => onNavigate(ROUTES.REGISTER)} className="primary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+            <UserRound size={17} />
+            Conectar no perfil
+          </button>
+        }
+      />
+      <section className="glass-panel rounded-lg p-4">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-cyan-400/30 bg-cyan-400/10 text-cyan-200">
+              <Lock size={20} />
+            </span>
+            <div className="min-w-0">
+              <h2 className="text-base font-black text-slate-100">Conecte a conta Google para continuar</h2>
+              <p className="mt-1 text-sm font-semibold leading-6 text-slate-500">
+                A conexão fica no rodapé do perfil e libera dados salvos, mapa, rede pública e recursos conectados.
+              </p>
+            </div>
+          </div>
+          <button type="button" onClick={() => onNavigate(ROUTES.REGISTER)} className="secondary-button inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-lg px-3 text-sm font-black">
+            Abrir perfil
+            <ArrowRight size={16} />
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
 
 function PublicNetworkPage({ publicProfiles, contacts, user, onNavigate, onOpenGroup }) {
   const [query, setQuery] = useState('')
@@ -2260,23 +2716,27 @@ function PublicNetworkPage({ publicProfiles, contacts, user, onNavigate, onOpenG
   const visibleGroups = groups.filter((profile) => matchText(query, [profile.name, profile.service, profile.area, profile.category?.label]))
   const userIsVisible = people.some((profile) => String(profile.source_user_id ?? profile.id) === currentUserId)
 
+  if (!hasGoogleConnection(user)) {
+    return (
+      <GoogleRequiredPanel
+        title="Rede pública bloqueada"
+        description="A rede pública usa dados conectados para evitar perfis soltos e manter sua conta salva corretamente."
+        onNavigate={onNavigate}
+      />
+    )
+  }
+
   return (
     <div className="space-y-4">
       <PageTitle
         eyebrow="Rede pública"
         title="Explorar perfis visíveis"
         description="Pessoas que optaram por aparecer na rede, com demandas, problemas que resolvem e links preenchidos."
-        action={
-          <button type="button" onClick={() => onNavigate(ROUTES.REGISTER)} className="inline-flex h-10 items-center gap-2 rounded-lg bg-cyan-500 px-3 text-sm font-black text-slate-950">
-            <UserRound size={17} />
-            Meu perfil público
-          </button>
-        }
       />
 
       <section className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_280px]">
-        <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-3">
-          <div className="flex min-w-0 items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3">
+        <div className="glass-panel rounded-lg p-3">
+          <div className="glass-panel-soft flex min-w-0 items-center gap-2 rounded-lg px-3">
             <Search size={18} className="text-slate-500" />
             <input value={query} onChange={(event) => setQuery(event.target.value)} className="h-11 min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-100 outline-none placeholder:text-slate-600" placeholder="Buscar por pessoa, tag, demanda ou solução" />
           </div>
@@ -2289,13 +2749,16 @@ function PublicNetworkPage({ publicProfiles, contacts, user, onNavigate, onOpenG
       </section>
 
       {!userIsVisible ? (
-        <button type="button" onClick={() => onNavigate(ROUTES.REGISTER)} className="flex w-full items-center justify-between gap-3 rounded-lg border border-cyan-500/30 bg-cyan-500/10 p-3 text-left">
+        <div className="glass-panel flex w-full items-center justify-between gap-3 rounded-lg p-3 text-left">
           <span>
             <span className="block text-sm font-black text-cyan-100">Seu perfil ainda não está visível na rede.</span>
-            <span className="mt-1 block text-xs font-semibold text-cyan-200/70">Ative “Quero ser vista na rede pública” no cadastro para aparecer aqui.</span>
+            <span className="mt-1 block text-xs font-semibold text-cyan-200/70">A visibilidade pública será configurada em uma área própria, separada do perfil.</span>
           </span>
-          <ArrowRight size={18} className="shrink-0 text-cyan-200" />
-        </button>
+          <button type="button" onClick={() => onNavigate(ROUTES.PUBLIC_PROFILE)} className="secondary-button inline-flex h-9 shrink-0 items-center gap-2 rounded-lg px-3 text-xs font-black">
+            Configurar
+            <ArrowRight size={15} />
+          </button>
+        </div>
       ) : null}
 
       <section>
@@ -2307,7 +2770,7 @@ function PublicNetworkPage({ publicProfiles, contacts, user, onNavigate, onOpenG
           {visiblePeople.length ? visiblePeople.map((profile) => (
             <PublicPersonCard key={`person-${profile.id}`} profile={profile} contacts={contacts} currentUserId={currentUserId} />
           )) : (
-            <div className="rounded-lg border border-dashed border-slate-800 bg-[#0d1a2e] p-6 text-sm font-semibold text-slate-500 md:col-span-2 xl:col-span-3">
+            <div className="glass-panel rounded-lg border-dashed p-6 text-sm font-semibold text-slate-500 md:col-span-2 xl:col-span-3">
               Nenhum perfil público encontrado para essa busca.
             </div>
           )}
@@ -2323,7 +2786,7 @@ function PublicNetworkPage({ publicProfiles, contacts, user, onNavigate, onOpenG
           {visibleGroups.length ? visibleGroups.map((profile) => (
             <PublicGroupCard key={`group-${profile.id}`} profile={profile} onOpen={onOpenGroup} />
           )) : (
-            <div className="rounded-lg border border-dashed border-slate-800 bg-[#0d1a2e] p-6 text-sm font-semibold text-slate-500 md:col-span-2 xl:col-span-3">
+            <div className="glass-panel rounded-lg border-dashed p-6 text-sm font-semibold text-slate-500 md:col-span-2 xl:col-span-3">
               Nenhum serviço encontrado para essa busca.
             </div>
           )}
@@ -2356,7 +2819,7 @@ function PublicPersonCard({ profile, contacts, currentUserId }) {
   }
 
   return (
-    <article className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+    <article className="glass-panel rounded-lg p-4 transition hover:border-cyan-400/35">
       <div className="flex items-start gap-3">
         <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-sm font-black text-white" style={{ backgroundColor: category.color }}>
           {initials(profile.name)}
@@ -2372,7 +2835,7 @@ function PublicPersonCard({ profile, contacts, currentUserId }) {
       </div>
       {tags.length ? (
         <div className="mt-3 flex flex-wrap gap-1.5">
-          {tags.map((tag) => <span key={tag} className="rounded-md bg-slate-950 px-2 py-1 text-[11px] font-black text-cyan-200">{tag}</span>)}
+          {tags.map((tag) => <span key={tag} className="rounded-md border border-cyan-400/10 bg-cyan-400/10 px-2 py-1 text-[11px] font-black text-cyan-100">{tag}</span>)}
         </div>
       ) : null}
       <div className="mt-3 grid gap-2">
@@ -2390,7 +2853,7 @@ function PublicPersonCard({ profile, contacts, currentUserId }) {
           {links.map((link) => {
             const Icon = link.icon
             return (
-              <button key={link.label} type="button" onClick={() => openLink(link.href)} className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-950/35 px-2.5 text-xs font-black text-slate-200">
+              <button key={link.label} type="button" onClick={() => openLink(link.href)} className="secondary-button inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-black">
                 <Icon size={14} className="text-cyan-300" />
                 {link.label}
               </button>
@@ -2404,7 +2867,7 @@ function PublicPersonCard({ profile, contacts, currentUserId }) {
 
 function PublicProfileText({ label, value }) {
   return (
-    <div className="rounded-lg bg-slate-950/35 px-3 py-2">
+    <div className="glass-panel-soft rounded-lg px-3 py-2">
       <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</p>
       <p className="mt-1 line-clamp-3 text-sm font-medium leading-5 text-slate-300">{value}</p>
     </div>
@@ -2465,16 +2928,16 @@ function AgendaPage({ contacts, activeCategory, queryDraft, setQueryDraft, onSea
         description="Lista simples, alfabética e rápida, com ações diretas de chamada e WhatsApp."
         action={
           <div className="flex gap-2">
-            <button type="button" onClick={() => onNavigate(ROUTES.CRM)} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-800 bg-[#0d1a2e] px-3 text-sm font-black text-slate-300">
+            <button type="button" onClick={() => onNavigate(ROUTES.CRM)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
               <Activity size={17} />
               CRM
             </button>
             <input ref={fileInputRef} type="file" accept=".csv,.txt,.vcf" onChange={onImport} className="hidden" />
-            <button type="button" onClick={() => fileInputRef.current?.click()} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-800 bg-[#0d1a2e] px-3 text-sm font-black text-slate-300">
+            <button type="button" onClick={() => fileInputRef.current?.click()} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
               <Upload size={17} />
               {isImporting ? 'Importando' : 'Importar'}
             </button>
-            <button type="button" onClick={() => onNavigate(ROUTES.NEW)} className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-950 px-3 text-sm font-black text-white">
+            <button type="button" onClick={() => onNavigate(ROUTES.NEW)} className="primary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
               <Plus size={17} />
               Novo
             </button>
@@ -2491,10 +2954,46 @@ function AgendaPage({ contacts, activeCategory, queryDraft, setQueryDraft, onSea
 function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, isThinking }) {
   const [draft, setDraft] = useState('')
   const [selectedContactId, setSelectedContactId] = useState('')
+  const [targetInput, setTargetInput] = useState('')
   const messagesEndRef = useRef(null)
   const reviewCount = contacts.filter((contact) => contact.category?.id === 'general' || isGenericService(contact.service)).length
   const lastSuggestions = [...messages].reverse().find((message) => message.suggestions?.length)?.suggestions ?? []
+  const visibleSuggestions = lastSuggestions.slice(0, 4)
   const selectedContact = contacts.find((contact) => String(contact.id) === selectedContactId)
+  const targetContactOptions = useMemo(() => {
+    const normalizedSearch = normalize(targetInput)
+    const ordered = contacts
+      .slice()
+      .filter((contact) => {
+        if (!normalizedSearch) return true
+        const label = targetContactServiceLabel(contact)
+        return matchText(normalizedSearch, [contact.name, contact.service, label, contact.phone, contact.city, targetContactOptionValue(contact)])
+      })
+      .sort((a, b) => {
+        const aLabel = targetContactServiceLabel(a)
+        const bLabel = targetContactServiceLabel(b)
+        if (aLabel === 'Sem categoria' && bLabel !== 'Sem categoria') return 1
+        if (bLabel === 'Sem categoria' && aLabel !== 'Sem categoria') return -1
+        const serviceOrder = aLabel.localeCompare(bLabel, 'pt-BR', { sensitivity: 'base' })
+        if (serviceOrder !== 0) return serviceOrder
+        return String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR', { sensitivity: 'base' })
+      })
+
+    const visible = ordered.slice(0, 80)
+    if (selectedContact && !visible.some((contact) => String(contact.id) === String(selectedContact.id))) {
+      visible.unshift(selectedContact)
+    }
+    return { contacts: visible, total: ordered.length, visible: visible.length }
+  }, [contacts, selectedContact, targetInput])
+
+  function updateTargetInput(value) {
+    setTargetInput(value)
+    const selected = contacts.find((contact) => {
+      const normalizedValue = normalize(value)
+      return normalize(targetContactOptionValue(contact)) === normalizedValue || normalize(contact.name) === normalizedValue
+    })
+    setSelectedContactId(selected ? String(selected.id) : '')
+  }
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: 'end' })
@@ -2522,15 +3021,15 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
         description={`${reviewCount} contato${reviewCount === 1 ? '' : 's'} precisam de revisão. Peça ajuda para categorizar, buscar serviços ou organizar importações do Google.`}
       />
 
-      <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
-        <div className="flex h-[520px] max-h-[calc(100vh-14rem)] min-h-[420px] flex-col overflow-hidden rounded-lg border border-[#1e293b] bg-[#0d1a2e] max-sm:h-[430px] max-sm:max-h-[calc(100vh-15rem)] max-sm:min-h-[360px] lg:h-[calc(100vh-15rem)] lg:max-h-[720px] lg:min-h-[520px]">
+      <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <div className="glass-panel flex h-[600px] max-h-[calc(100vh-11rem)] min-h-[480px] flex-col overflow-hidden rounded-lg max-sm:h-[470px] max-sm:max-h-[calc(100vh-13rem)] max-sm:min-h-[390px] lg:h-[calc(100vh-12rem)] lg:max-h-[820px] lg:min-h-[620px]">
           <div className="min-h-0 flex-1 space-y-3 overflow-auto p-3 sm:p-4">
             {messages.map((message) => (
               <div key={message.id} className={message.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
                 <div
                   className={[
                     'max-w-[92%] whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-sm font-semibold leading-relaxed sm:max-w-[84%]',
-                    message.role === 'user' ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 bg-slate-950/40 text-slate-200',
+                    message.role === 'user' ? 'bg-cyan-500 text-slate-950 shadow-lg shadow-cyan-950/20' : 'glass-panel-soft text-slate-200',
                   ].join(' ')}
                 >
                   {message.text}
@@ -2548,37 +3047,34 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
               </div>
             ))}
             {isThinking ? (
-              <div className="flex justify-start">
-                <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-sm font-black text-slate-400">Analisando contatos...</div>
+            <div className="flex justify-start">
+                <div className="glass-panel-soft rounded-lg px-3 py-2 text-sm font-black text-slate-400">Analisando contatos...</div>
               </div>
             ) : null}
             <div ref={messagesEndRef} />
           </div>
 
-          <form onSubmit={submit} className="shrink-0 border-t border-slate-800 bg-[#0d1a2e]/98 p-3 backdrop-blur">
-            <div className="mb-2 grid gap-2 sm:grid-cols-[180px_minmax(0,1fr)]">
+          <form onSubmit={submit} className="shrink-0 border-t border-slate-800/70 bg-slate-950/25 p-3 backdrop-blur">
+            <div className="mb-2">
               <label className="text-[11px] font-black uppercase tracking-widest text-slate-500">
                 Contato alvo
-                <select
-                  value={selectedContactId}
-                  onChange={(event) => setSelectedContactId(event.target.value)}
-                  className="mt-1 h-10 w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 text-sm font-bold normal-case tracking-normal text-slate-200 outline-none focus:border-cyan-400"
-                >
-                  <option value="">Detectar pelo texto</option>
-                  {contacts.map((contact) => (
-                    <option key={contact.id} value={contact.id}>{contact.name}</option>
+                <input
+                  value={targetInput}
+                  onChange={(event) => updateTargetInput(event.target.value)}
+                  list="chat-target-contacts"
+                  className="mt-1 h-10 w-full rounded-lg border border-slate-800 bg-slate-950/60 px-3 text-sm font-bold normal-case tracking-normal text-slate-200 outline-none placeholder:text-slate-600 focus:border-cyan-400"
+                  placeholder="Digite ou selecione um contato"
+                />
+                <datalist id="chat-target-contacts">
+                  {targetContactOptions.contacts.map((contact) => (
+                    <option key={contact.id} value={targetContactOptionValue(contact)} label={contact.phone ? `${contact.phone} · ${contact.city || 'sem cidade'}` : contact.city || ''} />
                   ))}
-                </select>
+                </datalist>
               </label>
-              <div className="rounded-lg border border-slate-800 bg-slate-950/30 px-3 py-2 text-xs font-semibold text-slate-500">
-                {selectedContact
-                  ? `Selecionado: ${selectedContact.name}. Agora escreva a ação, como "agendar amanhã 14h" ou "marcar como oportunidade".`
-                  : 'Escolha um contato se o chat não entender o nome, apelido ou serviço.'}
-              </div>
             </div>
             <div className="mb-2 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {['Concluir follow-up do Carlos', 'Marcar Aline como oportunidade', 'Categorizar Renato como finanças', 'Quem pode ajudar com limpeza?'].map((item) => (
-                <button key={item} type="button" onClick={() => quickAsk(item)} className="shrink-0 rounded-lg border border-slate-800 bg-slate-950/40 px-2.5 py-1.5 text-xs font-black text-slate-300">
+                <button key={item} type="button" onClick={() => quickAsk(item)} className="action-card shrink-0 rounded-lg px-2.5 py-1.5 text-xs font-black text-slate-300">
                   {item}
                 </button>
               ))}
@@ -2593,11 +3089,11 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
                     event.currentTarget.form?.requestSubmit()
                   }
                 }}
-                placeholder="Peça para organizar, buscar ou revisar contatos"
+                placeholder="Ex.: agendar Aline na próxima sexta 14h"
                 rows={1}
                 className="field-input min-h-11 resize-none py-3"
               />
-              <button type="submit" disabled={isThinking || !draft.trim()} className="h-11 shrink-0 rounded-lg bg-cyan-500 px-4 text-sm font-black text-slate-950 disabled:cursor-not-allowed disabled:opacity-50 sm:w-28">
+              <button type="submit" disabled={isThinking || !draft.trim()} className="primary-button h-11 shrink-0 rounded-lg px-4 text-sm font-black disabled:cursor-not-allowed disabled:opacity-50 sm:w-28">
                 Enviar
               </button>
             </div>
@@ -2605,7 +3101,7 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
         </div>
 
         <aside className="min-h-0 space-y-3 lg:overflow-auto">
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+          <div className="glass-panel rounded-lg p-4">
             <div className="flex items-center gap-2">
               <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-300">
                 <Sparkles size={18} />
@@ -2613,7 +3109,9 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
               <div>
                 <h2 className="text-sm font-black text-slate-100">Sugestões aplicáveis</h2>
                 <p className="text-xs font-semibold text-slate-500">
-                  {`${lastSuggestions.length} ajuste${lastSuggestions.length === 1 ? '' : 's'} encontrado${lastSuggestions.length === 1 ? '' : 's'}`}
+                  {lastSuggestions.length > visibleSuggestions.length
+                    ? `Mostrando ${visibleSuggestions.length} de ${lastSuggestions.length}`
+                    : `${lastSuggestions.length} ajuste${lastSuggestions.length === 1 ? '' : 's'} encontrado${lastSuggestions.length === 1 ? '' : 's'}`}
                 </p>
               </div>
             </div>
@@ -2621,8 +3119,8 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
 
           {lastSuggestions.length ? (
             <div className="space-y-2">
-              {lastSuggestions.map((suggestion) => (
-                <article key={`${suggestion.contact_id}-${suggestion.action ?? 'categorize'}-${suggestion.suggested_service}-${suggestion.crm_status}-${suggestion.next_follow_up_at}`} className="rounded-lg border border-slate-800 bg-[#0d1a2e] p-3">
+              {visibleSuggestions.map((suggestion) => (
+                <article key={`${suggestion.contact_id}-${suggestion.action ?? 'categorize'}-${suggestion.suggested_service}-${suggestion.crm_status}-${suggestion.next_follow_up_at}`} className="glass-panel rounded-lg p-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <h3 className="truncate text-sm font-black text-slate-100">{suggestion.name}</h3>
@@ -2641,16 +3139,19 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
                                 : categoryDetails({ id: suggestion.category_id }, suggestion.suggested_service).label}
                       </p>
                     </div>
-                    <button type="button" onClick={() => onApplySuggestion(suggestion)} className="h-9 shrink-0 rounded-lg bg-cyan-500 px-3 text-xs font-black text-slate-950">
-                      Aplicar
+                    <button type="button" onClick={() => onApplySuggestion(suggestion)} disabled={suggestion.action === 'conflict'} className="primary-button h-9 shrink-0 rounded-lg px-3 text-xs font-black disabled:cursor-not-allowed disabled:opacity-50">
+                      {suggestion.action === 'conflict' ? 'Bloqueado' : 'Aplicar'}
                     </button>
                   </div>
                   <p className="mt-2 text-xs font-medium text-slate-500">{suggestion.reason}</p>
                 </article>
               ))}
+              {lastSuggestions.length > visibleSuggestions.length ? (
+                <p className="text-xs font-bold text-slate-500">Mostrando os 4 ajustes mais prováveis. Refine o pedido ou escolha um contato alvo para reduzir a lista.</p>
+              ) : null}
             </div>
           ) : (
-            <div className="rounded-lg border border-dashed border-slate-800 bg-[#0d1a2e] p-4 text-sm font-semibold text-slate-500">
+            <div className="glass-panel rounded-lg border-dashed p-4 text-sm font-semibold text-slate-500">
               Peça ao chat para organizar os contatos importados e as sugestões aparecem aqui.
             </div>
           )}
@@ -2672,7 +3173,7 @@ function DuplicatesPage({ suggestions, isLoading, onRefresh, onMerge, onIgnore, 
         title="Possíveis duplicados"
         description="O app sugere pares com mesmo telefone ou email. Nada é mesclado automaticamente."
         action={
-          <button type="button" onClick={onRefresh} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-800 bg-[#0d1a2e] px-3 text-sm font-black text-slate-300">
+          <button type="button" onClick={onRefresh} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
             <Search size={17} />
             {isLoading ? 'Verificando' : 'Verificar'}
           </button>
@@ -2692,7 +3193,7 @@ function DuplicatesPage({ suggestions, isLoading, onRefresh, onMerge, onIgnore, 
           ))}
         </div>
       ) : (
-        <div className="rounded-lg border border-dashed border-slate-800 bg-[#0d1a2e] p-8 text-center">
+        <div className="glass-panel rounded-lg border-dashed p-8 text-center">
           <CheckCircle className="mx-auto text-emerald-400" size={34} />
           <p className="mt-3 text-sm font-black text-slate-200">{isLoading ? 'Verificando duplicados...' : 'Nenhum duplicado pendente.'}</p>
           <p className="mt-1 text-sm font-medium text-slate-500">Quando dois contatos tiverem o mesmo telefone ou email, eles aparecem aqui para aprovação.</p>
@@ -2705,7 +3206,7 @@ function DuplicatesPage({ suggestions, isLoading, onRefresh, onMerge, onIgnore, 
 function DuplicateSuggestionCard({ suggestion, onMerge, onIgnore, onReview }) {
   const matchLabel = suggestion.match_type === 'email' ? 'Email igual' : 'Telefone igual'
   return (
-    <article className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-3 sm:p-4">
+    <article className="glass-panel rounded-lg p-3 sm:p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <span className="rounded-lg bg-cyan-500/10 px-2.5 py-1 text-xs font-black uppercase tracking-widest text-cyan-300">{matchLabel}</span>
         <span className="break-all text-xs font-bold text-slate-500">{suggestion.match_value}</span>
@@ -2732,7 +3233,7 @@ function DuplicateSuggestionCard({ suggestion, onMerge, onIgnore, onReview }) {
 function DuplicateContactPreview({ label, contact }) {
   const contactWithCategory = { ...contact, category: categoryDetails(contact.category, contact.service) }
   return (
-    <div className="min-w-0 rounded-lg border border-slate-800 bg-slate-950/30 p-3">
+    <div className="glass-panel-soft min-w-0 rounded-lg p-3">
       <p className="mb-2 text-xs font-black uppercase tracking-widest text-slate-500">{label}</p>
       <div className="flex min-w-0 items-start gap-3">
         <ContactAvatar contact={contactWithCategory} />
@@ -2748,11 +3249,12 @@ function DuplicateContactPreview({ label, contact }) {
 
 function SettingsPage({ user, contacts, duplicateCount, backendOnline, recents, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onExportContacts, onClearRecents, onLogout }) {
   const visibleName = user?.name || 'Perfil'
+  const googleContactsImported = Boolean(user?.googleContactsImportedAt)
   return (
     <div className="space-y-4">
       <PageTitle eyebrow="Configurações" title="Menu da conta" description="Perfil, organização da agenda, dados locais e estado do app." />
 
-      <section className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+      <section className="glass-panel rounded-lg p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
             <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-cyan-500 text-base font-black text-slate-950">{initials(visibleName)}</span>
@@ -2776,13 +3278,23 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, recents, 
           actionLabel="Abrir"
           onAction={() => onNavigate(ROUTES.DUPLICATES)}
         />
-        <SettingsAction
-          icon={Cloud}
-          title="Google Contacts"
-          description={`${contacts.length} contato${contacts.length === 1 ? '' : 's'} na agenda. Importe contatos do Google depois do login.`}
-          actionLabel="Importar Google"
-          onAction={onImportGoogleContacts}
-        />
+        {googleContactsImported ? (
+          <SettingsAction
+            icon={CheckCircle}
+            title="Google conectado"
+            description={`${contacts.length} contato${contacts.length === 1 ? '' : 's'} na agenda. A importação do Google já foi concluída.`}
+            actionLabel="Editar perfil"
+            onAction={() => onNavigate(ROUTES.REGISTER)}
+          />
+        ) : (
+          <SettingsAction
+            icon={Cloud}
+            title="Google Contacts"
+            description={`${contacts.length} contato${contacts.length === 1 ? '' : 's'} na agenda. Importe contatos do Google depois do login.`}
+            actionLabel="Importar Google"
+            onAction={onImportGoogleContacts}
+          />
+        )}
         <SettingsAction
           icon={MessageCircle}
           title="Copiloto"
@@ -2793,9 +3305,16 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, recents, 
         <SettingsAction
           icon={Compass}
           title="Rede pública"
-          description={user?.publicVisible ? 'Seu perfil está visível para exploração dentro da plataforma.' : 'Ative seu perfil público para aparecer na rede compartilhada.'}
-          actionLabel={user?.publicVisible ? 'Explorar rede' : 'Editar perfil'}
-          onAction={() => onNavigate(user?.publicVisible ? ROUTES.PUBLIC : ROUTES.REGISTER)}
+          description={user?.publicVisible ? 'Seu perfil está visível para exploração dentro da plataforma.' : 'A visibilidade pública será configurada fora da tela de perfil.'}
+          actionLabel={user?.publicVisible ? 'Explorar rede' : 'Configurar'}
+          onAction={() => onNavigate(user?.publicVisible ? ROUTES.PUBLIC : ROUTES.PUBLIC_PROFILE)}
+        />
+        <SettingsAction
+          icon={UsersRound}
+          title="Perfil público"
+          description="Configure visibilidade, descrição, demandas, serviços e links que aparecem na rede pública."
+          actionLabel="Editar"
+          onAction={() => onNavigate(ROUTES.PUBLIC_PROFILE)}
         />
         <SettingsAction
           icon={Cloud}
@@ -2806,7 +3325,7 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, recents, 
         />
       </section>
 
-      <section className="rounded-lg border border-[#1e293b] bg-[#0d1a2e]">
+      <section className="glass-panel rounded-lg">
         <div className="border-b border-slate-800 px-4 py-3">
           <h2 className="text-base font-black text-slate-100">Dados e sessão</h2>
         </div>
@@ -2818,9 +3337,253 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, recents, 
   )
 }
 
+function PublicProfileSettingsPage({ user, onSaveUser, onNavigate }) {
+  const [draft, setDraft] = useState(normalizeUserDraft(user))
+  const [errors, setErrors] = useState({})
+  const [cepStatus, setCepStatus] = useState('')
+  const [status, setStatus] = useState('')
+
+  if (!hasGoogleConnection(user)) {
+    return (
+      <GoogleRequiredPanel
+        title="Perfil público bloqueado"
+        description="Conecte sua conta Google antes de configurar a visibilidade pública."
+        onNavigate={onNavigate}
+      />
+    )
+  }
+
+  function updateDraft(field, value) {
+    setDraft((current) => {
+      const next = { ...current, [field]: value }
+      if (['serviceAddressLine', 'serviceAddressNumber', 'serviceAddressComplement', 'serviceNeighborhood', 'serviceCity', 'serviceState'].includes(field)) {
+        next.serviceAddress = composeAddress({
+          addressLine: next.serviceAddressLine,
+          addressNumber: next.serviceAddressNumber,
+          addressComplement: next.serviceAddressComplement,
+          neighborhood: next.serviceNeighborhood,
+          city: next.serviceCity,
+          state: next.serviceState,
+        })
+      }
+      return next
+    })
+  }
+
+  async function findServiceCep() {
+    setCepStatus('Consultando CEP...')
+    try {
+      const result = await lookupCep(draft.serviceCep)
+      setDraft((current) => ({
+        ...current,
+        serviceCep: result.cep,
+        serviceAddressLine: result.addressLine,
+        serviceNeighborhood: result.neighborhood,
+        serviceCity: result.city,
+        serviceState: result.state,
+        serviceAddress: composeAddress({
+          addressLine: result.addressLine,
+          addressNumber: current.serviceAddressNumber,
+          addressComplement: current.serviceAddressComplement,
+          neighborhood: result.neighborhood,
+          city: result.city,
+          state: result.state,
+        }),
+      }))
+      setCepStatus('CEP validado.')
+    } catch (error) {
+      setCepStatus(error.message)
+    }
+  }
+
+  async function submit(event) {
+    event.preventDefault()
+    const nextErrors = {
+      publicDescription: draft.publicVisible && !draft.publicDescription.trim() ? 'Obrigatória para aparecer na rede.' : '',
+      offeredServices: draft.publicVisible && draft.isCollaborator && !draft.offeredServices.trim() ? 'Informe ao menos um serviço.' : '',
+      serviceCep: draft.isCollaborator && draft.useDifferentServiceAddress && !isValidCep(draft.serviceCep) ? 'CEP obrigatório e válido.' : '',
+      serviceCity: draft.isCollaborator && draft.useDifferentServiceAddress && !draft.serviceCity.trim() ? 'Informe a cidade.' : '',
+      serviceState: draft.isCollaborator && draft.useDifferentServiceAddress && !draft.serviceState.trim() ? 'Informe a UF.' : '',
+      serviceAddressNumber: draft.isCollaborator && draft.useDifferentServiceAddress && !draft.serviceAddressNumber.trim() ? 'Informe o número.' : '',
+    }
+    setErrors(nextErrors)
+    if (Object.values(nextErrors).some(Boolean)) {
+      setStatus('Revise os campos destacados.')
+      return
+    }
+    setStatus('Salvando perfil público...')
+    try {
+      await onSaveUser(normalizeUserDraft(draft), [], { redirectTo: ROUTES.PUBLIC_PROFILE, successMessage: 'Perfil público salvo.' })
+      setStatus('Perfil público salvo.')
+    } catch (error) {
+      setStatus(error.message || 'Não foi possível salvar o perfil público.')
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <PageTitle
+        eyebrow="Perfil público"
+        title="Como você aparece na rede"
+        description="Configure somente os dados que podem ficar visíveis para outras pessoas da plataforma."
+        action={
+          <button type="button" onClick={() => onNavigate(ROUTES.PUBLIC)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+            Ver rede
+            <ArrowRight size={16} />
+          </button>
+        }
+      />
+
+      <form onSubmit={submit} noValidate className="space-y-3">
+        <section className="glass-panel rounded-lg p-4">
+          <label className="flex items-start gap-3 text-sm font-bold text-slate-300">
+            <input
+              type="checkbox"
+              checked={draft.publicVisible}
+              onChange={(event) => updateDraft('publicVisible', event.target.checked)}
+              className="mt-1"
+            />
+            <span>
+              <span className="block text-slate-100">Aparecer na rede pública</span>
+              <span className="block text-xs font-semibold text-slate-500">Quando ativo, outras pessoas veem seu card público e seus serviços oferecidos.</span>
+            </span>
+          </label>
+        </section>
+
+        <section className="glass-panel rounded-lg p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-base font-black text-slate-100">Apresentação</h2>
+            <span className={['rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest', draft.publicVisible ? 'bg-emerald-500/10 text-emerald-300' : 'bg-slate-500/10 text-slate-400'].join(' ')}>
+              {draft.publicVisible ? 'visível' : 'oculto'}
+            </span>
+          </div>
+          <div className="grid gap-3">
+            <Field label="Descrição pública" required={draft.publicVisible} error={errors.publicDescription}>
+              <textarea value={draft.publicDescription} onChange={(event) => updateDraft('publicDescription', event.target.value)} className={`${inputClass(errors.publicDescription)} min-h-24 resize-y`} placeholder="Quem é você e como quer aparecer na rede" />
+            </Field>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="O que demanda atualmente">
+                <textarea value={draft.publicDemand} onChange={(event) => updateDraft('publicDemand', event.target.value)} className="field-input min-h-24 resize-y" placeholder="O que você está buscando agora" />
+              </Field>
+              <Field label="Problema que resolve">
+                <textarea value={draft.publicSolves} onChange={(event) => updateDraft('publicSolves', event.target.value)} className="field-input min-h-24 resize-y" placeholder="Que tipo de problema você resolve" />
+              </Field>
+            </div>
+            <Field label="Tags públicas">
+              <input value={draft.publicTags} onChange={(event) => updateDraft('publicTags', event.target.value)} className="field-input" placeholder="networking, vendas, eventos" />
+            </Field>
+          </div>
+        </section>
+
+        <section className="glass-panel rounded-lg p-4">
+          <h2 className="mb-3 text-base font-black text-slate-100">Links e contato público</h2>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="WhatsApp público">
+              <input value={draft.publicWhatsapp} onChange={(event) => updateDraft('publicWhatsapp', event.target.value)} className="field-input" placeholder="Use vazio para aproveitar seu telefone" />
+            </Field>
+            <Field label="Instagram">
+              <input value={draft.publicInstagram} onChange={(event) => updateDraft('publicInstagram', event.target.value)} className="field-input" placeholder="@usuario" />
+            </Field>
+            <Field label="LinkedIn">
+              <input value={draft.publicLinkedin} onChange={(event) => updateDraft('publicLinkedin', event.target.value)} className="field-input" placeholder="linkedin.com/in/..." />
+            </Field>
+            <Field label="URL customizada">
+              <input value={draft.publicUrl} onChange={(event) => updateDraft('publicUrl', event.target.value)} className="field-input" placeholder="site, portfólio ou agenda" />
+            </Field>
+          </div>
+        </section>
+
+        <section className="glass-panel rounded-lg p-4">
+          <label className="flex items-start gap-3 text-sm font-bold text-slate-300">
+            <input
+              type="checkbox"
+              checked={draft.isCollaborator}
+              onChange={(event) => updateDraft('isCollaborator', event.target.checked)}
+              className="mt-1"
+            />
+            <span>
+              <span className="block text-slate-100">Ofereço serviços para a rede</span>
+              <span className="block text-xs font-semibold text-slate-500">Isso alimenta os cards de serviços oferecidos na rede pública.</span>
+            </span>
+          </label>
+          {draft.isCollaborator ? (
+            <div className="mt-3 grid gap-3">
+              <Field label="Serviços oferecidos" required={draft.publicVisible} error={errors.offeredServices}>
+                <input value={draft.offeredServices} onChange={(event) => updateDraft('offeredServices', event.target.value)} className={inputClass(errors.offeredServices)} placeholder="Ex: eletricista, designer, contabilidade" />
+              </Field>
+              <label className="flex items-start gap-3 text-sm font-bold text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={draft.useDifferentServiceAddress}
+                  onChange={(event) => updateDraft('useDifferentServiceAddress', event.target.checked)}
+                  className="mt-1"
+                />
+                <span>
+                  <span className="block text-slate-100">Usar outro endereço para atendimento</span>
+                  <span className="block text-xs font-semibold text-slate-500">Use quando o local do serviço for diferente do seu endereço pessoal.</span>
+                </span>
+              </label>
+              {draft.useDifferentServiceAddress ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field label="CEP de atendimento" required error={errors.serviceCep}>
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <input value={draft.serviceCep} onChange={(event) => updateDraft('serviceCep', formatCep(event.target.value))} className={inputClass(errors.serviceCep)} inputMode="numeric" placeholder="00000-000" />
+                      <button type="button" onClick={findServiceCep} className="h-11 shrink-0 rounded-lg bg-cyan-500 px-3 text-sm font-black text-slate-950">
+                        Localizar
+                      </button>
+                    </div>
+                    {cepStatus ? <span className="mt-1 block text-xs font-bold text-slate-500">{cepStatus}</span> : null}
+                  </Field>
+                  <Field label="Rua de atendimento">
+                    <input value={draft.serviceAddressLine} onChange={(event) => updateDraft('serviceAddressLine', event.target.value)} className="field-input" placeholder="Rua" />
+                  </Field>
+                  <Field label="Número" required error={errors.serviceAddressNumber}>
+                    <input value={draft.serviceAddressNumber} onChange={(event) => updateDraft('serviceAddressNumber', event.target.value)} className={inputClass(errors.serviceAddressNumber)} placeholder="Número" />
+                  </Field>
+                  <Field label="Complemento">
+                    <input value={draft.serviceAddressComplement} onChange={(event) => updateDraft('serviceAddressComplement', event.target.value)} className="field-input" placeholder="Sala, loja, referência" />
+                  </Field>
+                  <Field label="Bairro">
+                    <input value={draft.serviceNeighborhood} onChange={(event) => updateDraft('serviceNeighborhood', event.target.value)} className="field-input" placeholder="Bairro" />
+                  </Field>
+                  <Field label="Cidade de atendimento" required error={errors.serviceCity}>
+                    <input value={draft.serviceCity} onChange={(event) => updateDraft('serviceCity', event.target.value)} className={inputClass(errors.serviceCity)} placeholder="Cidade" />
+                  </Field>
+                  <Field label="UF de atendimento" required error={errors.serviceState}>
+                    <input value={draft.serviceState} onChange={(event) => updateDraft('serviceState', event.target.value.toUpperCase().slice(0, 2))} className={inputClass(errors.serviceState)} placeholder="UF" />
+                  </Field>
+                  <label className="glass-panel-soft flex items-start gap-3 rounded-lg p-3 text-sm font-bold text-slate-300 sm:col-span-2">
+                    <input
+                      type="checkbox"
+                      checked={draft.serviceAddressVisible}
+                      onChange={(event) => updateDraft('serviceAddressVisible', event.target.checked)}
+                      className="mt-1"
+                    />
+                    <span>
+                      <span className="block text-slate-100">Mostrar endereço de atendimento</span>
+                      <span className="block text-xs font-semibold text-slate-500">Se desativado, outras pessoas veem apenas a região aproximada.</span>
+                    </span>
+                  </label>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+
+        {status ? <p className="rounded-lg border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-xs font-bold text-cyan-100">{status}</p> : null}
+
+        <button type="submit" className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-cyan-500 text-sm font-black text-slate-950">
+          <Check size={18} />
+          Salvar perfil público
+        </button>
+      </form>
+    </div>
+  )
+}
+
 function SettingsAction({ icon: Icon, title, description, actionLabel, onAction }) {
   return (
-    <article className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4">
+    <article className="glass-panel rounded-lg p-4">
       <div className="flex items-start gap-3">
         <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-950 text-cyan-300">
           <Icon size={19} />
@@ -2880,7 +3643,7 @@ function AddressOptionList({ options, onChoose }) {
           key={`${option.address}-${option.cep}-${index}`}
           type="button"
           onClick={() => onChoose(option)}
-          className="rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-left text-sm font-semibold text-slate-200 hover:border-cyan-500/60"
+        className="action-card rounded-lg p-3 text-left text-sm font-semibold text-slate-200"
         >
           <span className="block leading-5">{option.address}</span>
           <span className="mt-1 block text-xs font-black uppercase tracking-widest text-slate-500">
@@ -2943,7 +3706,7 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, onNavi
         Agenda
       </button>
       <PageTitle eyebrow="Novo contato" title="Salvar contato" description="Informe o serviço para a categoria ser definida automaticamente." />
-      <form onSubmit={submit} noValidate className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4 shadow-sm sm:p-5">
+      <form onSubmit={submit} noValidate className="glass-panel rounded-lg p-4 sm:p-5">
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Nome" required error={errors.name}>
             <input value={form.name} onChange={(event) => updateForm('name', event.target.value)} className={inputClass(errors.name)} placeholder="Nome do contato" />
@@ -2959,7 +3722,7 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, onNavi
           </Field>
         </div>
 
-        <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/30 p-3">
+        <div className="glass-panel-soft mt-4 rounded-lg p-3">
           <p className="mb-3 text-xs font-black uppercase tracking-widest text-slate-500">Inteligência do contato</p>
           <div className="grid gap-3">
             <Field label="Descrição">
@@ -2979,7 +3742,7 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, onNavi
           </div>
         </div>
 
-        <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/30 p-3">
+        <div className="glass-panel-soft mt-4 rounded-lg p-3">
           <p className="mb-3 text-xs font-black uppercase tracking-widest text-slate-500">CRM</p>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Status">
@@ -3004,7 +3767,7 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, onNavi
           </Field>
         </div>
 
-        <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/30 p-3">
+        <div className="glass-panel-soft mt-4 rounded-lg p-3">
           <button
             type="button"
             onClick={() => setShowAddress((current) => !current)}
@@ -3029,7 +3792,7 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, onNavi
           ) : null}
         </div>
 
-        <div className="mt-4 flex items-center gap-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+        <div className="glass-panel-soft mt-4 flex items-center gap-3 rounded-lg p-3">
           <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-900 text-cyan-300">
             <Sparkles size={20} />
           </span>
@@ -3038,7 +3801,7 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, onNavi
             <span className="text-sm font-medium text-slate-500">{inferredCategory?.group ?? 'Criada a partir do serviço informado'}</span>
           </span>
         </div>
-        <button type="submit" className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 text-sm font-black text-white">
+        <button type="submit" className="primary-button mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg px-4 text-sm font-black">
           <Plus size={18} />
           Salvar contato
         </button>
@@ -3171,7 +3934,7 @@ function EditContactModal({ contact, onClose, onSave }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/70 p-3 sm:items-center">
-      <form onSubmit={submit} className="max-h-[92vh] w-full max-w-2xl overflow-auto rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4 shadow-2xl sm:p-5">
+      <form onSubmit={submit} className="glass-panel max-h-[92vh] w-full max-w-2xl overflow-auto rounded-lg p-4 shadow-2xl sm:p-5">
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Editar contato</p>
@@ -3197,7 +3960,7 @@ function EditContactModal({ contact, onClose, onSave }) {
           </Field>
         </div>
 
-        <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/30 p-3">
+        <div className="glass-panel-soft mt-4 rounded-lg p-3">
           <p className="mb-3 text-xs font-black uppercase tracking-widest text-slate-500">Inteligência do contato</p>
           <div className="grid gap-3">
             <Field label="Descrição">
@@ -3235,7 +3998,7 @@ function EditContactModal({ contact, onClose, onSave }) {
           </div>
         </div>
 
-        <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/30 p-3">
+        <div className="glass-panel-soft mt-4 rounded-lg p-3">
           <p className="mb-3 text-xs font-black uppercase tracking-widest text-slate-500">CRM</p>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Status">
@@ -3260,7 +4023,7 @@ function EditContactModal({ contact, onClose, onSave }) {
           </Field>
         </div>
 
-        <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/30 p-3">
+        <div className="glass-panel-soft mt-4 rounded-lg p-3">
           <button type="button" onClick={() => setShowAddress((current) => !current)} className="flex w-full items-center justify-between gap-3 text-left text-sm font-black text-slate-200">
             <span>Endereço do contato</span>
             <ChevronRight className={showAddress ? 'rotate-90 text-cyan-400 transition' : 'text-cyan-400 transition'} size={18} />
@@ -3317,7 +4080,7 @@ function GroupsPage({ publicProfiles, user, queryDraft, setQueryDraft, onSearch,
   return (
     <div className="space-y-4">
       <PageTitle eyebrow="Grupos" title="Sugestões por interesse" description="Os grupos são priorizados pelos interesses salvos no cadastro e pela busca atual." />
-      <button type="button" onClick={() => onNavigate(ROUTES.PUBLIC)} className="flex w-full items-center justify-between gap-3 rounded-lg border border-cyan-500/25 bg-cyan-500/10 p-4 text-left hover:border-cyan-400/60">
+      <button type="button" onClick={() => onNavigate(ROUTES.PUBLIC)} className="glass-panel flex w-full items-center justify-between gap-3 rounded-lg p-4 text-left hover:border-cyan-400/60">
         <span className="flex min-w-0 items-center gap-3">
           <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-slate-950 text-cyan-300">
             <Compass size={20} />
@@ -3345,7 +4108,7 @@ function PublicGroupCard({ profile, onOpen }) {
   const title = String(profile.name ?? '').replace(/^Grupo de\s+/i, 'Serviço: ')
 
   return (
-    <article className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4 shadow-sm">
+    <article className="glass-panel rounded-lg p-4">
       <div className="flex items-start gap-3">
         <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-white" style={{ backgroundColor: category.color }}>
           <UsersRound size={19} />
@@ -3357,7 +4120,7 @@ function PublicGroupCard({ profile, onOpen }) {
       </div>
       {serviceTags.length ? (
         <div className="mt-3 flex flex-wrap gap-1.5">
-          {serviceTags.slice(0, 6).map((tag) => <span key={tag} className="rounded-md bg-slate-950 px-2 py-1 text-[11px] font-black text-cyan-200">{tag}</span>)}
+          {serviceTags.slice(0, 6).map((tag) => <span key={tag} className="rounded-md border border-cyan-400/10 bg-cyan-400/10 px-2 py-1 text-[11px] font-black text-cyan-100">{tag}</span>)}
         </div>
       ) : null}
       <div className="mt-4 grid grid-cols-3 gap-2 text-center">
@@ -3365,7 +4128,7 @@ function PublicGroupCard({ profile, onOpen }) {
         <Metric value={profile.response} label="resposta" />
         <Metric value={profile.score} label="score" />
       </div>
-      <button type="button" onClick={() => onOpen(profile)} className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 text-sm font-black text-slate-200">
+      <button type="button" onClick={() => onOpen(profile)} className="secondary-button mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg text-sm font-black">
         Verificar
         <ArrowRight size={16} />
       </button>
@@ -3375,7 +4138,7 @@ function PublicGroupCard({ profile, onOpen }) {
 
 function Metric({ value, label }) {
   return (
-    <div className="rounded-lg bg-slate-950/40 px-2 py-2">
+    <div className="glass-panel-soft rounded-lg px-2 py-2">
       <p className="text-sm font-black text-slate-100">{value}</p>
       <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">{label}</p>
     </div>
@@ -3413,6 +4176,16 @@ function MapPage({ contacts, users, user, onNavigate }) {
     [contacts, profilePoints],
   )
 
+  if (!hasGoogleConnection(user)) {
+    return (
+      <GoogleRequiredPanel
+        title="Mapa bloqueado"
+        description="O mapa depende da conta Google para manter origem, localização e dados conectados consistentes."
+        onNavigate={onNavigate}
+      />
+    )
+  }
+
   return (
     <div className="space-y-4">
       <PageTitle
@@ -3420,7 +4193,7 @@ function MapPage({ contacts, users, user, onNavigate }) {
         title="Grafo de proximidade"
         description="Encontre contatos próximos por serviço, veja conexões da rede e abra a localização da pessoa selecionada no Google Maps."
         action={
-          <button type="button" onClick={() => onNavigate(ROUTES.REGISTER)} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-800 bg-[#0d1a2e] px-3 text-sm font-black text-slate-300">
+          <button type="button" onClick={() => onNavigate(ROUTES.REGISTER)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
             <MapPin size={17} />
             Endereço
           </button>
@@ -3434,6 +4207,7 @@ function MapPage({ contacts, users, user, onNavigate }) {
 function NetworkGraphMap({ user, contacts }) {
   const [serviceQuery, setServiceQuery] = useState('')
   const [selectedId, setSelectedId] = useState('')
+  const [graphReady, setGraphReady] = useState(true)
   const [geocodedLocations, setGeocodedLocations] = useState({})
   const centerAddress = user?.address || defaultUser.address
   const baseOriginLocation = useMemo(() => resolveMapLocation(user, centerAddress), [centerAddress, user])
@@ -3530,13 +4304,29 @@ function NetworkGraphMap({ user, contacts }) {
   }, [nearbyItems, selectedId])
 
   const selectedContact = nearbyItems.find((item) => item.id === selectedId) ?? nearbyItems[0] ?? null
+  const graphCategories = useMemo(() => {
+    const categories = new globalThis.Map()
+    nearbyItems.forEach((item) => {
+      const key = item.category?.id ?? item.category?.label ?? 'general'
+      const current = categories.get(key) ?? { label: item.category?.label ?? 'Geral', color: item.category?.color ?? generalCategory.color, count: 0 }
+      current.count += 1
+      categories.set(key, current)
+    })
+    return [...categories.values()].sort((a, b) => b.count - a.count).slice(0, 5)
+  }, [nearbyItems])
+  const graphSummary = {
+    nodes: nearbyItems.length,
+    categories: graphCategories.length,
+    ddds: new Set(nearbyItems.map((item) => item.ddd).filter(Boolean)).size,
+    located: nearbyItems.filter((item) => item.distanceKm !== null).length,
+  }
 
   return (
     <div className="space-y-4">
-      <section className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-3 shadow-sm">
+      <section className="glass-panel rounded-lg p-3">
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_260px] lg:items-end">
           <Field label="Localizar por serviço ou DDD">
-            <div className="flex min-w-0 items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 focus-within:border-cyan-500">
+            <div className="glass-panel-soft flex min-w-0 items-center gap-2 rounded-lg px-3 focus-within:border-cyan-500">
               <Search size={18} className="shrink-0 text-slate-500" />
               <input
                 value={serviceQuery}
@@ -3551,7 +4341,7 @@ function NetworkGraphMap({ user, contacts }) {
               ) : null}
             </div>
           </Field>
-          <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2">
+          <div className="glass-panel-soft rounded-lg px-3 py-2">
             <p className="text-[11px] font-black uppercase tracking-widest text-slate-500">Origem</p>
             <p className="mt-1 truncate text-sm font-black text-slate-100">{user?.name ?? 'Você'}</p>
             <p className="truncate text-xs font-semibold text-slate-500">{originLocation.label}</p>
@@ -3562,7 +4352,7 @@ function NetworkGraphMap({ user, contacts }) {
             <button
               type="button"
               onClick={() => setServiceQuery('')}
-              className={['h-9 shrink-0 rounded-lg px-3 text-xs font-black', serviceQuery ? 'border border-slate-800 text-slate-300' : 'bg-cyan-500 text-slate-950'].join(' ')}
+              className={['h-9 shrink-0 rounded-lg px-3 text-xs font-black', serviceQuery ? 'secondary-button' : 'primary-button'].join(' ')}
             >
               Todos
             </button>
@@ -3571,7 +4361,7 @@ function NetworkGraphMap({ user, contacts }) {
                 key={option}
                 type="button"
                 onClick={() => setServiceQuery(option)}
-                className={['h-9 shrink-0 rounded-lg px-3 text-xs font-black', normalize(serviceQuery) === normalize(option) ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}
+                className={['h-9 shrink-0 rounded-lg px-3 text-xs font-black', normalize(serviceQuery) === normalize(option) ? 'primary-button' : 'secondary-button'].join(' ')}
               >
                 {option}
               </button>
@@ -3581,20 +4371,28 @@ function NetworkGraphMap({ user, contacts }) {
       </section>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(360px,0.9fr)]">
-        <section className="overflow-hidden rounded-lg border border-[#1e293b] bg-[#07111f] shadow-sm">
-          <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+        <section className="glass-panel overflow-hidden rounded-lg">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-4 py-3">
             <div>
               <p className="text-sm font-black text-slate-100">Grafo de contatos próximos</p>
               <p className="text-xs font-semibold text-slate-500">Todos os {nearbyItems.length} contato{nearbyItems.length === 1 ? '' : 's'} do filtro atual</p>
             </div>
-            <span className="rounded-lg bg-slate-950 px-2.5 py-1 text-xs font-black text-cyan-300">{serviceQuery || 'rede completa'}</span>
+            <div className="flex flex-wrap gap-2">
+              <span className="rounded-lg bg-slate-950 px-2.5 py-1 text-xs font-black text-cyan-300">{serviceQuery || 'rede completa'}</span>
+              <span className="rounded-lg border border-slate-800 bg-slate-950/60 px-2.5 py-1 text-xs font-black text-slate-400">{graphSummary.categories} categorias</span>
+              <span className="rounded-lg border border-slate-800 bg-slate-950/60 px-2.5 py-1 text-xs font-black text-slate-400">{graphSummary.ddds} DDDs</span>
+            </div>
           </div>
-          <NetworkGraph items={nearbyItems} selectedId={selectedContact?.id} onSelect={setSelectedId} centerLabel={user?.name ?? 'Você'} />
+          {graphReady ? (
+            <NetworkGraph items={nearbyItems} selectedId={selectedContact?.id} onSelect={setSelectedId} centerLabel={user?.name ?? 'Você'} />
+          ) : (
+            <MapGraphPreview summary={graphSummary} categories={graphCategories} selectedContact={selectedContact} onLoad={() => setGraphReady(true)} />
+          )}
         </section>
 
         <aside className="space-y-4">
           <SelectedMapCard contact={selectedContact} centerAddress={originLocation.query} />
-          <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] shadow-sm">
+          <div className="glass-panel rounded-lg">
             <div className="border-b border-slate-800 px-4 py-3">
               <p className="text-sm font-black text-slate-100">Mais próximos</p>
             </div>
@@ -3637,345 +4435,649 @@ function NetworkGraphMap({ user, contacts }) {
   )
 }
 
-function NetworkGraph({ items, selectedId, onSelect, centerLabel }) {
-  const mountRef = useRef(null)
-  const onSelectRef = useRef(onSelect)
-  const selectedRef = useRef(selectedId)
-  const graphObjectsRef = useRef(new globalThis.Map())
-  const selectedItem = items.find((item) => item.id === selectedId) ?? items[0]
-
-  useEffect(() => {
-    onSelectRef.current = onSelect
-  }, [onSelect])
-
-  useEffect(() => {
-    selectedRef.current = selectedId
-    graphObjectsRef.current.forEach(({ mesh, halo, label, baseScale }, id) => {
-      const selected = id === selectedId
-      mesh.scale.setScalar(selected ? baseScale * 1.8 : baseScale)
-      mesh.material.emissiveIntensity = selected ? 0.65 : 0.18
-      if (halo) halo.visible = selected
-      if (label) label.visible = selected || items.length <= 18
-    })
-  }, [items.length, selectedId])
-
-  useEffect(() => {
-    const mount = mountRef.current
-    if (!mount) return undefined
-
-    const scene = new THREE.Scene()
-    scene.background = new THREE.Color('#07111f')
-    scene.fog = new THREE.Fog('#07111f', 12, 28)
-
-    const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 100)
-    camera.position.set(0, 1.6, 16)
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true })
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
-    renderer.setClearColor('#07111f', 1)
-    renderer.domElement.className = 'h-full w-full cursor-grab active:cursor-grabbing'
-    renderer.domElement.setAttribute('aria-label', 'Grafo 3D de contatos')
-    mount.appendChild(renderer.domElement)
-
-    const graphGroup = new THREE.Group()
-    graphGroup.rotation.x = -0.12
-    scene.add(graphGroup)
-
-    scene.add(new THREE.AmbientLight('#8ec5ff', 0.52))
-    const keyLight = new THREE.PointLight('#67e8f9', 38, 42)
-    keyLight.position.set(2.5, 6, 8)
-    scene.add(keyLight)
-    const fillLight = new THREE.PointLight('#f472b6', 18, 35)
-    fillLight.position.set(-7, -3, -5)
-    scene.add(fillLight)
-
-    const contactNodes = createGraphNodes(items)
-    const objectMap = new globalThis.Map()
-    graphObjectsRef.current = objectMap
-
-    const centerGeometry = new THREE.SphereGeometry(0.58, 36, 24)
-    const centerMaterial = new THREE.MeshStandardMaterial({
-      color: '#22d3ee',
-      emissive: '#0891b2',
-      emissiveIntensity: 0.78,
-      roughness: 0.28,
-      metalness: 0.18,
-    })
-    const centerNode = new THREE.Mesh(centerGeometry, centerMaterial)
-    centerNode.name = 'origin-node'
-    graphGroup.add(centerNode)
-
-    const centerHalo = new THREE.Mesh(
-      new THREE.SphereGeometry(0.86, 36, 24),
-      new THREE.MeshBasicMaterial({ color: '#22d3ee', transparent: true, opacity: 0.08, depthWrite: false }),
-    )
-    graphGroup.add(centerHalo)
-
-    const centerLabel = createGraphTextSprite('EU', '#020617', 'rgba(103,232,249,0.95)', 72)
-    centerLabel.position.set(0, -0.02, 0.72)
-    centerLabel.scale.set(0.9, 0.32, 1)
-    graphGroup.add(centerLabel)
-
-    const linePositions = []
-    const lineColors = []
-    const categoryChains = new globalThis.Map()
-    contactNodes.forEach((node) => {
-      const color = new THREE.Color(node.color)
-      linePositions.push(0, 0, 0, node.position.x, node.position.y, node.position.z)
-      lineColors.push(color.r, color.g, color.b, color.r, color.g, color.b)
-
-      const key = node.item.category?.id ?? node.item.category?.label ?? 'general'
-      const chain = categoryChains.get(key) ?? []
-      chain.push(node)
-      categoryChains.set(key, chain)
-    })
-    categoryChains.forEach((chain) => {
-      chain.forEach((node, index) => {
-        const next = chain[index + 1]
-        if (!next) return
-        const color = new THREE.Color(node.color)
-        linePositions.push(node.position.x, node.position.y, node.position.z, next.position.x, next.position.y, next.position.z)
-        lineColors.push(color.r, color.g, color.b, color.r, color.g, color.b)
-      })
-    })
-
-    const lineGeometry = new THREE.BufferGeometry()
-    lineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3))
-    lineGeometry.setAttribute('color', new THREE.Float32BufferAttribute(lineColors, 3))
-    const lineMaterial = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.28 })
-    graphGroup.add(new THREE.LineSegments(lineGeometry, lineMaterial))
-
-    const sphereGeometry = new THREE.SphereGeometry(1, 24, 18)
-    const selectableMeshes = []
-    contactNodes.forEach((node) => {
-      const selected = node.item.id === selectedRef.current
-      const material = new THREE.MeshStandardMaterial({
-        color: node.color,
-        emissive: node.color,
-        emissiveIntensity: selected ? 0.65 : 0.18,
-        roughness: 0.35,
-        metalness: 0.12,
-      })
-      const mesh = new THREE.Mesh(sphereGeometry, material)
-      mesh.position.copy(node.position)
-      mesh.scale.setScalar(selected ? node.scale * 1.8 : node.scale)
-      mesh.userData = { id: node.item.id }
-      selectableMeshes.push(mesh)
-      graphGroup.add(mesh)
-
-      const halo = new THREE.Mesh(
-        new THREE.SphereGeometry(1.35, 24, 18),
-        new THREE.MeshBasicMaterial({ color: node.color, transparent: true, opacity: 0.14, depthWrite: false }),
-      )
-      halo.position.copy(node.position)
-      halo.scale.setScalar(node.scale * 1.75)
-      halo.visible = selected
-      graphGroup.add(halo)
-
-      const label = createGraphTextSprite(String(node.item.name).slice(0, selected ? 28 : 18), '#e2e8f0', 'rgba(2,6,23,0.72)', 42)
-      label.position.copy(node.position.clone().add(new THREE.Vector3(0, node.scale * 1.9, 0)))
-      label.scale.set(1.8, 0.48, 1)
-      label.visible = selected || items.length <= 18
-      graphGroup.add(label)
-
-      objectMap.set(node.item.id, { mesh, halo, label, baseScale: node.scale })
-    })
-
-    const stars = createGraphStars()
-    scene.add(stars)
-
-    const raycaster = new THREE.Raycaster()
-    const pointer = new THREE.Vector2()
-    const dragState = { active: false, moved: false, x: 0, y: 0 }
-    let targetRotationX = graphGroup.rotation.x
-    let targetRotationY = graphGroup.rotation.y
-    let targetCameraZ = camera.position.z
-    let frameId = 0
-
-    function resize() {
-      const rect = mount.getBoundingClientRect()
-      const width = Math.max(320, rect.width)
-      const height = Math.max(360, rect.height)
-      camera.aspect = width / height
-      camera.updateProjectionMatrix()
-      renderer.setSize(width, height, false)
-    }
-
-    function setPointerFromEvent(event) {
-      const rect = renderer.domElement.getBoundingClientRect()
-      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
-      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
-    }
-
-    function handlePointerDown(event) {
-      dragState.active = true
-      dragState.moved = false
-      dragState.x = event.clientX
-      dragState.y = event.clientY
-      renderer.domElement.setPointerCapture?.(event.pointerId)
-    }
-
-    function handlePointerMove(event) {
-      if (!dragState.active) return
-      const dx = event.clientX - dragState.x
-      const dy = event.clientY - dragState.y
-      if (Math.abs(dx) + Math.abs(dy) > 4) dragState.moved = true
-      targetRotationY += dx * 0.007
-      targetRotationX += dy * 0.004
-      targetRotationX = Math.max(-1.15, Math.min(1.15, targetRotationX))
-      dragState.x = event.clientX
-      dragState.y = event.clientY
-    }
-
-    function handlePointerUp(event) {
-      renderer.domElement.releasePointerCapture?.(event.pointerId)
-      dragState.active = false
-      if (dragState.moved) return
-      setPointerFromEvent(event)
-      raycaster.setFromCamera(pointer, camera)
-      const hit = raycaster.intersectObjects(selectableMeshes, false)[0]
-      if (hit?.object?.userData?.id) onSelectRef.current(hit.object.userData.id)
-    }
-
-    function handleWheel(event) {
-      event.preventDefault()
-      targetCameraZ = Math.max(7.5, Math.min(25, targetCameraZ + event.deltaY * 0.012))
-    }
-
-    function animate() {
-      graphGroup.rotation.x += (targetRotationX - graphGroup.rotation.x) * 0.12
-      graphGroup.rotation.y += (targetRotationY - graphGroup.rotation.y) * 0.12
-      if (!dragState.active) targetRotationY += 0.0012
-      camera.position.z += (targetCameraZ - camera.position.z) * 0.12
-      centerHalo.scale.setScalar(1 + Math.sin(performance.now() * 0.002) * 0.04)
-      objectMap.forEach(({ halo }, id) => {
-        if (id === selectedRef.current && halo) {
-          halo.scale.multiplyScalar(0.998 + Math.sin(performance.now() * 0.004) * 0.0008)
-        }
-      })
-      renderer.render(scene, camera)
-      frameId = requestAnimationFrame(animate)
-    }
-
-    resize()
-    animate()
-    window.addEventListener('resize', resize)
-    renderer.domElement.addEventListener('pointerdown', handlePointerDown)
-    renderer.domElement.addEventListener('pointermove', handlePointerMove)
-    renderer.domElement.addEventListener('pointerup', handlePointerUp)
-    renderer.domElement.addEventListener('pointercancel', handlePointerUp)
-    renderer.domElement.addEventListener('wheel', handleWheel, { passive: false })
-
-    return () => {
-      cancelAnimationFrame(frameId)
-      window.removeEventListener('resize', resize)
-      renderer.domElement.removeEventListener('pointerdown', handlePointerDown)
-      renderer.domElement.removeEventListener('pointermove', handlePointerMove)
-      renderer.domElement.removeEventListener('pointerup', handlePointerUp)
-      renderer.domElement.removeEventListener('pointercancel', handlePointerUp)
-      renderer.domElement.removeEventListener('wheel', handleWheel)
-      graphObjectsRef.current = new globalThis.Map()
-      mount.removeChild(renderer.domElement)
-      scene.traverse((object) => {
-        object.geometry?.dispose?.()
-        if (Array.isArray(object.material)) object.material.forEach((material) => material.dispose?.())
-        else object.material?.dispose?.()
-        object.material?.map?.dispose?.()
-      })
-      renderer.dispose()
-    }
-  }, [centerLabel, items])
+function MapGraphPreview({ summary, categories, selectedContact, onLoad }) {
+  const previewNodes = [
+    { className: 'is-origin', label: 'Você' },
+    { className: 'is-crm', label: categories[0]?.label ?? 'Agenda' },
+    { className: 'is-near', label: selectedContact?.distanceLabel ?? 'perto' },
+    { className: 'is-category', label: categories[1]?.label ?? 'categoria' },
+    { className: 'is-ddd', label: `${summary.ddds || 0} DDDs` },
+    { className: 'is-public', label: 'rede' },
+  ]
 
   return (
-    <div className="relative min-h-[430px] bg-[#07111f]">
-      <div className="pointer-events-none absolute right-3 top-3 z-10 rounded-lg border border-slate-800 bg-slate-950/70 px-2.5 py-1 text-[11px] font-black uppercase tracking-widest text-slate-500">
-        {items.length} nós
+    <div className="map-graph-preview p-4 sm:p-5">
+      <div className="relative z-10 grid min-h-[430px] gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
+        <div className="map-graph-preview-stage rounded-xl">
+          <span className="map-preview-line line-a" />
+          <span className="map-preview-line line-b" />
+          <span className="map-preview-line line-c" />
+          <span className="map-preview-line line-d" />
+          <span className="map-preview-line line-e" />
+          {previewNodes.map((node) => (
+            <span key={node.className} className={`map-preview-node ${node.className}`}>
+              <span />
+              <b>{node.label}</b>
+            </span>
+          ))}
+          <div className="map-preview-card left-3 top-3">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Leitura</p>
+            <p className="mt-1 text-sm font-black text-cyan-100">{summary.nodes} nós filtrados</p>
+          </div>
+          <div className="map-preview-card bottom-3 right-3">
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Selecionado</p>
+            <p className="mt-1 max-w-40 truncate text-sm font-black text-slate-100">{selectedContact?.name ?? 'nenhum contato'}</p>
+            <p className="mt-0.5 text-xs font-semibold text-emerald-200">{selectedContact?.distanceLabel ?? 'sem distância'}</p>
+          </div>
+        </div>
+
+        <aside className="flex min-h-full flex-col justify-between gap-3">
+          <div>
+            <div className="brand-mark flex h-11 w-11 items-center justify-center rounded-xl">
+              <Map size={21} />
+            </div>
+            <h3 className="mt-4 text-xl font-black text-slate-100">Grafo 3D pronto para navegar</h3>
+            <p className="mt-2 text-sm font-semibold leading-6 text-slate-500">
+              A prévia já mostra densidade, categorias e proximidade. Carregue o 3D para arrastar, aproximar e selecionar nós.
+            </p>
+          </div>
+
+          <div className="grid gap-2">
+            <div className="grid grid-cols-2 gap-2">
+              <Metric value={summary.located} label="localizados" />
+              <Metric value={summary.categories} label="categorias" />
+            </div>
+            {categories.length ? (
+              <div className="map-graph-legend rounded-lg p-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Categorias fortes</p>
+                <div className="mt-2 grid gap-1.5">
+                  {categories.slice(0, 4).map((category) => (
+                    <span key={category.label} className="flex items-center justify-between gap-2 text-xs font-black text-slate-300">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <i style={{ backgroundColor: category.color }} />
+                        <span className="truncate">{category.label}</span>
+                      </span>
+                      <span className="text-slate-500">{category.count}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <button type="button" onClick={onLoad} className="primary-button inline-flex h-11 items-center justify-center gap-2 rounded-lg px-4 text-sm font-black">
+              <Sparkles size={17} />
+              Carregar grafo 3D
+            </button>
+          </div>
+        </aside>
       </div>
-      <div className="pointer-events-none absolute left-3 top-3 z-10 max-w-[210px] rounded-lg border border-slate-800 bg-slate-950/70 px-3 py-2">
-        <p className="truncate text-xs font-black text-slate-100">{selectedItem?.name ?? centerLabel}</p>
-        <p className="mt-0.5 truncate text-[11px] font-bold text-slate-500">{selectedItem?.service ?? 'Rede pessoal'}</p>
-      </div>
-      <div ref={mountRef} className="h-[440px] w-full touch-none sm:h-[540px]" />
     </div>
   )
 }
 
-function createGraphNodes(items) {
-  const count = Math.max(items.length, 1)
-  const radius = count > 90 ? 7.6 : count > 45 ? 7 : count > 20 ? 6.3 : 5.6
-  const baseScale = count > 90 ? 0.12 : count > 45 ? 0.15 : count > 20 ? 0.18 : 0.24
-  return items.map((item, index) => {
-    const y = 1 - (index / Math.max(count - 1, 1)) * 2
-    const radial = Math.sqrt(Math.max(0, 1 - y * y))
-    const theta = index * Math.PI * (3 - Math.sqrt(5))
-    const lobe = 1 + Math.sin(theta * 2.2 + index * 0.21) * 0.16
-    const sideWeight = Math.abs(Math.cos(theta))
-    const position = new THREE.Vector3(
-      Math.cos(theta) * radial * radius * lobe * (1 + sideWeight * 0.2),
-      y * radius * 0.78 + Math.sin(theta * 1.4) * 0.18,
-      Math.sin(theta) * radial * radius * 0.88,
-    )
-    return {
-      item,
-      position,
-      color: item.category?.color ?? generalCategory.color,
-      scale: baseScale * (item.distanceKm === null ? 0.82 : 1) * (index < 8 ? 1.14 : 1),
+function NetworkGraph({ items, contacts = CONTACTS_SEED, query = '', selectedId, onSelect }) {
+  const cvRef = useRef(null)
+  const rafRef = useRef(null)
+  const nodesRef = useRef([])
+  const camRef = useRef({ theta: 0.3, phi: 0.28, dist: 500 })
+  const stateRef = useRef({ autoRot: true, dragging: false, lmx: 0, lmy: 0, tick: 0, hov: null, filter: 'all', pinch: 0, startDist: 500 })
+
+  const [hovData, setHovData] = useState(null)
+  const [infoText, setInfoText] = useState('arraste para orbitar 360° · scroll para zoom · hover para detalhes')
+  const [autoRot, setAutoRot] = useState(true)
+  const [filter, setFilter] = useState('all')
+
+  const graphContacts = useMemo(() => {
+    const source = Array.isArray(items) && items.length ? items : contacts
+    return (source?.length ? source : CONTACTS_SEED).map((contact, index) => {
+      const categoryId = graphCatId(contact)
+      return {
+        id: String(contact.id ?? `c${index + 1}`),
+        name: contact.name ?? 'Contato',
+        svc: contact.svc ?? contact.service ?? contact.category?.label ?? 'serviço',
+        city: contact.city ?? contact.locationLabel ?? 'Rede',
+        trust: contact.trust ?? (index % 3 === 0 ? 'Recomendado' : index % 3 === 1 ? 'Favorito' : 'Confiavel'),
+        src: contact.src ?? contact.source ?? 'Agenda',
+        note: contact.note ?? contact.crm_note ?? contact.distanceLabel ?? '',
+        cat: categoryId,
+        originalId: contact.id,
+      }
+    })
+  }, [contacts, items])
+
+  useEffect(() => {
+    const canvas = cvRef.current
+    if (!canvas) return undefined
+
+    let { W, H, DPR } = resizeGraphCanvas(canvas)
+    let graph = buildCanvasGraph(graphContacts, query, W, H)
+    let nodes = graph.nodes
+    let edges = graph.edges
+    const ctx = canvas.getContext('2d')
+
+    function rebuild() {
+      ;({ nodes, edges } = buildCanvasGraph(graphContacts, query, W, H))
+      applyGraphFilter(stateRef.current.filter, nodes)
     }
+    rebuild()
+
+    function updateHover(mx, my) {
+      const hit = hitCanvasGraph(mx, my, nodesRef.current)
+      stateRef.current.hov = hit?.id ?? null
+      canvas.style.cursor = hit ? 'pointer' : stateRef.current.dragging ? 'grabbing' : 'grab'
+      if (hit) {
+        setHovData(hit)
+        setInfoText(`${hit.name}${hit.svc ? ` · ${hit.svc}` : ''}${hit.city ? ` · ${hit.city}` : ''}`)
+      } else {
+        setHovData(null)
+        setInfoText('arraste para orbitar 360° · scroll para zoom · hover para detalhes')
+      }
+    }
+
+    function canvasPoint(event) {
+      const rect = canvas.getBoundingClientRect()
+      return { x: event.clientX - rect.left, y: event.clientY - rect.top }
+    }
+
+    function onMouseDown(event) {
+      const point = canvasPoint(event)
+      stateRef.current.dragging = true
+      stateRef.current.lmx = point.x
+      stateRef.current.lmy = point.y
+      canvas.style.cursor = 'grabbing'
+    }
+
+    function onMouseMove(event) {
+      const point = canvasPoint(event)
+      const state = stateRef.current
+      if (state.dragging) {
+        const cam = camRef.current
+        cam.theta += (point.x - state.lmx) * 0.007
+        cam.phi += (point.y - state.lmy) * 0.007
+        state.lmx = point.x
+        state.lmy = point.y
+        return
+      }
+      updateHover(point.x, point.y)
+    }
+
+    function onMouseUp(event) {
+      const point = canvasPoint(event)
+      stateRef.current.dragging = false
+      canvas.style.cursor = 'grab'
+      const hit = hitCanvasGraph(point.x, point.y, nodesRef.current)
+      if (hit?.kind === 'contact' && onSelect) onSelect(hit.originalId ?? hit.id)
+    }
+
+    function onMouseLeave() {
+      stateRef.current.dragging = false
+      stateRef.current.hov = null
+      setHovData(null)
+      canvas.style.cursor = 'grab'
+    }
+
+    function onWheel(event) {
+      event.preventDefault()
+      camRef.current.dist = clampGraph(camRef.current.dist + event.deltaY * 0.6, 200, 800)
+    }
+
+    function touchDistance(touches) {
+      const dx = touches[0].clientX - touches[1].clientX
+      const dy = touches[0].clientY - touches[1].clientY
+      return Math.hypot(dx, dy)
+    }
+
+    function onTouchStart(event) {
+      const state = stateRef.current
+      if (event.touches.length === 1) {
+        const rect = canvas.getBoundingClientRect()
+        state.dragging = true
+        state.lmx = event.touches[0].clientX - rect.left
+        state.lmy = event.touches[0].clientY - rect.top
+      } else if (event.touches.length === 2) {
+        state.dragging = false
+        state.pinch = touchDistance(event.touches)
+        state.startDist = camRef.current.dist
+      }
+    }
+
+    function onTouchMove(event) {
+      event.preventDefault()
+      const state = stateRef.current
+      if (event.touches.length === 1 && state.dragging) {
+        const rect = canvas.getBoundingClientRect()
+        const x = event.touches[0].clientX - rect.left
+        const y = event.touches[0].clientY - rect.top
+        camRef.current.theta += (x - state.lmx) * 0.007
+        camRef.current.phi += (y - state.lmy) * 0.007
+        state.lmx = x
+        state.lmy = y
+      } else if (event.touches.length === 2 && state.pinch) {
+        const nextDistance = touchDistance(event.touches)
+        camRef.current.dist = clampGraph(state.startDist - (nextDistance - state.pinch) * 1.2, 200, 800)
+      }
+    }
+
+    function onTouchEnd() {
+      stateRef.current.dragging = false
+      stateRef.current.pinch = 0
+    }
+
+    function loop() {
+      const state = stateRef.current
+      const cam = camRef.current
+      if (state.autoRot && !state.dragging) cam.theta += 0.003
+      renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef)
+      state.tick += 1
+      rafRef.current = requestAnimationFrame(loop)
+    }
+
+    function onResize() {
+      ;({ W, H, DPR } = resizeGraphCanvas(canvas))
+      rebuild()
+    }
+
+    canvas.addEventListener('mousedown', onMouseDown)
+    canvas.addEventListener('mousemove', onMouseMove)
+    canvas.addEventListener('mouseup', onMouseUp)
+    canvas.addEventListener('mouseleave', onMouseLeave)
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false })
+    canvas.addEventListener('touchmove', onTouchMove, { passive: false })
+    canvas.addEventListener('touchend', onTouchEnd)
+    window.addEventListener('resize', onResize)
+    rafRef.current = requestAnimationFrame(loop)
+
+    return () => {
+      cancelAnimationFrame(rafRef.current)
+      window.removeEventListener('resize', onResize)
+      canvas.removeEventListener('mousedown', onMouseDown)
+      canvas.removeEventListener('mousemove', onMouseMove)
+      canvas.removeEventListener('mouseup', onMouseUp)
+      canvas.removeEventListener('mouseleave', onMouseLeave)
+      canvas.removeEventListener('wheel', onWheel)
+      canvas.removeEventListener('touchstart', onTouchStart)
+      canvas.removeEventListener('touchmove', onTouchMove)
+      canvas.removeEventListener('touchend', onTouchEnd)
+    }
+  }, [graphContacts, onSelect, query])
+
+  function toggleAutoRot() {
+    const next = !stateRef.current.autoRot
+    stateRef.current.autoRot = next
+    setAutoRot(next)
+  }
+
+  function resetCam() {
+    camRef.current = { theta: 0.3, phi: 0.28, dist: 500 }
+  }
+
+  function changeFilter(nextFilter) {
+    stateRef.current.filter = nextFilter
+    setFilter(nextFilter)
+  }
+
+  return (
+    <div className="relative overflow-hidden rounded-xl border border-cyan-900/40 bg-[#030810]">
+      <div className="flex items-center gap-2 border-b border-cyan-900/30 px-4 py-2.5">
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" />
+        <span className="font-mono text-[10px] font-bold tracking-widest text-cyan-400">NETWORK · GRAFO 3D</span>
+        <div className="ml-auto flex gap-2">
+          <button type="button" onClick={toggleAutoRot} className={`rounded border px-2 py-1 font-mono text-[9px] font-bold ${autoRot ? 'border-cyan-400/50 bg-cyan-400/10 text-cyan-200' : 'border-slate-700 text-slate-500'}`}>? rotacionar</button>
+          <button type="button" onClick={resetCam} className="rounded border border-slate-700 px-2 py-1 font-mono text-[9px] font-bold text-slate-400 hover:border-cyan-400/50 hover:text-cyan-200">reset view</button>
+        </div>
+      </div>
+
+      <canvas ref={cvRef} className="block w-full cursor-grab active:cursor-grabbing" />
+
+      {hovData ? (
+        <div className="pointer-events-none absolute right-4 top-14 max-w-[240px] rounded-lg border border-cyan-400/20 bg-[#030810]/90 px-3 py-2 shadow-2xl shadow-black/30">
+          <p className="truncate font-mono text-xs font-black text-cyan-100">{hovData.name}</p>
+          <p className="mt-1 line-clamp-2 font-mono text-[10px] font-bold text-slate-400">{hovData.svc || hovData.label}</p>
+          <p className="mt-1 font-mono text-[10px] font-bold text-slate-600">{hovData.city || hovData.kind}</p>
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap gap-1.5 border-t border-cyan-900/30 bg-[#040c18] px-4 py-2">
+        {['all', 'home', 'legal', 'business', 'tech', 'groups'].map((nextFilter) => (
+          <button
+            key={nextFilter}
+            type="button"
+            onClick={() => changeFilter(nextFilter)}
+            className={`rounded-full border px-2.5 py-0.5 font-mono text-[9px] font-bold ${filter === nextFilter ? 'border-cyan-400 bg-cyan-400/15 text-cyan-100' : 'border-cyan-900/40 text-slate-500 hover:border-cyan-400/40 hover:text-cyan-200'}`}
+          >
+            {nextFilter}
+          </button>
+        ))}
+      </div>
+
+      <div className="border-t border-cyan-900/30 bg-[#040c18] px-4 py-2 font-mono text-[10px] text-slate-600">{infoText}</div>
+    </div>
+  )
+}
+
+function graphCatId(contact) {
+  const raw = contact?.cat ?? contact?.category?.id ?? contact?.category
+  const text = normalize([raw, contact?.svc, contact?.service, contact?.category?.label].filter(Boolean).join(' '))
+  if (text.includes('legal') || text.includes('jurid') || text.includes('advog')) return 'legal'
+  if (text.includes('tech') || text.includes('design') || text.includes('site') || text.includes('software')) return 'tech'
+  if (text.includes('business') || text.includes('negocio') || text.includes('financ') || text.includes('contador') || text.includes('mei')) return 'business'
+  return 'home'
+}
+
+function clampGraph(value, min, max) {
+  return Math.max(min, Math.min(max, value))
+}
+
+function hexA(hex, alpha) {
+  const h = hex.slice(0, 7)
+  const r = parseInt(h.slice(1, 3), 16)
+  const g = parseInt(h.slice(3, 5), 16)
+  const b = parseInt(h.slice(5, 7), 16)
+  return `rgba(${r},${g},${b},${alpha.toFixed(2)})`
+}
+
+function resizeGraphCanvas(canvas) {
+  const DPR = Math.min(window.devicePixelRatio || 1, 2)
+  const W = Math.max(320, canvas.parentElement?.offsetWidth ?? 720)
+  const H = Math.round(W * 0.58)
+  canvas.style.width = `${W}px`
+  canvas.style.height = `${H}px`
+  canvas.width = W * DPR
+  canvas.height = H * DPR
+  return { W, H, DPR }
+}
+
+function projectGraphPoint(x, y, z, cam, W, H) {
+  const { theta, phi, dist } = cam
+  const ct = Math.cos(theta)
+  const st = Math.sin(theta)
+  const x1 = x * ct - y * st
+  const y1 = x * st + y * ct
+  const cp = Math.cos(phi)
+  const sp = Math.sin(phi)
+  const y2 = y1 * cp - z * sp
+  const z2 = y1 * sp + z * cp
+  const f = dist / (dist + z2 + 1)
+  return { sx: W / 2 + x1 * f, sy: H / 2 + y2 * f, sc: f, zd: z2 }
+}
+
+function drawGraphLabel(ctx, text, x, y, fontSize, color, bgAlpha) {
+  ctx.font = `bold ${fontSize}px monospace`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  const tw = ctx.measureText(text).width
+  const p = 3
+  ctx.fillStyle = `rgba(3,8,16,${bgAlpha})`
+  ctx.beginPath()
+  if (ctx.roundRect) ctx.roundRect(x - tw / 2 - p, y - fontSize / 2 - p, tw + p * 2, fontSize + p * 2, 3)
+  else ctx.rect(x - tw / 2 - p, y - fontSize / 2 - p, tw + p * 2, fontSize + p * 2)
+  ctx.fill()
+  ctx.fillStyle = color
+  ctx.fillText(text, x, y)
+}
+
+function buildCanvasGraph(contacts, query, W, H) {
+  const q = normalize(query)
+  const filteredContacts = contacts
+    .filter((contact) => !q || matchText(q, [contact.name, contact.svc, contact.city, contact.trust, contact.src, contact.note, contact.cat]))
+    .slice(0, 48)
+  const nodes = [{ id: 'you', name: 'YOU', label: 'YOU', x: 0, y: 0, z: 0, r: 22, col: '#06b6d4', kind: 'hub', catId: 'hub', alpha: 1 }]
+  const edges = []
+
+  CATS.forEach((cat, index) => {
+    const angle = (Math.PI * 2 * index) / CATS.length
+    nodes.push({
+      id: `cat-${cat.id}`,
+      name: cat.label,
+      label: cat.label,
+      x: Math.cos(angle) * 150,
+      y: Math.sin(angle) * 150,
+      z: 0,
+      r: 14,
+      col: cat.col,
+      kind: 'cat',
+      catId: cat.id,
+      alpha: 1,
+    })
+    edges.push({ a: 'you', b: `cat-${cat.id}`, k: 'hub', catId: cat.id })
+  })
+
+  filteredContacts.forEach((contact, index) => {
+    const ci = Math.max(0, CATS.findIndex((cat) => cat.id === contact.cat))
+    const base = (Math.PI * 2 * ci) / CATS.length
+    const spread = 0.35 * (index % 2 === 0 ? 1 : -1) + Math.floor(index / CATS.length) * 0.09
+    const angle = base + spread
+    const id = `contact-${contact.id}`
+    nodes.push({
+      ...contact,
+      id,
+      originalId: contact.originalId ?? contact.id,
+      x: Math.cos(angle) * 265,
+      y: Math.sin(angle) * 265,
+      z: ((index % 3) - 1) * 45,
+      r: 13,
+      col: catCol(contact.cat),
+      kind: 'contact',
+      catId: contact.cat,
+      alpha: 1,
+    })
+    edges.push({ a: `cat-${contact.cat}`, b: id, k: 'contact', catId: contact.cat })
+  })
+
+  filteredContacts.forEach((contact, index) => {
+    filteredContacts.slice(index + 1).forEach((other) => {
+      if (normalize(contact.city) && normalize(contact.city) === normalize(other.city)) {
+        edges.push({ a: `contact-${contact.id}`, b: `contact-${other.id}`, k: 'city' })
+      }
+    })
+  })
+
+  GROUPS_SEED.forEach((group, index) => {
+    const ci = Math.max(0, CATS.findIndex((cat) => cat.id === group.cat))
+    const base = (Math.PI * 2 * ci) / CATS.length
+    const angle = base + (index % 2 === 0 ? 0.5 : -0.5)
+    const id = `group-${group.id}`
+    nodes.push({
+      ...group,
+      id,
+      originalId: group.id,
+      x: Math.cos(angle) * 370,
+      y: Math.sin(angle) * 370,
+      z: (index % 2 === 0 ? 1 : -1) * 30,
+      r: 11,
+      col: catCol(group.cat),
+      kind: 'group',
+      catId: group.cat,
+      dashed: true,
+      alpha: 1,
+    })
+    edges.push({ a: `cat-${group.cat}`, b: id, k: 'group', catId: group.cat })
+  })
+
+  applyGraphFilter('all', nodes)
+  return { nodes, edges, W, H }
+}
+
+function applyGraphFilter(filter, nodes) {
+  nodes.forEach((node) => {
+    if (node.kind === 'hub') {
+      node.alpha = 1
+      return
+    }
+    if (filter === 'all') {
+      node.alpha = 1
+      return
+    }
+    if (filter === 'groups') {
+      node.alpha = node.kind === 'group' ? 1 : node.kind === 'cat' ? 0.4 : 0.1
+      return
+    }
+    node.alpha = node.catId === filter ? 1 : node.kind === 'cat' ? 0.3 : 0.07
   })
 }
 
-function createGraphStars() {
-  const starCount = 240
-  const positions = []
-  for (let index = 0; index < starCount; index += 1) {
-    positions.push((Math.random() - 0.5) * 34, (Math.random() - 0.5) * 22, (Math.random() - 0.5) * 24)
+function hitCanvasGraph(mx, my, pnodes) {
+  return [...pnodes].reverse().find((node) => {
+    const dx = node.sx - mx
+    const dy = node.sy - my
+    return dx * dx + dy * dy < (node.r * node.sc * 1.5) ** 2
+  }) ?? null
+}
+
+function renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef) {
+  applyGraphFilter(state.filter, nodes)
+  ctx.save()
+  ctx.scale(DPR, DPR)
+  ctx.clearRect(0, 0, W, H)
+  ctx.fillStyle = '#030810'
+  ctx.fillRect(0, 0, W, H)
+
+  for (let gx = -400; gx <= 400; gx += 45) {
+    for (let gy = -400; gy <= 400; gy += 45) {
+      const p = projectGraphPoint(gx, gy, -90, cam, W, H)
+      ctx.beginPath()
+      ctx.fillStyle = 'rgba(6,182,212,0.045)'
+      ctx.arc(p.sx, p.sy, 0.9, 0, Math.PI * 2)
+      ctx.fill()
+    }
   }
-  const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  const material = new THREE.PointsMaterial({ color: '#94a3b8', size: 0.018, transparent: true, opacity: 0.42 })
-  return new THREE.Points(geometry, material)
+
+  ctx.strokeStyle = 'rgba(6,182,212,0.04)'
+  ctx.lineWidth = 0.5
+  for (let g = -400; g <= 400; g += 45) {
+    const a = projectGraphPoint(-400, g, -90, cam, W, H)
+    const b = projectGraphPoint(400, g, -90, cam, W, H)
+    const c = projectGraphPoint(g, -400, -90, cam, W, H)
+    const d = projectGraphPoint(g, 400, -90, cam, W, H)
+    ctx.beginPath()
+    ctx.moveTo(a.sx, a.sy)
+    ctx.lineTo(b.sx, b.sy)
+    ctx.moveTo(c.sx, c.sy)
+    ctx.lineTo(d.sx, d.sy)
+    ctx.stroke()
+  }
+
+  const projectedById = new globalThis.Map()
+  const pnodes = nodes.map((node) => {
+    const p = projectGraphPoint(node.x, node.y, node.z, cam, W, H)
+    const projected = { ...node, ...p }
+    projectedById.set(node.id, projected)
+    return projected
+  })
+  pnodes.sort((a, b) => a.zd - b.zd)
+
+  edges.forEach((edge, edgeIndex) => {
+    const a = projectedById.get(edge.a)
+    const b = projectedById.get(edge.b)
+    if (!a || !b) return
+    const al = Math.min(a.alpha ?? 1, b.alpha ?? 1)
+    if (al <= 0.04) return
+    const sc = Math.max(0.45, (a.sc + b.sc) / 2)
+    const color = edge.k === 'contact' ? catCol(edge.catId) : edge.k === 'city' ? '#fbbf24' : edge.k === 'group' ? '#94a3b8' : '#06b6d4'
+    const opacity = edge.k === 'hub' ? 0.3 * al : edge.k === 'contact' ? 0.2 * al : edge.k === 'city' ? 0.25 * al : 0.12 * al
+    ctx.setLineDash(edge.k === 'group' ? [6, 9] : edge.k === 'city' ? [2, 5] : [])
+    ctx.strokeStyle = hexA(color, opacity)
+    ctx.lineWidth = (edge.k === 'hub' ? 1.2 : edge.k === 'contact' ? 0.9 : edge.k === 'city' ? 0.8 : 0.7) * sc
+    ctx.beginPath()
+    ctx.moveTo(a.sx, a.sy)
+    ctx.lineTo(b.sx, b.sy)
+    ctx.stroke()
+    ctx.setLineDash([])
+
+    if (edge.k === 'hub' || edge.k === 'contact') {
+      const t = (state.tick / 90 + edgeIndex * 0.17) % 1
+      const x = a.sx + (b.sx - a.sx) * t
+      const y = a.sy + (b.sy - a.sy) * t
+      ctx.beginPath()
+      ctx.fillStyle = hexA(color, 0.75 * al)
+      ctx.arc(x, y, 1.6 * sc, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  })
+
+  pnodes.forEach((node) => {
+    const al = node.alpha ?? 1
+    if (al <= 0.03) return
+    const r = node.r * node.sc
+    const floor = projectGraphPoint(node.x, node.y, -90, cam, W, H)
+    const depthBright = clampGraph((node.zd + 300) / 600, 0, 1)
+    const hover = state.hov === node.id
+
+    ctx.beginPath()
+    ctx.fillStyle = hexA('#000000', 0.18 * al)
+    ctx.ellipse(floor.sx, floor.sy, r * 0.85, r * 0.28, 0, 0, Math.PI * 2)
+    ctx.fill()
+
+    if (node.kind === 'hub') {
+      ;[2.2, 3.2, 4.4].forEach((mul, ringIndex) => {
+        ctx.beginPath()
+        ctx.strokeStyle = hexA('#06b6d4', (0.07 + 0.05 * Math.sin(state.tick * 0.045 + ringIndex * 1.1)) * al)
+        ctx.lineWidth = 1
+        ctx.arc(node.sx, node.sy, r * mul, 0, Math.PI * 2)
+        ctx.stroke()
+      })
+    }
+
+    ctx.beginPath()
+    ctx.fillStyle = node.kind === 'hub' ? `rgba(3,10,22,${al})` : `rgba(7,18,36,${al})`
+    ctx.strokeStyle = hover ? hexA('#ffffff', al) : hexA(node.col, (0.55 + 0.45 * depthBright) * al)
+    ctx.lineWidth = node.kind === 'hub' ? 2.5 : hover ? 2.2 : 1.3
+    if (node.kind === 'group') ctx.setLineDash([3, 3])
+    ctx.arc(node.sx, node.sy, r, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.stroke()
+    ctx.setLineDash([])
+
+    if (node.kind === 'hub') {
+      const fs = Math.max(8, Math.round(11 * node.sc))
+      drawGraphLabel(ctx, 'YOU', node.sx, node.sy - r - fs, fs, hexA('#67e8f9', al), 0.78 * al)
+      drawGraphLabel(ctx, 'hub', node.sx, node.sy + r + fs, Math.max(6, Math.round(7 * node.sc)), hexA('#06b6d4', al * 0.7), 0.62 * al)
+    } else if (node.kind === 'cat') {
+      drawGraphLabel(ctx, node.label, node.sx, node.sy - r - 9, Math.max(9, Math.round(10 * node.sc)), hexA('#ffffff', al), 0.84 * al)
+    } else if (node.kind === 'contact') {
+      const fs = Math.max(7, Math.round(9 * node.sc))
+      drawGraphLabel(ctx, node.name, node.sx, node.sy - r - fs, fs, hexA('#e2e8f0', al * 0.95), 0.72 * al)
+      if (node.sc > 0.45) drawGraphLabel(ctx, node.trust, node.sx, node.sy + r + fs + 2, Math.max(6, Math.round(7.5 * node.sc)), hexA(TRUST_COL[node.trust] ?? '#64748b', al * 0.85), 0.72 * al)
+    } else if (node.kind === 'group') {
+      const fs = Math.max(7, Math.round(8.5 * node.sc))
+      drawGraphLabel(ctx, node.name, node.sx, node.sy - r - fs, fs, hexA('#cbd5e1', al * 0.9), 0.7 * al)
+      if (node.sc > 0.42) drawGraphLabel(ctx, `${node.people} mbr`, node.sx, node.sy + r + fs + 2, Math.max(6, Math.round(7 * node.sc)), hexA(node.col, al * 0.7), 0.65 * al)
+    }
+  })
+
+  drawGraphLegend(ctx)
+  nodesRef.current = pnodes
+  ctx.restore()
 }
 
-function createGraphTextSprite(text, color = '#e2e8f0', background = 'rgba(2,6,23,0.72)', fontSize = 40) {
-  const canvas = document.createElement('canvas')
-  const context = canvas.getContext('2d')
-  const safeText = String(text || '').slice(0, 32)
-  context.font = `900 ${fontSize}px Arial`
-  const width = Math.max(180, Math.ceil(context.measureText(safeText).width + 44))
-  canvas.width = width
-  canvas.height = 76
-  context.font = `900 ${fontSize}px Arial`
-  context.textAlign = 'center'
-  context.textBaseline = 'middle'
-  context.fillStyle = background
-  roundRect(context, 0, 8, width, 56, 14)
-  context.fill()
-  context.fillStyle = color
-  context.fillText(safeText, width / 2, 38)
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.colorSpace = THREE.SRGBColorSpace
-  const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false })
-  return new THREE.Sprite(material)
-}
-
-function roundRect(context, x, y, width, height, radius) {
-  context.beginPath()
-  context.moveTo(x + radius, y)
-  context.lineTo(x + width - radius, y)
-  context.quadraticCurveTo(x + width, y, x + width, y + radius)
-  context.lineTo(x + width, y + height - radius)
-  context.quadraticCurveTo(x + width, y + height, x + width - radius, y + height)
-  context.lineTo(x + radius, y + height)
-  context.quadraticCurveTo(x, y + height, x, y + height - radius)
-  context.lineTo(x, y + radius)
-  context.quadraticCurveTo(x, y, x + radius, y)
-  context.closePath()
+function drawGraphLegend(ctx) {
+  const x = 14
+  let y = 18
+  ctx.font = 'bold 10px monospace'
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'middle'
+  ctx.fillStyle = 'rgba(3,8,16,0.68)'
+  ctx.beginPath()
+  if (ctx.roundRect) ctx.roundRect(10, 10, 148, 94, 6)
+  else ctx.rect(10, 10, 148, 94)
+  ctx.fill()
+  ctx.fillStyle = '#67e8f9'
+  ctx.fillText('camadas', x, y)
+  CATS.forEach((cat) => {
+    y += 18
+    ctx.beginPath()
+    ctx.fillStyle = cat.col
+    ctx.arc(x + 5, y, 3.5, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.fillStyle = '#94a3b8'
+    ctx.fillText(cat.label, x + 16, y)
+  })
 }
 
 function SelectedMapCard({ contact, centerAddress }) {
   if (!contact) {
     return (
-      <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4 shadow-sm">
+      <div className="glass-panel rounded-lg p-4">
         <p className="text-sm font-black text-slate-100">Selecione uma pessoa</p>
         <p className="mt-1 text-sm font-medium text-slate-500">Clique em um nó do grafo ou em um item da lista.</p>
       </div>
@@ -3985,7 +5087,7 @@ function SelectedMapCard({ contact, centerAddress }) {
   const destination = contact.locationQuery || contact.address
   const mapsUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(centerAddress)}&destination=${encodeURIComponent(destination)}`
   return (
-    <div className="rounded-lg border border-cyan-500/30 bg-[#0d1a2e] p-4 shadow-sm">
+    <div className="glass-panel rounded-lg p-4">
       <div className="flex items-start gap-3">
         <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-sm font-black text-white" style={{ backgroundColor: contact.category?.color ?? generalCategory.color }}>
           {initials(contact.name)}
@@ -4004,7 +5106,7 @@ function SelectedMapCard({ contact, centerAddress }) {
       <button
         type="button"
         onClick={() => window.open(mapsUrl, '_blank', 'noopener,noreferrer')}
-        className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-cyan-500 text-sm font-black text-slate-950"
+        className="primary-button mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg text-sm font-black"
       >
         <Navigation size={17} />
         Abrir rota no Google Maps
@@ -4096,7 +5198,7 @@ function GoogleLocationMap({ user, centerAddress, contacts, selectedContact, onS
   }, [centerAddress, contacts, onSelect, selectedContact, user?.name])
 
   return (
-    <section className="overflow-hidden rounded-lg border border-[#1e293b] bg-[#0d1a2e] shadow-sm">
+    <section className="glass-panel overflow-hidden rounded-lg">
       <div className="flex flex-col gap-2 border-b border-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <p className="text-sm font-black text-slate-100">Localização no Google Maps</p>
@@ -4170,8 +5272,8 @@ function LoginPage({ onLogin, onGoogleLogin, onSaveUser, onImportContacts, onImp
   }
 
   return (
-    <AuthLayout title="Acesso" description="Entre na sua rede ou crie seu cadastro com endereço, telefone e perfil de colaborador.">
-      <div className="mb-4 grid grid-cols-2 rounded-lg border border-slate-800 bg-slate-950/40 p-1">
+    <AuthLayout title="Sua agenda vira uma rede de oportunidades" description="O Network Agenda organiza seus contatos, acompanha follow-ups, conecta perfis públicos e ajuda você a encontrar a pessoa certa pelo contexto certo.">
+      <div className="glass-panel-soft mb-4 grid grid-cols-2 rounded-lg p-1">
         {[
           ['login', 'Entrar'],
           ['register', 'Cadastrar'],
@@ -4182,7 +5284,7 @@ function LoginPage({ onLogin, onGoogleLogin, onSaveUser, onImportContacts, onImp
             onClick={() => setMode(id)}
             className={[
               'h-10 rounded-md text-sm font-black transition',
-              mode === id ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 hover:text-cyan-300',
+              mode === id ? 'nav-pill-active' : 'text-slate-400 hover:text-cyan-300',
             ].join(' ')}
           >
             {label}
@@ -4203,7 +5305,7 @@ function LoginPage({ onLogin, onGoogleLogin, onSaveUser, onImportContacts, onImp
               {status}
             </p>
           ) : null}
-          <button type="submit" className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-cyan-500 text-sm font-black text-slate-950">
+          <button type="submit" className="primary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black">
             <LogIn size={18} />
             Entrar
           </button>
@@ -4221,7 +5323,7 @@ function LoginPage({ onLogin, onGoogleLogin, onSaveUser, onImportContacts, onImp
                 setIsGoogleLoading(false)
               }
             }}
-            className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 text-sm font-black text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+            className="secondary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Cloud size={18} />
             {isGoogleLoading ? 'Conectando...' : 'Entrar com Google'}
@@ -4243,9 +5345,9 @@ function LoginPage({ onLogin, onGoogleLogin, onSaveUser, onImportContacts, onImp
 
 function RegisterPage({ user, onSaveUser, onImportContacts, onImportGoogleContacts, onImportGoogleProfile, onNavigate }) {
   return (
-    <AuthLayout title="Perfil" description="Atualize seus dados, endereço, interesses e se você também oferece serviços na rede.">
+    <AuthLayout title="Meu perfil" description="Atualize seus dados pessoais, contato, endereço e conexão Google.">
       <UserProfileForm initialUser={user ?? defaultUser} submitLabel={user ? 'Salvar perfil' : 'Criar cadastro'} onSubmit={onSaveUser} onImportContacts={onImportContacts} onImportGoogleContacts={onImportGoogleContacts} onImportGoogleProfile={onImportGoogleProfile} />
-      <button type="button" onClick={() => onNavigate(ROUTES.LOGIN)} className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-slate-800 text-sm font-black text-slate-300">
+      <button type="button" onClick={() => onNavigate(ROUTES.LOGIN)} className="secondary-button mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg text-sm font-black">
         <LogIn size={17} />
         Trocar usuário
       </button>
@@ -4260,6 +5362,9 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
   const [pendingImportedContacts, setPendingImportedContacts] = useState([])
   const [errors, setErrors] = useState({})
   const isCreating = submitLabel.toLowerCase().includes('criar')
+  const googleConnected = hasGoogleConnection(draft)
+  const googleContactsImported = Boolean(draft.googleContactsImportedAt)
+  const googleProfileSynced = Boolean(draft.googleProfileSyncedAt)
 
   function updateDraft(field, value) {
     setDraft((current) => {
@@ -4358,8 +5463,14 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
     try {
       setImportStatus('Abrindo permissão do Google...')
       const contacts = await onImportGoogleContacts?.()
+      const importedAt = contacts?.length ? new Date().toISOString() : ''
+      setDraft((current) => ({
+        ...current,
+        googleConnected: true,
+        googleContactsImportedAt: importedAt || current.googleContactsImportedAt,
+      }))
       if (!contacts?.length) {
-        setImportStatus('Nenhum contato do Google disponível para importar.')
+        setImportStatus('Google conectado. Nenhum contato disponível para importar.')
         return
       }
       if (isCreating) {
@@ -4388,6 +5499,8 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
         email: googleDraft.email || current.email,
         phone: googleDraft.phone || current.phone,
         birthDate: googleDraft.birthDate || current.birthDate,
+        googleConnected: true,
+        googleProfileSyncedAt: new Date().toISOString(),
       }))
       const missing = [
         googleDraft.phone ? '' : 'telefone',
@@ -4403,18 +5516,12 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
     }
   }
 
-  function toggleInterest(id) {
-    setDraft((current) => {
-      const hasInterest = current.interests.includes(id)
-      return {
-        ...current,
-        interests: hasInterest ? current.interests.filter((item) => item !== id) : [...current.interests, id],
-      }
-    })
-  }
-
   async function submit(event) {
     event.preventDefault()
+    if (!hasGoogleConnection(draft)) {
+      setImportStatus('Conecte sua conta Google no rodapé para salvar o perfil e liberar mapa/rede pública.')
+      return
+    }
     const nextErrors = {
       name: draft.name.trim() ? '' : 'Obrigatório.',
       email: draft.email.trim() ? '' : 'Obrigatório.',
@@ -4424,12 +5531,12 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
       cep: isValidCep(draft.cep) ? '' : 'CEP obrigatório e válido.',
       city: draft.city.trim() ? '' : 'Informe a cidade manualmente se o CEP não localizar.',
       state: draft.state.trim() ? '' : 'Informe a UF.',
-      addressNumber: draft.isCollaborator && !draft.useDifferentServiceAddress && !draft.addressNumber.trim() ? 'Obrigatório para colaboradores.' : '',
-      offeredServices: draft.isCollaborator && !draft.offeredServices.trim() ? 'Obrigatório para colaboradores.' : '',
-      serviceCep: draft.isCollaborator && draft.useDifferentServiceAddress && !isValidCep(draft.serviceCep) ? 'CEP obrigatório e válido.' : '',
-      serviceCity: draft.isCollaborator && draft.useDifferentServiceAddress && !draft.serviceCity.trim() ? 'Informe a cidade de atendimento.' : '',
-      serviceState: draft.isCollaborator && draft.useDifferentServiceAddress && !draft.serviceState.trim() ? 'Informe a UF de atendimento.' : '',
-      serviceAddressNumber: draft.isCollaborator && draft.useDifferentServiceAddress && !draft.serviceAddressNumber.trim() ? 'Obrigatório para colaboradores.' : '',
+      addressNumber: '',
+      offeredServices: '',
+      serviceCep: '',
+      serviceCity: '',
+      serviceState: '',
+      serviceAddressNumber: '',
     }
     setErrors(nextErrors)
     if (Object.values(nextErrors).some(Boolean)) {
@@ -4440,30 +5547,15 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
       }))
       return
     }
-    onSubmit(normalizeUserDraft(draft), pendingImportedContacts)
+    try {
+      await onSubmit(normalizeUserDraft(draft), pendingImportedContacts)
+    } catch (error) {
+      setImportStatus(error.message || 'Não foi possível salvar o perfil.')
+    }
   }
 
   return (
     <form onSubmit={submit} noValidate className="space-y-3">
-      <section className="rounded-lg border border-slate-800 bg-slate-950/30 p-3">
-        <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Google</p>
-        <p className="mt-1 text-sm font-semibold text-slate-400">Preencha seus dados de conta e importe contatos quando quiser. Tudo continua editável antes de salvar.</p>
-        <div className="mt-3 grid gap-2 sm:grid-cols-3">
-          <button type="button" onClick={fillProfileFromGoogle} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-cyan-500/50 bg-cyan-500/10 px-3 text-sm font-black text-cyan-100">
-            <UserRound size={17} />
-            Preencher cadastro
-          </button>
-          <button type="button" onClick={importGoogleContacts} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-800 bg-[#0d1a2e] px-3 text-sm font-black text-slate-200">
-            <Cloud size={17} />
-            Importar contatos
-          </button>
-          <button type="button" onClick={importPhoneContacts} className="h-10 rounded-lg border border-slate-800 bg-[#0d1a2e] px-3 text-sm font-black text-slate-200">
-            Contatos do telefone
-          </button>
-        </div>
-        {importStatus ? <p className="mt-2 text-xs font-bold text-slate-500">{importStatus}</p> : null}
-      </section>
-
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Nome" required error={errors.name}>
           <input value={draft.name} onChange={(event) => updateDraft('name', event.target.value)} className={inputClass(errors.name)} placeholder="Seu nome" />
@@ -4509,176 +5601,31 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
         </Field>
       </div>
 
-      <label className="flex items-start gap-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-sm font-bold text-slate-300">
-        <input
-          type="checkbox"
-          checked={draft.addressVisible}
-          onChange={(event) => updateDraft('addressVisible', event.target.checked)}
-          className="mt-1"
-        />
-        <span>
-          <span className="block text-slate-100">Mostrar meu endereço para outras pessoas</span>
-          <span className="block text-xs font-semibold text-slate-500">Se desativado, o app usa o endereço para mapa e sugestões, mas não exibe públicamente.</span>
-        </span>
-      </label>
-
-      <section className="space-y-3 rounded-lg border border-slate-800 bg-slate-950/30 p-3">
-        <label className="flex items-start gap-3 text-sm font-bold text-slate-300">
-          <input
-            type="checkbox"
-            checked={draft.publicVisible}
-            onChange={(event) => updateDraft('publicVisible', event.target.checked)}
-            className="mt-1"
-          />
-          <span>
-            <span className="block text-slate-100">Quero ser vista na rede pública</span>
-            <span className="block text-xs font-semibold text-slate-500">Cria um card público dentro da plataforma com seus dados profissionais e sociais preenchidos.</span>
-          </span>
-        </label>
-        {draft.publicVisible ? (
-          <div className="grid gap-3">
-            <Field label="Descrição pública">
-              <textarea value={draft.publicDescription} onChange={(event) => updateDraft('publicDescription', event.target.value)} className="field-input min-h-20 resize-y" placeholder="Quem é você e como quer aparecer na rede" />
-            </Field>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="O que demanda atualmente">
-                <textarea value={draft.publicDemand} onChange={(event) => updateDraft('publicDemand', event.target.value)} className="field-input min-h-20 resize-y" placeholder="O que você está buscando agora" />
-              </Field>
-              <Field label="Problema que resolve">
-                <textarea value={draft.publicSolves} onChange={(event) => updateDraft('publicSolves', event.target.value)} className="field-input min-h-20 resize-y" placeholder="Que tipo de problema você resolve" />
-              </Field>
+      <section className="glass-panel-soft rounded-lg border border-cyan-400/15 bg-cyan-950/10 p-3">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Conta Google obrigatória</p>
+              <span className={['rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-widest', googleConnected ? 'bg-emerald-500/10 text-emerald-300' : 'bg-amber-500/10 text-amber-300'].join(' ')}>
+                {googleConnected ? 'conectada' : 'pendente'}
+              </span>
+              {googleContactsImported ? <span className="rounded-full bg-cyan-500/10 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-cyan-200">contatos importados</span> : null}
             </div>
-            <Field label="Tags públicas">
-              <input value={draft.publicTags} onChange={(event) => updateDraft('publicTags', event.target.value)} className="field-input" placeholder="networking, vendas, eventos" />
-            </Field>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="WhatsApp público">
-                <input value={draft.publicWhatsapp} onChange={(event) => updateDraft('publicWhatsapp', event.target.value)} className="field-input" placeholder="Use vazio para aproveitar seu telefone" />
-              </Field>
-              <Field label="Instagram">
-                <input value={draft.publicInstagram} onChange={(event) => updateDraft('publicInstagram', event.target.value)} className="field-input" placeholder="@usuario" />
-              </Field>
-              <Field label="LinkedIn">
-                <input value={draft.publicLinkedin} onChange={(event) => updateDraft('publicLinkedin', event.target.value)} className="field-input" placeholder="linkedin.com/in/..." />
-              </Field>
-              <Field label="URL customizada">
-                <input value={draft.publicUrl} onChange={(event) => updateDraft('publicUrl', event.target.value)} className="field-input" placeholder="site, portfólio ou agenda" />
-              </Field>
-            </div>
+            <p className="mt-1 text-xs font-semibold leading-5 text-slate-500">
+              Necessária para manter o perfil salvo e liberar mapa, rede pública e recursos conectados.
+            </p>
           </div>
-        ) : null}
-      </section>
-
-      <label className="flex items-start gap-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-sm font-bold text-slate-300">
-        <input
-          type="checkbox"
-          checked={draft.isCollaborator}
-          onChange={(event) => updateDraft('isCollaborator', event.target.checked)}
-          className="mt-1"
-        />
-        <span>
-          <span className="block text-slate-100">Sou colaborador</span>
-          <span className="block text-xs font-semibold text-slate-500">Ative se você também oferece serviços para outras pessoas da rede.</span>
-        </span>
-      </label>
-
-      {draft.isCollaborator ? (
-        <Field label="Serviços oferecidos" required error={errors.offeredServices}>
-          <input
-            value={draft.offeredServices}
-            onChange={(event) => updateDraft('offeredServices', event.target.value)}
-            className={inputClass(errors.offeredServices)}
-            placeholder="Ex: eletricista, designer, contabilidade"
-          />
-        </Field>
-      ) : null}
-
-      {draft.isCollaborator ? (
-        <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-950/30 p-3">
-          <label className="flex items-start gap-3 text-sm font-bold text-slate-300">
-            <input
-              type="checkbox"
-              checked={draft.useDifferentServiceAddress}
-              onChange={(event) => updateDraft('useDifferentServiceAddress', event.target.checked)}
-              className="mt-1"
-            />
-            <span>
-              <span className="block text-slate-100">Usar outro endereço válido para meus serviços</span>
-              <span className="block text-xs font-semibold text-slate-500">Esse endereço também precisa de CEP validado.</span>
-            </span>
-          </label>
-
-          {draft.useDifferentServiceAddress ? (
-            <>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="CEP de atendimento" required error={errors.serviceCep}>
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <input value={draft.serviceCep} onChange={(event) => updateDraft('serviceCep', formatCep(event.target.value))} className={inputClass(errors.serviceCep)} inputMode="numeric" placeholder="00000-000" />
-                    <button type="button" onClick={() => findCep('service')} className="h-11 shrink-0 rounded-lg bg-cyan-500 px-3 text-sm font-black text-slate-950">
-                      Localizar
-                    </button>
-                  </div>
-                  {cepStatus.service ? <span className="mt-1 block text-xs font-bold text-slate-500">{cepStatus.service}</span> : null}
-                </Field>
-                <Field label="Rua de atendimento">
-                  <input value={draft.serviceAddressLine} onChange={(event) => updateDraft('serviceAddressLine', event.target.value)} className="field-input" placeholder="Rua" />
-                </Field>
-                <Field label="Número" required error={errors.serviceAddressNumber}>
-                  <input value={draft.serviceAddressNumber} onChange={(event) => updateDraft('serviceAddressNumber', event.target.value)} className={inputClass(errors.serviceAddressNumber)} placeholder="Número" />
-                </Field>
-                <Field label="Complemento">
-                  <input value={draft.serviceAddressComplement} onChange={(event) => updateDraft('serviceAddressComplement', event.target.value)} className="field-input" placeholder="Sala, loja, referencia" />
-                </Field>
-                <Field label="Bairro">
-                  <input value={draft.serviceNeighborhood} onChange={(event) => updateDraft('serviceNeighborhood', event.target.value)} className="field-input" placeholder="Bairro" />
-                </Field>
-                <Field label="Cidade de atendimento" required error={errors.serviceCity}>
-                  <input value={draft.serviceCity} onChange={(event) => updateDraft('serviceCity', event.target.value)} className={inputClass(errors.serviceCity)} placeholder="Cidade" />
-                </Field>
-                <Field label="UF de atendimento" required error={errors.serviceState}>
-                  <input value={draft.serviceState} onChange={(event) => updateDraft('serviceState', event.target.value.toUpperCase().slice(0, 2))} className={inputClass(errors.serviceState)} placeholder="UF" />
-                </Field>
-              </div>
-              <label className="flex items-start gap-3 text-sm font-bold text-slate-300">
-                <input
-                  type="checkbox"
-                  checked={draft.serviceAddressVisible}
-                  onChange={(event) => updateDraft('serviceAddressVisible', event.target.checked)}
-                  className="mt-1"
-                />
-                <span>
-                  <span className="block text-slate-100">Mostrar endereço de atendimento</span>
-                  <span className="block text-xs font-semibold text-slate-500">Se desativado, outras pessoas veem apenas a região aproximada.</span>
-                </span>
-              </label>
-            </>
-          ) : null}
-        </div>
-      ) : null}
-
-      <div>
-        <p className="mb-2 text-xs font-black uppercase tracking-widest text-slate-500">Interesses</p>
-        <div className="grid grid-cols-2 gap-2">
-          {categoryCatalog.map((category) => {
-            const selected = draft.interests.includes(category.id)
-            const Icon = category.icon
-            return (
-              <button
-                key={category.id}
-                type="button"
-                onClick={() => toggleInterest(category.id)}
-                className={[
-                  'flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm font-black',
-                  selected ? 'border-cyan-500 bg-cyan-500/10 text-cyan-200' : 'border-slate-800 bg-[#0d1a2e] text-slate-300',
-                ].join(' ')}
-              >
-                <Icon size={16} />
-                <span className="truncate">{category.label}</span>
+          <div className="flex flex-wrap gap-2">
+            {!googleProfileSynced ? (
+              <button type="button" onClick={fillProfileFromGoogle} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-cyan-500/50 bg-cyan-500/10 px-3 text-sm font-black text-cyan-100">
+                <UserRound size={17} />
+                Conectar Google
               </button>
-            )
-          })}
+            ) : null}
+          </div>
         </div>
-      </div>
+        {importStatus ? <p className="mt-2 text-xs font-bold text-slate-500">{importStatus}</p> : null}
+      </section>
 
       <button type="submit" className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-cyan-500 text-sm font-black text-slate-950">
         <Check size={18} />
@@ -4690,20 +5637,19 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
 
 function AuthLayout({ title, description, children }) {
   return (
-    <div className="mx-auto grid max-w-5xl gap-6 lg:grid-cols-[minmax(0,1fr)_420px]">
-      <section className="rounded-lg bg-slate-950 p-6 text-white sm:p-8">
-        <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-cyan-500 text-slate-950">
-          <Zap size={24} />
+    <div className="auth-stage mx-auto min-h-[calc(100vh-3rem)] max-w-3xl px-1 py-8 sm:px-0 lg:py-10">
+      <section className="auth-lead mx-auto flex max-w-2xl flex-col items-center justify-center text-center text-white">
+        <div className="flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-black uppercase tracking-widest text-cyan-100">
+          <Zap size={14} />
+          Network Agenda
         </div>
-        <h1 className="mt-6 text-3xl font-black tracking-normal">{title}</h1>
-        <p className="mt-2 max-w-md text-sm font-medium text-slate-300">{description}</p>
-        <div className="mt-8 grid gap-3 sm:grid-cols-3">
-          <AuthFeature icon={MapPin} label="Endereço" />
-          <AuthFeature icon={SlidersHorizontal} label="Interesses" />
-          <AuthFeature icon={ShieldCheck} label="Perfil" />
-        </div>
+        <h1 className="constellation-title mt-5 text-3xl font-black leading-tight tracking-normal sm:text-4xl">{title}</h1>
+        <p className="text-balance mt-4 max-w-xl text-sm font-semibold leading-6 text-slate-400 sm:text-base">
+          {description}
+        </p>
       </section>
-      <section className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4 shadow-sm sm:p-5">{children}</section>
+
+      <section className="auth-form-panel mx-auto mt-5 max-w-xl rounded-xl p-4 sm:p-5">{children}</section>
     </div>
   )
 }
@@ -4720,11 +5666,11 @@ function AuthFeature({ icon: Icon, label }) {
 function ConnectionsPage({ user, contacts, publicProfiles, backendOnline, onNavigate }) {
   if (user?.role !== 'admin') {
     return (
-      <div className="mx-auto max-w-md rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-6 text-center shadow-sm">
+      <div className="glass-panel mx-auto max-w-md rounded-lg p-6 text-center">
         <Lock className="mx-auto text-slate-300" size={36} />
         <h1 className="mt-3 text-xl font-black text-slate-100">Área administrativa</h1>
         <p className="mt-1 text-sm font-medium text-slate-500">Conexões ficam visíveis somente para administradores.</p>
-        <button type="button" onClick={() => onNavigate(ROUTES.LOGIN)} className="mt-4 inline-flex h-10 items-center justify-center rounded-lg bg-slate-950 px-4 text-sm font-black text-white">
+        <button type="button" onClick={() => onNavigate(ROUTES.LOGIN)} className="primary-button mt-4 inline-flex h-10 items-center justify-center rounded-lg px-4 text-sm font-black">
           Entrar como admin
         </button>
       </div>
@@ -4744,7 +5690,7 @@ function ConnectionsPage({ user, contacts, publicProfiles, backendOnline, onNavi
         <AdminMetric icon={ContactRound} label="Contatos" value={contacts.length} />
         <AdminMetric icon={UsersRound} label="Rede" value={publicProfiles.length} />
       </section>
-      <section className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] shadow-sm">
+      <section className="glass-panel rounded-lg">
         <div className="border-b border-slate-800 px-4 py-3">
           <h2 className="text-base font-black text-slate-100">Categorias conectadas</h2>
         </div>
@@ -4769,7 +5715,7 @@ function ConnectionsPage({ user, contacts, publicProfiles, backendOnline, onNavi
 
 function AdminMetric({ icon: Icon, label, value }) {
   return (
-    <div className="rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4 shadow-sm">
+    <div className="glass-panel rounded-lg p-4">
       <Icon size={20} className="text-cyan-700" />
       <p className="mt-3 text-xs font-black uppercase tracking-widest text-slate-400">{label}</p>
       <p className="mt-1 text-xl font-black text-slate-100">{value}</p>
@@ -4783,13 +5729,13 @@ function GroupModal({ profile, onClose, onToast }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/50 p-3 sm:items-center">
-      <div className="w-full max-w-lg rounded-lg border border-[#1e293b] bg-[#0d1a2e] p-4 shadow-2xl sm:p-5">
+      <div className="glass-panel w-full max-w-lg rounded-lg p-4 shadow-2xl sm:p-5">
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-xs font-black uppercase tracking-widest text-cyan-700">Serviço oferecido</p>
             <h2 className="mt-1 text-xl font-black text-slate-100">{title}</h2>
             <div className="mt-3 flex flex-wrap gap-1.5">
-              {serviceTags.map((tag) => <span key={tag} className="rounded-md bg-slate-950 px-2 py-1 text-[11px] font-black text-cyan-200">{tag}</span>)}
+              {serviceTags.map((tag) => <span key={tag} className="rounded-md border border-cyan-400/10 bg-cyan-400/10 px-2 py-1 text-[11px] font-black text-cyan-100">{tag}</span>)}
             </div>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg bg-slate-900 p-2 text-slate-400" aria-label="Fechar">
@@ -4818,7 +5764,7 @@ function Toast({ message }) {
   if (!message) return null
 
   return (
-    <div className="fixed right-4 top-20 z-50 flex max-w-sm items-center gap-2 rounded-lg border border-[#1e293b] bg-[#0d1a2e] px-4 py-3 text-sm font-black text-slate-100 shadow-xl">
+    <div className="glass-panel fixed right-4 top-20 z-50 flex max-w-sm items-center gap-2 rounded-lg px-4 py-3 text-sm font-black text-slate-100">
       <CheckCircle size={17} className="shrink-0 text-emerald-600" />
       {message}
     </div>
@@ -4963,6 +5909,17 @@ export default function App() {
     setToast(message)
   }
 
+  function rememberUser(nextUser) {
+    const normalized = normalizeUserDraft(nextUser)
+    setUser(normalized)
+    setNetworkUsers((current) => {
+      const others = current.filter((item) => normalize(item.email) !== normalize(normalized.email))
+      return [normalized, ...others]
+    })
+    storeSessionUser(normalized)
+    return normalized
+  }
+
   function onSearch(rawQuery = queryDraft) {
     const nextQuery = rawQuery.trim()
     setQueryDraft(nextQuery)
@@ -5085,10 +6042,36 @@ export default function App() {
     try {
       const googleContacts = await requestGoogleContacts()
       if (!googleContacts.length) {
+        const connectedUser = rememberUser({ ...user, googleConnected: true })
         showToast('Nenhum contato do Google disponível para importar.')
+        try {
+          await apiRequest('/api/users', {
+            method: 'POST',
+            body: JSON.stringify(userToApiPayload(connectedUser)),
+          })
+          setBackendOnline(true)
+        } catch {
+          setBackendOnline(false)
+        }
         return
       }
       const imported = await importContactsForOwner(googleContacts, user)
+      const connectedUser = rememberUser({
+        ...user,
+        googleConnected: true,
+        googleContactsImportedAt: new Date().toISOString(),
+      })
+      try {
+        const response = await apiRequest('/api/users', {
+          method: 'POST',
+          body: JSON.stringify(userToApiPayload(connectedUser)),
+        })
+        const savedUser = apiUserToLocal(response) ?? connectedUser
+        rememberUser(savedUser)
+        setBackendOnline(true)
+      } catch {
+        setBackendOnline(false)
+      }
       showToast(`${imported.length} contato${imported.length === 1 ? '' : 's'} importado${imported.length === 1 ? '' : 's'} do Google.`)
     } catch (error) {
       showToast(error.message || 'Não foi possível importar contatos do Google.')
@@ -5230,12 +6213,27 @@ export default function App() {
   }
 
   async function applyCopilotSuggestion(suggestion) {
+    if (suggestion.action === 'conflict') {
+      showToast(suggestion.reason || 'Escolha outro horário para este follow-up.')
+      return
+    }
     const contact = contacts.find((item) => String(item.id) === String(suggestion.contact_id))
     if (!contact) {
       showToast('Contato não encontrado.')
       return
     }
     const action = suggestion.action || 'categorize'
+    const crmActions = new Set(['set_crm', 'complete_follow_up', 'clear_follow_up'])
+    const isCrmAction = crmActions.has(action)
+    const nextFollowUpAt = action === 'complete_follow_up' || action === 'clear_follow_up' ? '' : (suggestion.next_follow_up_at || contact.next_follow_up_at || '')
+    const nextPriority = suggestion.crm_priority || contact.crm_priority || 'Média'
+    let nextStatus = suggestion.crm_status || contact.crm_status || 'Novo'
+    if (action === 'set_crm' && !suggestion.crm_status && nextFollowUpAt) {
+      nextStatus = 'Follow-up'
+    }
+    if (action === 'set_crm' && nextStatus === 'Novo' && !nextFollowUpAt && normalize(nextPriority) === 'media') {
+      nextStatus = 'Ativo'
+    }
     const crmNote = suggestion.crm_note && !contact.crm_note?.includes(suggestion.crm_note)
       ? [contact.crm_note, suggestion.crm_note].filter(Boolean).join('\n')
       : contact.crm_note
@@ -5243,11 +6241,11 @@ export default function App() {
       ...contact,
       service: action === 'categorize' ? suggestion.suggested_service : contact.service,
       note: contact.note ?? '',
-      crm_status: suggestion.crm_status || contact.crm_status || 'Novo',
-      crm_priority: suggestion.crm_priority || contact.crm_priority || 'Média',
+      crm_status: nextStatus,
+      crm_priority: nextPriority,
       last_contact_at: suggestion.last_contact_at || contact.last_contact_at || '',
-      next_follow_up_at: action === 'complete_follow_up' || action === 'clear_follow_up' ? '' : (suggestion.next_follow_up_at || contact.next_follow_up_at || ''),
-      crm_note: crmNote || '',
+      next_follow_up_at: nextFollowUpAt,
+      crm_note: crmNote || (isCrmAction ? suggestion.reason || contact.crm_note || '' : ''),
       owner_id: contactOwnerId(user),
     }
     try {
@@ -5268,7 +6266,6 @@ export default function App() {
       showToast(errorMessage)
       return
     }
-    const crmActions = new Set(['set_crm', 'complete_follow_up', 'clear_follow_up'])
     const messages = {
       categorize: `Pronto, atualizei a categoria de ${suggestion.name}.`,
       set_crm: `Pronto, atualizei o CRM de ${suggestion.name}. Já deve aparecer no CRM.`,
@@ -5297,6 +6294,7 @@ export default function App() {
       ],
     )
     showToast(confirmation)
+    if (isCrmAction) navigate(ROUTES.CRM)
   }
 
   async function handleImportFile(event) {
@@ -5553,7 +6551,7 @@ export default function App() {
     navigate(ROUTES.DASHBOARD)
   }
 
-  async function saveUser(nextUser, pendingContacts = []) {
+  async function saveUser(nextUser, pendingContacts = [], options = {}) {
     let savedUser = normalizeUserDraft(nextUser)
     try {
       const response = await apiRequest('/api/users', {
@@ -5562,8 +6560,10 @@ export default function App() {
       })
       savedUser = apiUserToLocal(response) ?? savedUser
       setBackendOnline(true)
-    } catch {
+    } catch (error) {
       setBackendOnline(false)
+      showToast(error.message || 'Não foi possível salvar o perfil no backend.')
+      throw error
     }
     setUser(savedUser)
     setNetworkUsers((current) => {
@@ -5587,8 +6587,8 @@ export default function App() {
         return [savedUser, ...others]
       })
     }
-    showToast('Cadastro salvo.')
-    navigate(savedUser.publicVisible ? ROUTES.PUBLIC : ROUTES.DASHBOARD)
+    showToast(options.successMessage ?? 'Cadastro salvo.')
+    navigate(options.redirectTo ?? (savedUser.publicVisible ? ROUTES.PUBLIC : ROUTES.DASHBOARD))
   }
 
   function logout() {
@@ -5626,6 +6626,8 @@ export default function App() {
     page = <LoginPage onLogin={loginUser} onGoogleLogin={loginWithGoogle} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} />
   } else if (effectiveRoute.page === 'register') {
     page = <RegisterPage user={user} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} onNavigate={navigate} />
+  } else if (effectiveRoute.page === 'publicProfile') {
+    page = <PublicProfileSettingsPage user={user} onSaveUser={saveUser} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'dashboard') {
     page = <DashboardPage contacts={contactsWithCategory} duplicateCount={duplicateSuggestions.length} backendOnline={backendOnline} onNavigate={navigate} onAsk={askCopilot} isThinking={isChatThinking} />
   } else if (effectiveRoute.page === 'agenda') {

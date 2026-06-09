@@ -102,10 +102,33 @@ def contacts(
     return results
 
 
+def follow_up_slot(value: str | None) -> str:
+    return str(value or "").strip()[:16]
+
+
+def ensure_follow_up_slot_available(connection, owner_id: str, next_follow_up_at: str | None, contact_id: int | None = None) -> None:
+    slot = follow_up_slot(next_follow_up_at)
+    if not slot:
+        return
+    query = "SELECT id, name FROM contacts WHERE owner_id = ? AND substr(next_follow_up_at, 1, 16) = ?"
+    params: tuple = (owner_id, slot)
+    if contact_id is not None:
+        query += " AND id != ?"
+        params = (owner_id, next_follow_up_at, contact_id)
+    conflict = connection.execute(query, params).fetchone()
+    if conflict is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Já existe follow-up nesse dia e horário para {conflict['name']}. Escolha outro horário.",
+        )
+
+
 @app.post("/api/contacts", response_model=ContactOut, status_code=201)
 def create_contact(payload: ContactCreate) -> dict:
     with get_connection() as connection:
         data = payload.model_dump()
+        owner_id = str(data.get("owner_id") or "demo-user")
+        ensure_follow_up_slot_available(connection, owner_id, data.get("next_follow_up_at"))
         registered_user = find_user_by_phone(connection, data["phone"])
         if registered_user is not None:
             user = row_to_user(registered_user)
@@ -122,6 +145,8 @@ def create_contact(payload: ContactCreate) -> dict:
 def edit_contact(contact_id: int, payload: ContactCreate) -> dict:
     with get_connection() as connection:
         data = payload.model_dump()
+        owner_id = str(data.get("owner_id") or "demo-user")
+        ensure_follow_up_slot_available(connection, owner_id, data.get("next_follow_up_at"), contact_id)
         registered_user = find_user_by_phone(connection, data["phone"])
         if registered_user is not None:
             user = row_to_user(registered_user)
@@ -175,6 +200,8 @@ def merge_duplicate(payload: MergeDecisionIn) -> dict:
 
 @app.post("/api/users", response_model=UserOut)
 def save_user(payload: UserCreate) -> dict:
+    if not (payload.google_connected or payload.google_contacts_imported_at or payload.google_profile_synced_at):
+        raise HTTPException(status_code=422, detail="Conta Google obrigatória para salvar o perfil.")
     with get_connection() as connection:
         try:
             row = upsert_user(connection, payload.model_dump())
@@ -310,8 +337,8 @@ def public_profiles(query: str = Query(default="")) -> list[dict]:
 
 
 @app.get("/api/search", response_model=SearchOut)
-def search(query: str = Query(default="")) -> dict:
-    private_results = contacts(query=query, category="all", user_id="demo-user")
+def search(query: str = Query(default=""), user_id: str = Query(default="demo-user")) -> dict:
+    private_results = contacts(query=query, category="all", user_id=str(user_id or "demo-user"))
     public_results = public_profiles(query=query)
     return {
         "query": query,
@@ -335,7 +362,7 @@ def build_contact_suggestions(rows: list) -> list[dict]:
 
         reason = "Encontrei sinais no nome, cargo, empresa, email ou origem do contato."
         if category.id == "general":
-            reason = "Nao ha pistas suficientes; mantive como contato para revisar."
+            reason = "Não há pistas suficientes; mantive como contato para revisar."
 
         suggestions.append(
             {
@@ -517,12 +544,22 @@ def parse_follow_up_datetime(message: str) -> str:
         target = now.replace(year=year, month=month, day=day)
     elif iso_match:
         target = now.replace(year=int(iso_match.group(1)), month=int(iso_match.group(2)), day=int(iso_match.group(3)))
+    elif "proxima" in normalized or "proximo" in normalized:
+        target = now + timedelta(days=7)
     else:
         target = now + timedelta(days=1)
 
     hour = int(time_match.group(1)) if time_match else 9
     minute = int(time_match.group(2) or 0) if time_match else 0
     return target.replace(hour=hour, minute=minute, second=0, microsecond=0).isoformat(timespec="minutes")
+
+
+def follow_up_conflict(rows: list, next_follow_up: str, contact_id: int) -> str:
+    slot = follow_up_slot(next_follow_up)
+    for row in rows:
+        if int(row["id"]) != int(contact_id) and follow_up_slot(row["next_follow_up_at"]) == slot:
+            return row["name"]
+    return ""
 
 
 def build_action_suggestions(message: str, rows: list, target_contact_id: int | None = None) -> list[dict]:
@@ -605,13 +642,23 @@ def build_action_suggestions(message: str, rows: list, target_contact_id: int | 
             })
         elif follow_up_request:
             next_follow_up = parse_follow_up_datetime(message)
+            conflict_name = follow_up_conflict(rows, next_follow_up, row["id"])
+            if conflict_name:
+                suggestions.append({
+                    **base,
+                    "action": "conflict",
+                    "label": "Horário indisponível",
+                    "next_follow_up_at": next_follow_up,
+                    "reason": f"Não marquei esse follow-up: {conflict_name} já está agendado em {format_follow_up(next_follow_up)}. Escolha outro horário para eu salvar.",
+                })
+                continue
             suggestions.append({
                 **base,
                 "action": "set_crm",
                 "label": "Agendar follow-up",
                 "crm_status": status or "Follow-up",
                 "next_follow_up_at": next_follow_up,
-                "reason": f"Vou agendar follow-up para {row['name']} em {format_follow_up(next_follow_up)}.",
+                "reason": f"Combinado: vou deixar {row['name']} com follow-up em {format_follow_up(next_follow_up)}.",
             })
         elif crm_request and (status or priority):
             suggestions.append({
@@ -634,19 +681,6 @@ def build_action_suggestions(message: str, rows: list, target_contact_id: int | 
             })
 
     return suggestions
-
-
-def action_clarification(message: str, rows: list) -> str | None:
-    if not looks_like_action_request(message):
-        return None
-    mentioned = find_mentioned_contacts(message, rows)
-    if not mentioned:
-        sample = ", ".join(row["name"] for row in rows[:5])
-        return f"Entendi que você quer alterar algo, mas não identifiquei qual contato. Me diga o nome junto com a ação. Exemplo: 'marcar Carlos como oportunidade' ou 'agendar follow-up da Aline amanhã 14h'. Contatos que encontrei: {sample}."
-    if not build_action_suggestions(message, rows):
-        names = ", ".join(row["name"] for row in mentioned)
-        return f"Encontrei {names}, mas faltou a ação. Posso marcar status do CRM, prioridade, agendar/remover/concluir follow-up ou mudar categoria. Exemplo: 'colocar {mentioned[0]['name']} como prioridade alta'."
-    return None
 
 
 def action_clarification(message: str, rows: list, target_contact_id: int | None = None) -> str | None:
@@ -679,6 +713,33 @@ def format_follow_up(value: str) -> str:
         return value
 
 
+COMMAND_EXAMPLES = (
+    ("agendar follow-up", "agendar Aline na próxima sexta 14h"),
+    ("remarcar follow-up", "remarcar Carlos para amanhã 15h"),
+    ("concluir follow-up", "concluir follow-up do Carlos"),
+    ("remover follow-up", "remover follow-up da Aline"),
+    ("marcar oportunidade", "marcar Mariana como oportunidade"),
+    ("alterar prioridade", "colocar Renato como prioridade alta"),
+    ("categorizar contato", "categorizar João como eletricista"),
+    ("buscar contato", "quem pode ajudar com limpeza?"),
+    ("listar follow-ups", "quais contatos precisam de follow-up?"),
+)
+
+
+def similar_command_examples(message: str) -> list[str]:
+    normalized = normalize(message)
+    terms = {term for term in re.split(r"\W+", normalized) if len(term) > 2}
+    ranked = []
+    for label, example in COMMAND_EXAMPLES:
+        label_text = normalize(f"{label} {example}")
+        label_terms = {term for term in re.split(r"\W+", label_text) if len(term) > 2}
+        overlap = len(terms & label_terms) / max(len(terms), 1)
+        score = SequenceMatcher(None, normalized, label_text).ratio() + overlap
+        ranked.append((score, example))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [example for _, example in ranked[:3]]
+
+
 def local_chat_answer(message: str, rows: list, suggestions: list[dict]) -> str:
     normalized = normalize(message)
     tagged_rows = [row for row in rows if row["category_id"] != "general" and not is_generic_service(row["service"])]
@@ -686,7 +747,7 @@ def local_chat_answer(message: str, rows: list, suggestions: list[dict]) -> str:
 
     if any(term in normalized for term in ("sem tag", "sem tags", "sem categoria", "sem categorias", "revisar", "pendente")):
         if not untagged_rows:
-            return "Todos os contatos atuais ja têm uma categoria útil. Nao encontrei contatos sem tags para revisar."
+            return "Todos os contatos atuais já têm uma categoria útil. Não encontrei contatos sem tags para revisar."
         names = ", ".join(f"{row['name']} ({row['service']})" for row in untagged_rows[:8])
         extra = len(untagged_rows) - 8
         suffix = f" e mais {extra}" if extra > 0 else ""
@@ -696,7 +757,7 @@ def local_chat_answer(message: str, rows: list, suggestions: list[dict]) -> str:
         names = ", ".join(f"{row['name']} ({row['category_label']})" for row in tagged_rows[:8])
         extra = len(tagged_rows) - 8
         suffix = f" e mais {extra}" if extra > 0 else ""
-        return f"Ha {len(tagged_rows)} contato(s) com tags/categorias úteis no CRM. Principais exemplos: {names}{suffix}."
+        return f"Há {len(tagged_rows)} contato(s) com tags/categorias úteis no CRM. Principais exemplos: {names}{suffix}."
 
     if any(term in normalized for term in ("follow", "retomar", "vencido", "vencidos", "hoje", "semana")):
         today = datetime.now().isoformat(timespec="minutes")
@@ -704,12 +765,12 @@ def local_chat_answer(message: str, rows: list, suggestions: list[dict]) -> str:
         upcoming_rows = [row for row in rows if row["next_follow_up_at"] and row["next_follow_up_at"] > today]
         upcoming_rows.sort(key=lambda row: row["next_follow_up_at"])
         if due_rows:
-            names = ", ".join(f"{row['name']} ({format_follow_up(row['next_follow_up_at'])})" for row in due_rows[:8])
-            return f"Voce tem {len(due_rows)} follow-up(s) vencido(s): {names}. Priorize estes antes de criar novos contatos."
+            names = ", ".join(f"{row['name']} ({format_follow_up(row['next_follow_up_at'])})" for row in due_rows)
+            return f"Você tem {len(due_rows)} follow-up(s) vencido(s): {names}. Priorize estes antes de criar novos contatos."
         if upcoming_rows:
-            names = ", ".join(f"{row['name']} ({format_follow_up(row['next_follow_up_at'])})" for row in upcoming_rows[:8])
-            return f"Nao ha follow-ups vencidos. Os proximos agendados sao: {names}."
-        return "Nao encontrei follow-ups cadastrados. Abra contatos importantes e defina uma proxima data para o CRM ordenar sua rotina."
+            names = ", ".join(f"{row['name']} ({format_follow_up(row['next_follow_up_at'])})" for row in upcoming_rows)
+            return f"Não há follow-ups vencidos. Os próximos agendados são: {names}."
+        return "Não encontrei follow-ups cadastrados. Abra contatos importantes e defina uma próxima data para o CRM ordenar sua rotina."
 
     if any(term in normalized for term in ("oportunidade", "oportunidades", "combina", "conectar", "conexoes")):
         by_category = {}
@@ -722,10 +783,10 @@ def local_chat_answer(message: str, rows: list, suggestions: list[dict]) -> str:
                 sample = ", ".join(row["name"] for row in items[:3])
                 parts.append(f"{label}: {sample}")
             return "Possíveis oportunidades por concentração de rede: " + "; ".join(parts) + ". Use essas categorias para procurar complementaridades e pedir indicações."
-        return "Ainda nao ha tags suficientes para sugerir oportunidades. Comece revisando a aba Sem tags."
+        return "Ainda não há tags suficientes para sugerir oportunidades. Comece revisando a aba Sem tags."
 
     if suggestions and any(term in normalized for term in ("organizar", "arrumar", "categoria", "categorizar", "importado", "google")):
-        return f"Encontrei {len(suggestions)} contato(s) que podem ser reorganizados. Revise as sugestoes e aplique apenas as que fizerem sentido."
+        return f"Encontrei {len(suggestions)} contato(s) que podem ser reorganizados. Revise as sugestões e aplique apenas as que fizerem sentido."
 
     stopwords = {
         "quem",
@@ -766,9 +827,10 @@ def local_chat_answer(message: str, rows: list, suggestions: list[dict]) -> str:
         names = ", ".join(f"{row['name']} ({row['service']})" for _, row in matches[:6])
         return f"Encontrei {len(matches)} contato(s) relacionado(s): {names}."
 
+    examples = "; ".join(f'"{example}"' for example in similar_command_examples(message))
     if suggestions:
-        return "Posso ajudar a revisar os contatos importados. Peca para organizar contatos do Google ou categorizar contatos sem categoria."
-    return "Sua agenda nao tem contatos pendentes de organizacao. Voce pode perguntar por servico, nome, cidade ou categoria."
+        return f"Não entendi esse comando. Talvez você quis dizer algo como: {examples}. Também posso revisar contatos importados se você pedir para organizar ou categorizar."
+    return f"Não entendi esse comando. Tente algo parecido com: {examples}."
 
 
 def extract_openai_text(data: dict) -> str:
@@ -804,13 +866,13 @@ def call_openai_chat(message: str, rows: list, suggestions: list[dict]) -> str |
         for row in rows[:120]
     ]
     prompt = (
-        "Voce e um copiloto de CRM e networking em portugues do Brasil. "
-        "Responda de forma curta, pratica e orientada a proximos passos. "
+        "Você é um copiloto de CRM e networking em português do Brasil. "
+        "Responda de forma curta, prática e orientada a próximos passos. "
         "Use status, prioridade, follow-up, tags/categorias e notas para priorizar. "
-        "Nao diga que alterou dados sozinho; as alteracoes precisam de confirmacao do usuario.\n\n"
-        f"Pedido do usuario: {message}\n\n"
+        "Não diga que alterou dados sozinho; as alterações precisam de confirmação do usuário.\n\n"
+        f"Pedido do usuário: {message}\n\n"
         f"Contatos: {json.dumps(contacts_context, ensure_ascii=False)}\n\n"
-        f"Sugestoes deterministicas ja calculadas: {json.dumps(suggestions[:10], ensure_ascii=False)}"
+        f"Sugestões determinísticas já calculadas: {json.dumps(suggestions[:10], ensure_ascii=False)}"
     )
     payload = {
         "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
@@ -857,7 +919,12 @@ def ai_chat(payload: AiChatIn) -> dict:
         if len(action_suggestions) == 1:
             item = action_suggestions[0]
             action_label = (item.get("label") or "Atualizar contato").lower()
-            answer = f"Certo. Estou com {item['name']} e preparei: {action_label}. Confere a sugestão na lateral e clique em Aplicar para eu salvar."
+            if item.get("action") == "conflict":
+                answer = item["reason"]
+            elif item.get("next_follow_up_at"):
+                answer = f"Perfeito. Localizei a data: {format_follow_up(item['next_follow_up_at'])}. Preparei o follow-up de {item['name']} na lateral; clique em Aplicar para salvar."
+            else:
+                answer = f"Certo. Estou com {item['name']} e preparei: {action_label}. Confere a sugestão na lateral e clique em Aplicar para eu salvar."
         else:
             names = ", ".join(item["name"] for item in action_suggestions[:4])
             answer = f"Certo. Encontrei estes contatos no seu pedido: {names}. Confere as sugestões na lateral e aplique apenas as corretas."

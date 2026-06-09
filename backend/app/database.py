@@ -171,13 +171,25 @@ def init_db() -> None:
               phone_digits TEXT NOT NULL UNIQUE,
               cep TEXT NOT NULL DEFAULT '',
               address TEXT NOT NULL DEFAULT '',
+              address_line TEXT NOT NULL DEFAULT '',
+              address_number TEXT NOT NULL DEFAULT '',
+              address_complement TEXT NOT NULL DEFAULT '',
+              neighborhood TEXT NOT NULL DEFAULT '',
               city TEXT NOT NULL DEFAULT '',
               state TEXT NOT NULL DEFAULT '',
               address_visible INTEGER NOT NULL DEFAULT 0,
               interests TEXT NOT NULL DEFAULT '[]',
               is_collaborator INTEGER NOT NULL DEFAULT 0,
               offered_services TEXT NOT NULL DEFAULT '',
+              use_different_service_address INTEGER NOT NULL DEFAULT 0,
+              service_cep TEXT NOT NULL DEFAULT '',
               service_address TEXT NOT NULL DEFAULT '',
+              service_address_line TEXT NOT NULL DEFAULT '',
+              service_address_number TEXT NOT NULL DEFAULT '',
+              service_address_complement TEXT NOT NULL DEFAULT '',
+              service_neighborhood TEXT NOT NULL DEFAULT '',
+              service_city TEXT NOT NULL DEFAULT '',
+              service_state TEXT NOT NULL DEFAULT '',
               service_address_visible INTEGER NOT NULL DEFAULT 1,
               public_visible INTEGER NOT NULL DEFAULT 0,
               public_description TEXT NOT NULL DEFAULT '',
@@ -188,6 +200,9 @@ def init_db() -> None:
               public_instagram TEXT NOT NULL DEFAULT '',
               public_linkedin TEXT NOT NULL DEFAULT '',
               public_url TEXT NOT NULL DEFAULT '',
+              google_connected INTEGER NOT NULL DEFAULT 0,
+              google_contacts_imported_at TEXT NOT NULL DEFAULT '',
+              google_profile_synced_at TEXT NOT NULL DEFAULT '',
               role TEXT NOT NULL DEFAULT 'user',
               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
@@ -250,6 +265,23 @@ def ensure_user_columns(connection: sqlite3.Connection) -> None:
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
     if "password_hash" not in columns:
         connection.execute("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
+    for column in (
+        "address_line",
+        "address_number",
+        "address_complement",
+        "neighborhood",
+        "service_cep",
+        "service_address_line",
+        "service_address_number",
+        "service_address_complement",
+        "service_neighborhood",
+        "service_city",
+        "service_state",
+    ):
+        if column not in columns:
+            connection.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+    if "use_different_service_address" not in columns:
+        connection.execute("ALTER TABLE users ADD COLUMN use_different_service_address INTEGER NOT NULL DEFAULT 0")
     for column, column_type, default in (
         ("public_visible", "INTEGER", "0"),
         ("public_description", "TEXT", ""),
@@ -260,6 +292,9 @@ def ensure_user_columns(connection: sqlite3.Connection) -> None:
         ("public_instagram", "TEXT", ""),
         ("public_linkedin", "TEXT", ""),
         ("public_url", "TEXT", ""),
+        ("google_connected", "INTEGER", "0"),
+        ("google_contacts_imported_at", "TEXT", ""),
+        ("google_profile_synced_at", "TEXT", ""),
     ):
         if column not in columns:
             if column_type == "INTEGER":
@@ -311,6 +346,10 @@ def seed_db(connection: sqlite3.Connection) -> None:
                 "password": "123456",
                 "phone": "11 99999-0000",
                 "cep": "01311-000",
+                "address_line": "Avenida Paulista",
+                "address_number": "",
+                "address_complement": "",
+                "neighborhood": "Bela Vista",
                 "address": "Avenida Paulista, Bela Vista, Sao Paulo - SP",
                 "city": "Sao Paulo",
                 "state": "SP",
@@ -382,6 +421,10 @@ def assign_demo_contacts(connection: sqlite3.Connection) -> None:
                 "password": "admin123",
                 "phone": "11 90000-0000",
                 "cep": "01311-000",
+                "address_line": "Avenida Paulista",
+                "address_number": "",
+                "address_complement": "",
+                "neighborhood": "Bela Vista",
                 "address": "Avenida Paulista, Bela Vista, São Paulo - SP",
                 "city": "São Paulo",
                 "state": "SP",
@@ -443,13 +486,25 @@ def upsert_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
         digits,
         payload.get("cep") or "",
         payload.get("address") or "",
+        payload.get("address_line") or "",
+        payload.get("address_number") or "",
+        payload.get("address_complement") or "",
+        payload.get("neighborhood") or "",
         payload.get("city") or "",
         payload.get("state") or "",
         1 if payload.get("address_visible") else 0,
         interests,
         1 if payload.get("is_collaborator") else 0,
         payload.get("offered_services") or "",
+        1 if payload.get("use_different_service_address") else 0,
+        payload.get("service_cep") or "",
         payload.get("service_address") or "",
+        payload.get("service_address_line") or "",
+        payload.get("service_address_number") or "",
+        payload.get("service_address_complement") or "",
+        payload.get("service_neighborhood") or "",
+        payload.get("service_city") or "",
+        payload.get("service_state") or "",
         1 if payload.get("service_address_visible", True) else 0,
         1 if payload.get("public_visible") else 0,
         payload.get("public_description") or "",
@@ -460,17 +515,25 @@ def upsert_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
         payload.get("public_instagram") or "",
         payload.get("public_linkedin") or "",
         payload.get("public_url") or "",
+        1 if payload.get("google_connected") else 0,
+        payload.get("google_contacts_imported_at") or "",
+        payload.get("google_profile_synced_at") or "",
         payload.get("role") or "user",
     )
     connection.execute(
         """
         INSERT INTO users (
-          name, birth_date, email, password_hash, phone, phone_digits, cep, address, city, state,
+          name, birth_date, email, password_hash, phone, phone_digits, cep, address,
+          address_line, address_number, address_complement, neighborhood, city, state,
           address_visible, interests, is_collaborator, offered_services,
-          service_address, service_address_visible, public_visible, public_description, public_demand,
-          public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url, role
+          use_different_service_address, service_cep, service_address,
+          service_address_line, service_address_number, service_address_complement,
+          service_neighborhood, service_city, service_state, service_address_visible,
+          public_visible, public_description, public_demand,
+          public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url,
+          google_connected, google_contacts_imported_at, google_profile_synced_at, role
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(email) DO UPDATE SET
           name = excluded.name,
           birth_date = excluded.birth_date,
@@ -479,13 +542,25 @@ def upsert_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
           phone_digits = excluded.phone_digits,
           cep = excluded.cep,
           address = excluded.address,
+          address_line = excluded.address_line,
+          address_number = excluded.address_number,
+          address_complement = excluded.address_complement,
+          neighborhood = excluded.neighborhood,
           city = excluded.city,
           state = excluded.state,
           address_visible = excluded.address_visible,
           interests = excluded.interests,
           is_collaborator = excluded.is_collaborator,
           offered_services = excluded.offered_services,
+          use_different_service_address = excluded.use_different_service_address,
+          service_cep = excluded.service_cep,
           service_address = excluded.service_address,
+          service_address_line = excluded.service_address_line,
+          service_address_number = excluded.service_address_number,
+          service_address_complement = excluded.service_address_complement,
+          service_neighborhood = excluded.service_neighborhood,
+          service_city = excluded.service_city,
+          service_state = excluded.service_state,
           service_address_visible = excluded.service_address_visible,
           public_visible = excluded.public_visible,
           public_description = excluded.public_description,
@@ -496,6 +571,9 @@ def upsert_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
           public_instagram = excluded.public_instagram,
           public_linkedin = excluded.public_linkedin,
           public_url = excluded.public_url,
+          google_connected = excluded.google_connected,
+          google_contacts_imported_at = excluded.google_contacts_imported_at,
+          google_profile_synced_at = excluded.google_profile_synced_at,
           role = excluded.role
         """,
         values,
@@ -506,7 +584,16 @@ def upsert_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
 def upsert_google_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
     existing = connection.execute("SELECT * FROM users WHERE lower(email) = lower(?)", (payload["email"],)).fetchone()
     if existing is not None:
-        return existing
+        connection.execute(
+            """
+            UPDATE users
+            SET google_connected = 1,
+                google_profile_synced_at = COALESCE(NULLIF(google_profile_synced_at, ''), CURRENT_TIMESTAMP)
+            WHERE id = ?
+            """,
+            (existing["id"],),
+        )
+        return connection.execute("SELECT * FROM users WHERE id = ?", (existing["id"],)).fetchone()
 
     password_hash = hash_password(secrets.token_urlsafe(24))
     phone_digits_value = f"google:{payload['sub']}"
@@ -516,9 +603,10 @@ def upsert_google_user(connection: sqlite3.Connection, payload: dict) -> sqlite3
           name, birth_date, email, password_hash, phone, phone_digits, cep, address,
           city, state, address_visible, interests, is_collaborator, offered_services,
           service_address, service_address_visible, public_visible, public_description, public_demand,
-          public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url, role
+          public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url,
+          google_connected, google_profile_synced_at, role
         )
-        VALUES (?, '', ?, ?, '', ?, '', '', '', '', 0, '[]', 0, '', '', 1, 0, '', '', '', '', '', '', '', '', 'user')
+        VALUES (?, '', ?, ?, '', ?, '', '', '', '', 0, '[]', 0, '', '', 1, 0, '', '', '', '', '', '', '', '', 1, CURRENT_TIMESTAMP, 'user')
         """,
         (payload["name"], payload["email"], password_hash, phone_digits_value),
     )
@@ -553,13 +641,25 @@ def row_to_user(row: sqlite3.Row) -> dict:
         "phone": row["phone"],
         "cep": row["cep"],
         "address": row["address"],
+        "address_line": row["address_line"],
+        "address_number": row["address_number"],
+        "address_complement": row["address_complement"],
+        "neighborhood": row["neighborhood"],
         "city": row["city"],
         "state": row["state"],
         "address_visible": bool(row["address_visible"]),
         "interests": interests,
         "is_collaborator": bool(row["is_collaborator"]),
         "offered_services": row["offered_services"],
+        "use_different_service_address": bool(row["use_different_service_address"]),
+        "service_cep": row["service_cep"],
         "service_address": row["service_address"],
+        "service_address_line": row["service_address_line"],
+        "service_address_number": row["service_address_number"],
+        "service_address_complement": row["service_address_complement"],
+        "service_neighborhood": row["service_neighborhood"],
+        "service_city": row["service_city"],
+        "service_state": row["service_state"],
         "service_address_visible": bool(row["service_address_visible"]),
         "public_visible": bool(row["public_visible"]),
         "public_description": row["public_description"],
@@ -570,6 +670,9 @@ def row_to_user(row: sqlite3.Row) -> dict:
         "public_instagram": row["public_instagram"],
         "public_linkedin": row["public_linkedin"],
         "public_url": row["public_url"],
+        "google_connected": bool(row["google_connected"]),
+        "google_contacts_imported_at": row["google_contacts_imported_at"],
+        "google_profile_synced_at": row["google_profile_synced_at"],
         "role": row["role"],
     }
 
@@ -816,7 +919,7 @@ def ignore_merge_suggestion(connection: sqlite3.Connection, owner_id: str, prima
         (owner_id, primary_id, duplicate_id),
     ).fetchall()
     if len(rows) != 2:
-        raise ValueError("Sugestao de duplicidade nao encontrada.")
+        raise ValueError("Sugestão de duplicidade não encontrada.")
     primary_id, duplicate_id = merge_key(primary_id, duplicate_id)
     for suggestion in list_merge_suggestions(connection, owner_id):
         if suggestion["primary_contact"]["id"] == primary_id and suggestion["duplicate_contact"]["id"] == duplicate_id:
@@ -836,7 +939,7 @@ def merge_contacts(connection: sqlite3.Connection, owner_id: str, primary_id: in
     primary = connection.execute("SELECT * FROM contacts WHERE owner_id = ? AND id = ?", (owner_id, primary_id)).fetchone()
     duplicate = connection.execute("SELECT * FROM contacts WHERE owner_id = ? AND id = ?", (owner_id, duplicate_id)).fetchone()
     if primary is None or duplicate is None:
-        raise ValueError("Contatos duplicados nao encontrados.")
+        raise ValueError("Contatos duplicados não encontrados.")
 
     def choose(field: str) -> str:
         return primary[field] or duplicate[field] or ""
@@ -844,6 +947,14 @@ def merge_contacts(connection: sqlite3.Connection, owner_id: str, primary_id: in
     notes = [primary["note"], duplicate["note"]]
     merged_note = " | ".join(dict.fromkeys(item for item in notes if item))[:500]
     merged_source = " + ".join(dict.fromkeys(item for item in [primary["source"], duplicate["source"]] if item))[:80]
+    merged_tags = ", ".join(
+        dict.fromkeys(
+            tag.strip()
+            for value in (primary["tags"], duplicate["tags"])
+            for tag in str(value or "").split(",")
+            if tag.strip()
+        )
+    )[:500]
     payload = {
         "owner_id": owner_id,
         "name": choose("name"),
@@ -854,10 +965,25 @@ def merge_contacts(connection: sqlite3.Connection, owner_id: str, primary_id: in
         "address": choose("address"),
         "trust": primary["trust"] if primary["trust"] != "Novo" else duplicate["trust"],
         "source": merged_source or "Merge",
+        "description": choose("description"),
+        "demand": choose("demand"),
+        "solves": choose("solves"),
+        "tags": merged_tags,
+        "email": choose("email"),
+        "whatsapp": choose("whatsapp"),
+        "instagram": choose("instagram"),
+        "linkedin": choose("linkedin"),
+        "custom_url": choose("custom_url"),
+        "custom_fields": choose("custom_fields") or "[]",
+        "crm_status": choose("crm_status") or "Novo",
+        "crm_priority": choose("crm_priority") or "Média",
+        "last_contact_at": choose("last_contact_at"),
+        "next_follow_up_at": choose("next_follow_up_at"),
+        "crm_note": choose("crm_note"),
     }
     updated = update_contact(connection, primary_id, payload)
     if updated is None:
-        raise ValueError("Nao foi possivel mesclar os contatos.")
+        raise ValueError("Não foi possível mesclar os contatos.")
 
     suggestions = list_merge_suggestions(connection, owner_id)
     for suggestion in suggestions:

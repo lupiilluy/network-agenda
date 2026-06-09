@@ -151,13 +151,25 @@ class UserCreate(BaseModel):
     phone: str = Field(min_length=4, max_length=40)
     cep: str | None = Field(default="", max_length=20)
     address: str | None = Field(default="", max_length=240)
+    address_line: str | None = Field(default="", max_length=160)
+    address_number: str | None = Field(default="", max_length=40)
+    address_complement: str | None = Field(default="", max_length=120)
+    neighborhood: str | None = Field(default="", max_length=120)
     city: str | None = Field(default="", max_length=120)
     state: str | None = Field(default="", max_length=40)
     address_visible: bool = False
     interests: list[str] = []
     is_collaborator: bool = False
     offered_services: str | None = Field(default="", max_length=300)
+    use_different_service_address: bool = False
+    service_cep: str | None = Field(default="", max_length=20)
     service_address: str | None = Field(default="", max_length=240)
+    service_address_line: str | None = Field(default="", max_length=160)
+    service_address_number: str | None = Field(default="", max_length=40)
+    service_address_complement: str | None = Field(default="", max_length=120)
+    service_neighborhood: str | None = Field(default="", max_length=120)
+    service_city: str | None = Field(default="", max_length=120)
+    service_state: str | None = Field(default="", max_length=40)
     service_address_visible: bool = True
     public_visible: bool = False
     public_description: str | None = Field(default="", max_length=1200)
@@ -168,6 +180,9 @@ class UserCreate(BaseModel):
     public_instagram: str | None = Field(default="", max_length=160)
     public_linkedin: str | None = Field(default="", max_length=200)
     public_url: str | None = Field(default="", max_length=240)
+    google_connected: bool = False
+    google_contacts_imported_at: str | None = Field(default="", max_length=40)
+    google_profile_synced_at: str | None = Field(default="", max_length=40)
     role: str | None = Field(default="user", max_length=40)
 
 
@@ -179,13 +194,25 @@ class UserOut(BaseModel):
     phone: str
     cep: str
     address: str
+    address_line: str = ""
+    address_number: str = ""
+    address_complement: str = ""
+    neighborhood: str = ""
     city: str
     state: str
     address_visible: bool = False
     interests: list[str] = []
     is_collaborator: bool = False
     offered_services: str
+    use_different_service_address: bool = False
+    service_cep: str = ""
     service_address: str
+    service_address_line: str = ""
+    service_address_number: str = ""
+    service_address_complement: str = ""
+    service_neighborhood: str = ""
+    service_city: str = ""
+    service_state: str = ""
     service_address_visible: bool = True
     public_visible: bool = False
     public_description: str = ""
@@ -196,6 +223,9 @@ class UserOut(BaseModel):
     public_instagram: str = ""
     public_linkedin: str = ""
     public_url: str = ""
+    google_connected: bool = False
+    google_contacts_imported_at: str = ""
+    google_profile_synced_at: str = ""
     role: str
 
 

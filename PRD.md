@@ -2,7 +2,7 @@
 
 ## 1. Visao Geral
 
-Network Agenda e um webapp PWA-first, mobile-first e multiusuario para gestao inteligente de contatos, CRM pessoal e networking.
+Network Agenda e um webapp browser-first, responsivo e multiusuario para gestao inteligente de contatos, CRM pessoal e networking.
 
 O produto combina:
 
@@ -39,7 +39,8 @@ O sistema deve ajudar o usuario a:
 
 - Gerencia sua propria agenda privada.
 - Importa contatos.
-- Edita perfil.
+- Edita perfil pessoal.
+- Configura perfil publico em uma tela separada.
 - Usa CRM, dashboard, mapa/grafo e chat.
 - Pode ativar perfil publico.
 
@@ -75,10 +76,15 @@ Funcionalidades implementadas:
 - Dashboard com metricas e atalhos.
 - CRM com status, prioridade, follow-up com horario, concluir, alterar e cancelar.
 - Chat operacional preparado para IA, com acoes de categoria, tags e CRM.
+- Chat com campo de contato alvo digitavel e selecionavel no mesmo espaco.
+- Chat sugere comandos parecidos quando nao reconhece a solicitacao.
+- Chat entende datas relativas como "amanha", "proxima sexta" e "na proxima sexta".
 - Mapa/grafo 3D com contatos filtrados por tags.
-- Perfil publico opcional.
+- Perfil pessoal focado em dados da conta, contato, endereco e conexao Google.
+- Persistencia de CEP, rua, numero, complemento, bairro, cidade e UF no perfil.
+- Perfil publico opcional em tela separada.
 - Rede publica com pessoas visiveis e servicos oferecidos por tags.
-- Configuracoes com perfil, importacao Google, duplicados, exportacao e sessao.
+- Configuracoes com perfil pessoal, perfil publico, importacao Google, duplicados, exportacao e sessao.
 - Area administrativa basica.
 - Backend com OpenAPI/Swagger automatico do FastAPI.
 
@@ -88,6 +94,12 @@ Funcionalidades implementadas:
 - A antiga ideia de grupos recomendados foi reposicionada como **Servicos oferecidos** dentro da Rede Publica.
 - O CTA desses cards agora e **Verificar**, nao "Abrir grupo".
 - A experiencia principal deve priorizar Agenda, CRM, Mapa, Chat, Rede Publica e Configuracoes.
+- A versao atual prioriza navegador. Empacotamento app/PWA completo fica para uma etapa posterior.
+- O perfil pessoal deve conter apenas dados de conta, contato, endereco e conexao Google.
+- Perfil publico, visibilidade publica e servicos oferecidos ficam em tela propria, separada do perfil pessoal.
+- O grafo ativo do mapa usa Canvas 2D nativo, sem Three.js.
+- Google e obrigatorio para salvar perfil, usar mapa e usar rede publica.
+- Follow-ups nao possuem limite artificial; o sistema bloqueia apenas conflito no mesmo dia e horario para o mesmo usuario.
 
 ## 7. Modelo de Contato
 
@@ -122,7 +134,7 @@ Cada contato suporta:
 
 ## 8. Rede Publica
 
-Usuarios podem ativar a opcao **Quero ser vista na rede publica**.
+Usuarios podem ativar a opcao **Quero ser vista na rede publica** na tela separada de Perfil Publico.
 
 Quando ativa, o perfil publico pode exibir:
 
@@ -182,7 +194,7 @@ Google nao deve ser tratado como upload de arquivo. Login/importacao Google usam
 - Apple login como placeholder.
 - Sessao/token seguro de producao.
 
-## 12. PWA e UX
+## 12. Navegador e UX
 
 Requisitos de UX:
 
@@ -191,15 +203,14 @@ Requisitos de UX:
 - navegacao app-like;
 - bottom tab bar no mobile;
 - visual moderno e premium;
-- service worker;
-- manifest;
-- preparacao para offline basico.
+- versao atual focada em navegador;
+- service worker, manifest e offline basico ficam como preparacao para a fase app/PWA.
 
 ## 13. Mapa e Grafo
 
 ### Implementado
 
-- Grafo 3D interativo com Three.js.
+- Grafo 3D interativo em Canvas 2D nativo.
 - Exibicao de contatos com tags.
 - Filtro por servico.
 - Localizacao por endereco/cidade/DDD quando possivel.
@@ -223,6 +234,10 @@ No MVP, ele pode:
 - marcar CRM/follow-up;
 - concluir follow-up;
 - cancelar ou alterar follow-up;
+- interpretar datas relativas comuns, incluindo "amanha", "proxima sexta" e "na proxima sexta";
+- sugerir comandos parecidos quando uma frase nao e reconhecida;
+- usar contato alvo digitavel/selecionavel no mesmo campo;
+- bloquear follow-up apenas quando outro contato ja esta no mesmo dia e horario;
 - responder em formato conversacional.
 
 No futuro, pode usar agente externo para acoes mais complexas, sempre com confirmacao.
@@ -241,13 +256,19 @@ No futuro, pode usar agente externo para acoes mais complexas, sempre com confir
 
 - Visitante nao acessa app interno sem login.
 - Cadastro exige campos principais.
+- Perfil pessoal salva apenas dados de conta, contato, endereco e conexao Google.
+- Perfil publico e configurado em tela separada do perfil pessoal.
+- Mapa e Rede Publica exigem conta Google conectada.
 - Cada usuario ve apenas seus contatos.
 - Google login funciona com OAuth configurado.
 - Importacao Google salva contatos no usuario correto.
 - Contato possui detalhe completo e campos ricos.
 - Duplicados sao sugeridos, nunca mesclados automaticamente.
 - CRM salva follow-ups e mostra no CRM.
+- CRM permite varios follow-ups no mesmo dia, desde que em horarios diferentes.
+- API bloqueia follow-up duplicado no mesmo dia e horario para contatos do mesmo usuario.
 - Chat aplica acoes no banco e reflete no CRM.
+- Chat sugere comandos parecidos quando nao reconhece o pedido.
 - Rede publica so mostra usuarios que ativaram visibilidade.
 - Servicos oferecidos aparecem dentro da Rede Publica, por tags.
 - App roda localmente com frontend `5174` e backend `8006`.
