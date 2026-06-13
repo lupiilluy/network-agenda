@@ -6,6 +6,8 @@ Use o Vercel para o frontend e hospede a API FastAPI em um servico Python. Para 
 
 O frontend e estatico, entao combina bem com Vercel. O backend usa SQLite local quando `DATABASE_URL` nao existe e usa Supabase/Postgres quando `DATABASE_URL=postgresql://...`. Para deploy publico, configure Supabase Postgres.
 
+Para executar a publicacao, siga `docs/GO_LIVE.md`.
+
 ## GitHub
 
 O repositorio remoto atual e:

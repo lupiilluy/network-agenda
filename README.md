@@ -249,6 +249,8 @@ Guia detalhado: `docs/DEPLOYMENT.md`.
 
 Guia Supabase: `docs/SUPABASE.md`.
 
+Roteiro de publicacao: `docs/GO_LIVE.md`.
+
 ## Status
 
 MVP funcional em desenvolvimento local. A versão atual é focada em navegador; empacotamento app/PWA completo fica para uma etapa posterior. Integrações com Google, Google Maps e IA externa dependem de chaves reais. A próxima prioridade é consolidar testes automatizados, persistência de produção e autenticação/token robustos.
