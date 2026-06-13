@@ -2,9 +2,9 @@
 
 ## Estrategia recomendada
 
-Use o Vercel para o frontend e hospede a API FastAPI em um servico Python com disco ou banco persistente.
+Use o Vercel para o frontend e hospede a API FastAPI em um servico Python. Para dados de producao, use Supabase Postgres ou outro banco persistente.
 
-O frontend e estatico, entao combina bem com Vercel. O backend atual usa SQLite em `backend/data/network_agenda.sqlite3`; por isso ele nao deve depender de filesystem efemero/serverless para producao.
+O frontend e estatico, entao combina bem com Vercel. O backend atual usa SQLite em `backend/data/network_agenda.sqlite3`; por isso ele nao deve depender de filesystem efemero/serverless para producao. O caminho recomendado e migrar o banco para Supabase Postgres antes do deploy publico.
 
 ## GitHub
 
@@ -66,6 +66,17 @@ OPENAI_MODEL=gpt-4o-mini
 ```
 
 Depois de publicar a API, copie a URL publica para `VITE_API_URL` no Vercel e rode um novo deploy.
+
+## Supabase
+
+O schema inicial para Supabase esta em:
+
+```text
+supabase/schema.sql
+supabase/seed.sql
+```
+
+Leia `docs/SUPABASE.md` antes de expor qualquer tabela diretamente no navegador. A etapa seguinte e adaptar o backend para usar `DATABASE_URL` com Postgres.
 
 ## Validacao antes de publicar
 
