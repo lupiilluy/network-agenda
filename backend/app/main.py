@@ -53,9 +53,20 @@ load_local_env()
 
 app = FastAPI(title="Network Agenda API", version="0.1.0")
 
+
+def cors_allowed_origins() -> list[str]:
+    defaults = ["http://127.0.0.1:5174", "http://localhost:5174"]
+    configured = [
+        origin.strip().rstrip("/")
+        for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    return list(dict.fromkeys([*defaults, *configured]))
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5174", "http://localhost:5174"],
+    allow_origins=cors_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

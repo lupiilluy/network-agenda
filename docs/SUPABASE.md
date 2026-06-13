@@ -22,6 +22,7 @@ Backend:
 
 ```env
 DATABASE_URL=postgresql://...
+CORS_ALLOWED_ORIGINS=https://seu-app.vercel.app
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```

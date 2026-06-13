@@ -46,6 +46,16 @@ class NetworkAgendaApiTests(unittest.TestCase):
 
         self.assertEqual(sql, "SELECT * FROM contacts WHERE owner_id = %s ORDER BY created_at DESC")
 
+    def test_cors_origins_include_configured_domains(self):
+        os.environ["CORS_ALLOWED_ORIGINS"] = "https://agenda.example.com, https://agenda.example.com/"
+        try:
+            origins = main.cors_allowed_origins()
+        finally:
+            os.environ.pop("CORS_ALLOWED_ORIGINS", None)
+
+        self.assertIn("http://127.0.0.1:5174", origins)
+        self.assertEqual(origins.count("https://agenda.example.com"), 1)
+
     def test_contacts_are_scoped_by_owner(self):
         main.create_contact(contact_payload(owner_id="owner-a", name="Ana Silva", phone="11 90000-2222"))
         main.create_contact(contact_payload(owner_id="owner-b", name="Bia Souza", phone="11 90000-3333"))

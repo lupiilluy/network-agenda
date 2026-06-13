@@ -17,6 +17,7 @@ Crie `backend/.env.local` a partir de `backend/.env.example`:
 
 ```env
 DATABASE_URL=
+CORS_ALLOWED_ORIGINS=http://127.0.0.1:5174,http://localhost:5174
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```

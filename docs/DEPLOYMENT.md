@@ -50,6 +50,8 @@ O arquivo `frontend/vercel.json` mantem o fallback de SPA para rotas como `/dash
 
 Para a API, use um host que rode processo Python e mantenha dados persistentes. Exemplos: Render, Railway, Fly.io, VPS ou outro servico com volume/banco.
 
+O repositorio inclui `render.yaml` para criar o servico da API no Render por Blueprint. As variaveis marcadas como `sync: false` devem ser preenchidas no painel do Render.
+
 Configuracao generica:
 
 ```text
@@ -62,6 +64,7 @@ Variaveis:
 
 ```env
 DATABASE_URL=postgresql://...
+CORS_ALLOWED_ORIGINS=https://seu-app.vercel.app
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
