@@ -22,6 +22,8 @@ git commit -m "Prepare Vercel deploy"
 git push origin main
 ```
 
+O GitHub Pages nao esta ativo neste repositorio. O workflow de Pages fica manual para evitar falhas em cada push; o deploy principal recomendado e Vercel.
+
 ## Frontend no Vercel
 
 No painel do Vercel:
