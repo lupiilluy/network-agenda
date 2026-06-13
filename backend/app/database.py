@@ -5,7 +5,9 @@ import json
 import hashlib
 import re
 import secrets
+from contextlib import contextmanager
 from pathlib import Path
+from collections.abc import Iterator
 
 from .categories import CATEGORY_CATALOG, category_to_dict, classify_service, infer_service_from_contact, normalize
 
@@ -103,11 +105,19 @@ PUBLIC_PROFILES_SEED = (
 )
 
 
-def get_connection() -> sqlite3.Connection:
+@contextmanager
+def get_connection() -> Iterator[sqlite3.Connection]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
-    return connection
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def init_db() -> None:

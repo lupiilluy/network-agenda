@@ -114,7 +114,7 @@ def ensure_follow_up_slot_available(connection, owner_id: str, next_follow_up_at
     params: tuple = (owner_id, slot)
     if contact_id is not None:
         query += " AND id != ?"
-        params = (owner_id, next_follow_up_at, contact_id)
+        params = (owner_id, slot, contact_id)
     conflict = connection.execute(query, params).fetchone()
     if conflict is not None:
         raise HTTPException(

@@ -234,7 +234,14 @@ Backend:
 ```powershell
 cd backend
 python -m py_compile app\main.py app\database.py app\schemas.py
+python -m unittest discover -s tests
 ```
+
+## Deploy
+
+O frontend esta preparado para deploy no Vercel usando `frontend` como Root Directory. O backend FastAPI usa SQLite local, entao deve ficar em um host com processo Python e armazenamento persistente, ou ser migrado para Postgres antes de um deploy serverless completo.
+
+Guia detalhado: `docs/DEPLOYMENT.md`.
 
 ## Status
 
