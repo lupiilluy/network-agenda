@@ -4,7 +4,7 @@
 
 Use o Vercel para o frontend e hospede a API FastAPI em um servico Python. Para dados de producao, use Supabase Postgres ou outro banco persistente.
 
-O frontend e estatico, entao combina bem com Vercel. O backend atual usa SQLite em `backend/data/network_agenda.sqlite3`; por isso ele nao deve depender de filesystem efemero/serverless para producao. O caminho recomendado e migrar o banco para Supabase Postgres antes do deploy publico.
+O frontend e estatico, entao combina bem com Vercel. O backend usa SQLite local quando `DATABASE_URL` nao existe e usa Supabase/Postgres quando `DATABASE_URL=postgresql://...`. Para deploy publico, configure Supabase Postgres.
 
 ## GitHub
 
@@ -58,9 +58,10 @@ Build Command: pip install -r requirements.txt
 Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-Variaveis opcionais:
+Variaveis:
 
 ```env
+DATABASE_URL=postgresql://...
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
@@ -76,7 +77,7 @@ supabase/schema.sql
 supabase/seed.sql
 ```
 
-Leia `docs/SUPABASE.md` antes de expor qualquer tabela diretamente no navegador. A etapa seguinte e adaptar o backend para usar `DATABASE_URL` com Postgres.
+Leia `docs/SUPABASE.md` antes de expor qualquer tabela diretamente no navegador. A API ja usa Postgres quando `DATABASE_URL` esta configurada.
 
 ## Validacao antes de publicar
 

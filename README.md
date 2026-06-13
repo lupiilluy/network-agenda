@@ -56,7 +56,7 @@ O MVP atual prioriza:
 
 - Python
 - FastAPI
-- SQLite
+- SQLite local ou Supabase Postgres
 - Uvicorn
 
 ## Estrutura
@@ -136,6 +136,7 @@ VITE_GOOGLE_MAPS_API_KEY=sua_chave_google_maps
 Backend:
 
 ```env
+DATABASE_URL=
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
@@ -171,13 +172,15 @@ Com `OPENAI_API_KEY`, o backend pode usar modelo externo para melhorar a convers
 
 ## Banco de Dados
 
-O SQLite é criado automaticamente em:
+Sem `DATABASE_URL`, o SQLite é criado automaticamente em:
 
 ```text
 backend/data/network_agenda.sqlite3
 ```
 
 Esse arquivo não deve ir para o GitHub.
+
+Com `DATABASE_URL=postgresql://...`, o backend usa Postgres/Supabase e cria as tabelas pelo schema em `backend/app/postgres_schema.sql`.
 
 Tabelas principais:
 
@@ -239,7 +242,7 @@ python -m unittest discover -s tests
 
 ## Deploy
 
-O frontend esta preparado para deploy no Vercel usando `frontend` como Root Directory. O backend FastAPI usa SQLite local, entao deve ficar em um host com processo Python e armazenamento persistente, ou ser migrado para Supabase Postgres antes de um deploy publico.
+O frontend esta preparado para deploy no Vercel usando `frontend` como Root Directory. O backend FastAPI agora suporta SQLite local e Supabase Postgres via `DATABASE_URL`; para deploy publico, use Supabase Postgres.
 
 Guia detalhado: `docs/DEPLOYMENT.md`.
 

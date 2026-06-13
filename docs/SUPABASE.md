@@ -4,13 +4,13 @@
 
 Supabase deve entrar como banco Postgres gerenciado primeiro. Depois podemos migrar login para Supabase Auth.
 
-O app atual ainda usa `sqlite3` diretamente em `backend/app/database.py`, entao o schema abaixo prepara o banco, mas a API ainda precisa de uma etapa de adaptacao para Postgres antes de usar Supabase em producao.
+O backend ja suporta Postgres/Supabase quando `DATABASE_URL` aponta para uma connection string `postgresql://...`. Sem essa variavel, ele continua usando SQLite local.
 
 ## Criar o projeto
 
 1. Crie um projeto no Supabase.
 2. Abra o SQL Editor.
-3. Rode `supabase/schema.sql`.
+3. Rode `supabase/schema.sql`, ou deixe a API criar as tabelas no primeiro startup usando `backend/app/postgres_schema.sql`.
 4. Opcionalmente rode `supabase/seed.sql`.
 5. Copie a connection string em Database Settings.
 
@@ -48,7 +48,7 @@ SUPABASE_SERVICE_ROLE_KEY=...
 
 1. Manter frontend no Vercel.
 2. Criar Supabase Postgres com `supabase/schema.sql`.
-3. Adaptar `backend/app/database.py` para usar `DATABASE_URL` com Postgres.
+3. Configurar `DATABASE_URL` no host da API.
 4. Hospedar a API FastAPI em Render, Railway, Fly.io ou container equivalente.
 5. Configurar `VITE_API_URL` no Vercel apontando para a API.
 6. Depois migrar login local para Supabase Auth e ativar RLS nas tabelas expostas.

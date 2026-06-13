@@ -1,13 +1,22 @@
 from __future__ import annotations
 
-import sqlite3
 import json
 import hashlib
+import os
 import re
 import secrets
+import sqlite3
 from contextlib import contextmanager
-from pathlib import Path
 from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:
+    psycopg = None
+    dict_row = None
 
 from .categories import CATEGORY_CATALOG, category_to_dict, classify_service, infer_service_from_contact, normalize
 
@@ -105,11 +114,74 @@ PUBLIC_PROFILES_SEED = (
 )
 
 
+class DbConnection:
+    def __init__(self, connection: Any, dialect: str):
+        self.connection = connection
+        self.dialect = dialect
+
+    def execute(self, sql: str, params: tuple | list = ()):
+        if self.dialect == "postgres":
+            return self.connection.execute(to_postgres_sql(sql), params)
+        return self.connection.execute(sql, params)
+
+    def executescript(self, sql: str) -> None:
+        if self.dialect == "postgres":
+            for statement in split_sql_script(sql):
+                self.execute(statement)
+            return
+        self.connection.executescript(sql)
+
+    def commit(self) -> None:
+        self.connection.commit()
+
+    def rollback(self) -> None:
+        self.connection.rollback()
+
+    def close(self) -> None:
+        self.connection.close()
+
+
+def use_postgres() -> bool:
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    return database_url.startswith(("postgres://", "postgresql://"))
+
+
+def to_postgres_sql(sql: str) -> str:
+    return sql.replace("datetime(created_at)", "created_at").replace("?", "%s")
+
+
+def split_sql_script(sql: str) -> list[str]:
+    return [statement.strip() for statement in sql.split(";") if statement.strip()]
+
+
+def first_value(row) -> Any:
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return next(iter(row.values()))
+    return row[0]
+
+
+def row_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
 @contextmanager
-def get_connection() -> Iterator[sqlite3.Connection]:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
+def get_connection() -> Iterator[DbConnection]:
+    if use_postgres():
+        if psycopg is None:
+            raise RuntimeError("DATABASE_URL usa Postgres, mas psycopg nao esta instalado. Rode pip install -r requirements.txt.")
+        raw_connection = psycopg.connect(os.getenv("DATABASE_URL", "").strip(), row_factory=dict_row)
+        connection = DbConnection(raw_connection, "postgres")
+    else:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        raw_connection = sqlite3.connect(DB_PATH)
+        raw_connection.row_factory = sqlite3.Row
+        connection = DbConnection(raw_connection, "sqlite")
     try:
         yield connection
         connection.commit()
@@ -122,8 +194,11 @@ def get_connection() -> Iterator[sqlite3.Connection]:
 
 def init_db() -> None:
     with get_connection() as connection:
-        connection.executescript(
-            """
+        if connection.dialect == "postgres":
+            init_postgres_db(connection)
+        else:
+            connection.executescript(
+                """
             CREATE TABLE IF NOT EXISTS contacts (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               owner_id TEXT NOT NULL DEFAULT 'demo-user',
@@ -229,15 +304,22 @@ def init_db() -> None:
               UNIQUE(owner_id, primary_contact_id, duplicate_contact_id, match_type, match_value)
             );
             """
-        )
-        ensure_contact_columns(connection)
-        ensure_user_columns(connection)
+            )
+            ensure_contact_columns(connection)
+            ensure_user_columns(connection)
         seed_db(connection)
         assign_demo_contacts(connection)
         reclassify_contacts(connection)
 
 
-def ensure_contact_columns(connection: sqlite3.Connection) -> None:
+def init_postgres_db(connection: DbConnection) -> None:
+    schema_path = Path(__file__).resolve().parent / "postgres_schema.sql"
+    connection.executescript(schema_path.read_text(encoding="utf-8"))
+
+
+def ensure_contact_columns(connection: DbConnection) -> None:
+    if connection.dialect == "postgres":
+        return
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(contacts)").fetchall()}
     if "owner_id" not in columns:
         connection.execute("ALTER TABLE contacts ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'demo-user'")
@@ -271,7 +353,9 @@ def ensure_contact_columns(connection: sqlite3.Connection) -> None:
     connection.execute("UPDATE contacts SET crm_priority = 'Média' WHERE crm_priority = 'MÃ©dia'")
 
 
-def ensure_user_columns(connection: sqlite3.Connection) -> None:
+def ensure_user_columns(connection: DbConnection) -> None:
+    if connection.dialect == "postgres":
+        return
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
     if "password_hash" not in columns:
         connection.execute("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
@@ -315,13 +399,13 @@ def ensure_user_columns(connection: sqlite3.Connection) -> None:
     connection.execute("UPDATE users SET password_hash = ? WHERE password_hash = ''", (default_hash,))
 
 
-def seed_db(connection: sqlite3.Connection) -> None:
-    contact_count = connection.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
+def seed_db(connection: DbConnection) -> None:
+    contact_count = first_value(connection.execute("SELECT COUNT(*) FROM contacts").fetchone())
     if contact_count == 0:
         for contact in CONTACTS_SEED:
             insert_contact(connection, contact)
 
-    profile_count = connection.execute("SELECT COUNT(*) FROM public_profiles").fetchone()[0]
+    profile_count = first_value(connection.execute("SELECT COUNT(*) FROM public_profiles").fetchone())
     if profile_count == 0:
         for profile in PUBLIC_PROFILES_SEED:
             category = classify_service(profile["service"])
@@ -345,7 +429,7 @@ def seed_db(connection: sqlite3.Connection) -> None:
                 ),
             )
 
-    user_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    user_count = first_value(connection.execute("SELECT COUNT(*) FROM users").fetchone())
     if user_count == 0:
         upsert_user(
             connection,
@@ -374,7 +458,7 @@ def seed_db(connection: sqlite3.Connection) -> None:
         )
 
 
-def reclassify_contacts(connection: sqlite3.Connection) -> None:
+def reclassify_contacts(connection: DbConnection) -> None:
     rows = connection.execute("SELECT * FROM contacts").fetchall()
     generated_services = {normalize(category.label) for category in CATEGORY_CATALOG}
     generated_services.add(normalize("contato para revisar"))
@@ -416,11 +500,11 @@ def reclassify_contacts(connection: sqlite3.Connection) -> None:
         )
 
 
-def assign_demo_contacts(connection: sqlite3.Connection) -> None:
+def assign_demo_contacts(connection: DbConnection) -> None:
     first_user = connection.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
     if first_user is not None:
         connection.execute("UPDATE contacts SET owner_id = ? WHERE owner_id = 'demo-user'", (str(first_user["id"]),))
-    admin_exists = connection.execute("SELECT COUNT(*) FROM users WHERE email = ?", ("admin@network.local",)).fetchone()[0]
+    admin_exists = first_value(connection.execute("SELECT COUNT(*) FROM users WHERE email = ?", ("admin@network.local",)).fetchone())
     if admin_exists == 0:
         upsert_user(
             connection,
@@ -453,7 +537,7 @@ def phone_digits(value: str) -> str:
     return "".join(char for char in str(value or "") if char.isdigit())
 
 
-def extract_contact_emails(row: sqlite3.Row | dict) -> set[str]:
+def extract_contact_emails(row) -> set[str]:
     text = " ".join([str(row["note"] or ""), str(row["search_text"] or "")])
     return {match.lower() for match in re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", text)}
 
@@ -479,7 +563,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
     return secrets.compare_digest(candidate, digest)
 
 
-def upsert_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
+def upsert_user(connection: DbConnection, payload: dict):
     digits = phone_digits(payload["phone"])
     interests = json.dumps(payload.get("interests") or [], ensure_ascii=False)
     existing = connection.execute("SELECT * FROM users WHERE email = ?", (payload["email"],)).fetchone()
@@ -591,7 +675,7 @@ def upsert_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
     return connection.execute("SELECT * FROM users WHERE email = ?", (payload["email"],)).fetchone()
 
 
-def upsert_google_user(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
+def upsert_google_user(connection: DbConnection, payload: dict):
     existing = connection.execute("SELECT * FROM users WHERE lower(email) = lower(?)", (payload["email"],)).fetchone()
     if existing is not None:
         connection.execute(
@@ -616,30 +700,31 @@ def upsert_google_user(connection: sqlite3.Connection, payload: dict) -> sqlite3
           public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url,
           google_connected, google_profile_synced_at, role
         )
-        VALUES (?, '', ?, ?, '', ?, '', '', '', '', 0, '[]', 0, '', '', 1, 0, '', '', '', '', '', '', '', '', 1, CURRENT_TIMESTAMP, 'user')
+        VALUES (?, '', ?, ?, '', ?, '', '', '', '', false, '[]', false, '', '', true, false, '', '', '', '', '', '', '', '', true, CURRENT_TIMESTAMP, 'user')
         """,
         (payload["name"], payload["email"], password_hash, phone_digits_value),
     )
     return connection.execute("SELECT * FROM users WHERE email = ?", (payload["email"],)).fetchone()
 
 
-def find_user_by_phone(connection: sqlite3.Connection, phone: str) -> sqlite3.Row | None:
+def find_user_by_phone(connection: DbConnection, phone: str):
     digits = phone_digits(phone)
     if not digits:
         return None
     return connection.execute("SELECT * FROM users WHERE phone_digits = ?", (digits,)).fetchone()
 
 
-def authenticate_user(connection: sqlite3.Connection, email: str, password: str) -> sqlite3.Row | None:
+def authenticate_user(connection: DbConnection, email: str, password: str):
     row = connection.execute("SELECT * FROM users WHERE lower(email) = lower(?)", (email,)).fetchone()
     if row is None or not verify_password(password, row["password_hash"]):
         return None
     return row
 
 
-def row_to_user(row: sqlite3.Row) -> dict:
+def row_to_user(row) -> dict:
     try:
-        interests = json.loads(row["interests"] or "[]")
+        raw_interests = row["interests"] or "[]"
+        interests = raw_interests if isinstance(raw_interests, list) else json.loads(raw_interests)
     except json.JSONDecodeError:
         interests = []
     return {
@@ -687,7 +772,7 @@ def row_to_user(row: sqlite3.Row) -> dict:
     }
 
 
-def insert_contact(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row:
+def insert_contact(connection: DbConnection, payload: dict):
     owner_id = str(payload.get("owner_id") or "demo-user")
     note = payload.get("note") or ""
     incoming_service = payload.get("service")
@@ -720,8 +805,9 @@ def insert_contact(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row
     crm_note = payload.get("crm_note") or ""
     search_text = normalize(" ".join([payload["name"], payload["phone"], service, note, city, address, trust, source, description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, custom_fields, crm_status, crm_priority, crm_note, category.label, category.group]))
 
+    returning_clause = " RETURNING id" if connection.dialect == "postgres" else ""
     cursor = connection.execute(
-        """
+        f"""
         INSERT INTO contacts (
             owner_id, name, phone, service, note, city, address, trust, source,
             description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, custom_fields,
@@ -729,6 +815,7 @@ def insert_contact(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row
             category_id, category_label, category_group, search_text
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        {returning_clause}
         """,
         (
             owner_id,
@@ -761,10 +848,11 @@ def insert_contact(connection: sqlite3.Connection, payload: dict) -> sqlite3.Row
             search_text,
         ),
     )
-    return connection.execute("SELECT * FROM contacts WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    contact_id = first_value(cursor.fetchone()) if connection.dialect == "postgres" else cursor.lastrowid
+    return connection.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
 
 
-def update_contact(connection: sqlite3.Connection, contact_id: int, payload: dict) -> sqlite3.Row | None:
+def update_contact(connection: DbConnection, contact_id: int, payload: dict):
     owner_id = str(payload.get("owner_id") or "demo-user")
     note = payload.get("note") or ""
     service = infer_service_from_contact(payload["name"], payload.get("service"), note, payload.get("source"))
@@ -859,7 +947,7 @@ def update_contact(connection: sqlite3.Connection, contact_id: int, payload: dic
     return connection.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
 
 
-def ignored_merge_pairs(connection: sqlite3.Connection, owner_id: str) -> set[tuple[int, int, str, str]]:
+def ignored_merge_pairs(connection: DbConnection, owner_id: str) -> set[tuple[int, int, str, str]]:
     rows = connection.execute(
         """
         SELECT primary_contact_id, duplicate_contact_id, match_type, match_value
@@ -874,7 +962,7 @@ def ignored_merge_pairs(connection: sqlite3.Connection, owner_id: str) -> set[tu
     }
 
 
-def list_merge_suggestions(connection: sqlite3.Connection, owner_id: str) -> list[dict]:
+def list_merge_suggestions(connection: DbConnection, owner_id: str) -> list[dict]:
     rows = connection.execute(
         "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) ASC, id ASC",
         (owner_id,),
@@ -884,8 +972,8 @@ def list_merge_suggestions(connection: sqlite3.Connection, owner_id: str) -> lis
     seen: set[tuple[int, int, str, str]] = set()
     seen_pairs: set[tuple[int, int]] = set()
 
-    by_phone: dict[str, list[sqlite3.Row]] = {}
-    by_email: dict[str, list[sqlite3.Row]] = {}
+    by_phone: dict[str, list] = {}
+    by_email: dict[str, list] = {}
     for row in rows:
         digits = phone_digits(row["phone"])
         if len(digits) >= 8:
@@ -893,7 +981,7 @@ def list_merge_suggestions(connection: sqlite3.Connection, owner_id: str) -> lis
         for email in extract_contact_emails(row):
             by_email.setdefault(email, []).append(row)
 
-    def add_pairs(groups: dict[str, list[sqlite3.Row]], match_type: str) -> None:
+    def add_pairs(groups: dict[str, list], match_type: str) -> None:
         for value, contacts in groups.items():
             if len(contacts) < 2:
                 continue
@@ -923,7 +1011,7 @@ def list_merge_suggestions(connection: sqlite3.Connection, owner_id: str) -> lis
     return suggestions
 
 
-def ignore_merge_suggestion(connection: sqlite3.Connection, owner_id: str, primary_id: int, duplicate_id: int) -> None:
+def ignore_merge_suggestion(connection: DbConnection, owner_id: str, primary_id: int, duplicate_id: int) -> None:
     rows = connection.execute(
         "SELECT * FROM contacts WHERE owner_id = ? AND id IN (?, ?)",
         (owner_id, primary_id, duplicate_id),
@@ -944,7 +1032,7 @@ def ignore_merge_suggestion(connection: sqlite3.Connection, owner_id: str, prima
             )
 
 
-def merge_contacts(connection: sqlite3.Connection, owner_id: str, primary_id: int, duplicate_id: int) -> sqlite3.Row:
+def merge_contacts(connection: DbConnection, owner_id: str, primary_id: int, duplicate_id: int):
     primary_id, duplicate_id = merge_key(primary_id, duplicate_id)
     primary = connection.execute("SELECT * FROM contacts WHERE owner_id = ? AND id = ?", (owner_id, primary_id)).fetchone()
     duplicate = connection.execute("SELECT * FROM contacts WHERE owner_id = ? AND id = ?", (owner_id, duplicate_id)).fetchone()
@@ -1011,7 +1099,7 @@ def merge_contacts(connection: sqlite3.Connection, owner_id: str, primary_id: in
     return connection.execute("SELECT * FROM contacts WHERE id = ?", (primary_id,)).fetchone()
 
 
-def row_to_contact(row: sqlite3.Row) -> dict:
+def row_to_contact(row) -> dict:
     return {
         "id": row["id"],
         "owner_id": row["owner_id"],
@@ -1038,7 +1126,7 @@ def row_to_contact(row: sqlite3.Row) -> dict:
         "last_contact_at": row["last_contact_at"],
         "next_follow_up_at": row["next_follow_up_at"],
         "crm_note": row["crm_note"],
-        "created_at": row["created_at"],
+        "created_at": row_text(row["created_at"]),
         "category": {
             "id": row["category_id"],
             "label": row["category_label"],
@@ -1050,7 +1138,7 @@ def row_to_contact(row: sqlite3.Row) -> dict:
     }
 
 
-def row_to_public_profile(row: sqlite3.Row) -> dict:
+def row_to_public_profile(row) -> dict:
     return {
         "id": row["id"],
         "name": row["name"],
@@ -1082,10 +1170,11 @@ def row_to_public_profile(row: sqlite3.Row) -> dict:
     }
 
 
-def row_to_public_user_profile(row: sqlite3.Row) -> dict:
+def row_to_public_user_profile(row) -> dict:
     service = row["offered_services"] or row["public_solves"] or "Perfil público"
     try:
-        interests = json.loads(row["interests"] or "[]")
+        raw_interests = row["interests"] or "[]"
+        interests = raw_interests if isinstance(raw_interests, list) else json.loads(raw_interests)
     except json.JSONDecodeError:
         interests = []
     tags = row["public_tags"] or ", ".join(interests)
@@ -1144,11 +1233,11 @@ def row_to_public_user_profile(row: sqlite3.Row) -> dict:
     }
 
 
-def category_counts(connection: sqlite3.Connection) -> dict[str, int]:
+def category_counts(connection: DbConnection) -> dict[str, int]:
     rows = connection.execute("SELECT category_id, COUNT(*) as total FROM contacts GROUP BY category_id").fetchall()
     return {row["category_id"]: row["total"] for row in rows}
 
 
-def list_categories(connection: sqlite3.Connection) -> list[dict]:
+def list_categories(connection: DbConnection) -> list[dict]:
     counts = category_counts(connection)
     return [category_to_dict(category, counts.get(category.id, 0)) for category in CATEGORY_CATALOG]

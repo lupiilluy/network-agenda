@@ -321,7 +321,7 @@ def public_profiles(query: str = Query(default="")) -> list[dict]:
     with get_connection() as connection:
         rows = connection.execute("SELECT * FROM public_profiles ORDER BY score DESC, people DESC").fetchall()
         user_rows = connection.execute(
-            "SELECT * FROM users WHERE public_visible = 1 ORDER BY datetime(created_at) DESC, id DESC"
+            "SELECT * FROM users WHERE public_visible = true ORDER BY datetime(created_at) DESC, id DESC"
         ).fetchall()
 
     results = []

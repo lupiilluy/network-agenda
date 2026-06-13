@@ -16,6 +16,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8006
 Crie `backend/.env.local` a partir de `backend/.env.example`:
 
 ```env
+DATABASE_URL=
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
@@ -39,4 +40,6 @@ OPENAI_MODEL=gpt-4o-mini
 - `POST /api/ai/chat`
 - `GET /api/search?query=eletricista`
 
-O banco SQLite fica em `backend/data/network_agenda.sqlite3` e e criado automaticamente.
+Sem `DATABASE_URL`, o banco SQLite fica em `backend/data/network_agenda.sqlite3` e e criado automaticamente.
+
+Com `DATABASE_URL=postgresql://...`, a API usa Postgres/Supabase e inicializa as tabelas com `app/postgres_schema.sql`.

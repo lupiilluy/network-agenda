@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from app import database, main
-from app.schemas import AiChatIn, ContactCreate, UserCreate
+from app.schemas import AiChatIn, ContactCreate, GoogleLoginIn, UserCreate
 
 
 def contact_payload(**overrides):
@@ -31,6 +31,7 @@ class NetworkAgendaApiTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         database.DATA_DIR = Path(self.tmpdir.name)
         database.DB_PATH = database.DATA_DIR / "network_agenda_test.sqlite3"
+        os.environ.pop("DATABASE_URL", None)
         os.environ.pop("OPENAI_API_KEY", None)
         database.init_db()
 
@@ -39,6 +40,11 @@ class NetworkAgendaApiTests(unittest.TestCase):
 
     def test_health(self):
         self.assertEqual(main.health()["status"], "ok")
+
+    def test_postgres_sql_translation(self):
+        sql = database.to_postgres_sql("SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC")
+
+        self.assertEqual(sql, "SELECT * FROM contacts WHERE owner_id = %s ORDER BY created_at DESC")
 
     def test_contacts_are_scoped_by_owner(self):
         main.create_contact(contact_payload(owner_id="owner-a", name="Ana Silva", phone="11 90000-2222"))
@@ -104,6 +110,22 @@ class NetworkAgendaApiTests(unittest.TestCase):
             main.save_user(payload)
 
         self.assertEqual(raised.exception.status_code, 422)
+
+    def test_public_profiles_load_with_boolean_filter(self):
+        profiles = main.public_profiles(query="")
+
+        self.assertGreaterEqual(len(profiles), 1)
+
+    def test_google_login_works_on_sqlite_defaults(self):
+        user = main.google_login(
+            GoogleLoginIn(
+                sub="google-user-1",
+                email="google@example.com",
+                name="Google User",
+            )
+        )
+
+        self.assertTrue(user["google_connected"])
 
 
 if __name__ == "__main__":
