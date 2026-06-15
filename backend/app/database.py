@@ -21,7 +21,8 @@ except ImportError:
 from .categories import CATEGORY_CATALOG, category_to_dict, classify_service, infer_service_from_contact, normalize
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
+DEFAULT_DATA_DIR = Path("/tmp/network-agenda") if os.getenv("VERCEL") else BASE_DIR / "data"
+DATA_DIR = Path(os.getenv("NETWORK_AGENDA_DATA_DIR", str(DEFAULT_DATA_DIR)))
 DB_PATH = DATA_DIR / "network_agenda.sqlite3"
 
 
