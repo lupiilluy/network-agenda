@@ -1,4 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
+import { createClient } from '@supabase/supabase-js'
 import {
   Activity,
   ArrowLeft,
@@ -43,6 +44,8 @@ import {
 } from 'lucide-react'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8006'
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || ''
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? ''
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? ''
 const GOOGLE_LOGIN_SCOPE = 'openid email profile'
@@ -50,6 +53,23 @@ const GOOGLE_CONTACTS_SCOPE = 'https://www.googleapis.com/auth/contacts.readonly
 const GOOGLE_ACCOUNT_PROFILE_SCOPE = `${GOOGLE_LOGIN_SCOPE} https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/user.birthday.read`
 const AUTH_STORAGE_KEY = 'network-agenda-user'
 const AUTH_TTL_MS = 24 * 60 * 60 * 1000
+const SUPABASE_AUTH_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
+let supabaseClient = null
+
+function getSupabaseClient() {
+  if (!SUPABASE_AUTH_ENABLED) return null
+  if (!supabaseClient) {
+    supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  }
+  return supabaseClient
+}
+
+async function getSupabaseAccessToken() {
+  const client = getSupabaseClient()
+  if (!client) return ''
+  const { data } = await client.auth.getSession()
+  return data.session?.access_token ?? ''
+}
 
 const ROUTES = {
   DASHBOARD: '/dashboard',
@@ -507,9 +527,11 @@ const dddCoordinates = {
 }
 
 async function apiRequest(path, options = {}) {
+  const accessToken = await getSupabaseAccessToken()
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
       'Content-Type': 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...(options.headers ?? {}),
     },
     ...options,
@@ -5246,13 +5268,14 @@ function geocodeAddress(geocoder, address) {
   })
 }
 
-function LoginPage({ onLogin, onGoogleLogin, onSaveUser, onImportContacts, onImportGoogleContacts, onImportGoogleProfile }) {
+function LoginPage({ onLogin, onGoogleLogin, onMagicLink, supabaseAuthEnabled, onSaveUser, onImportContacts, onImportGoogleContacts, onImportGoogleProfile }) {
   const [mode, setMode] = useState('login')
   const [email, setEmail] = useState('ana@network.local')
   const [password, setPassword] = useState('')
   const [errors, setErrors] = useState({})
   const [status, setStatus] = useState('')
   const [isGoogleLoading, setIsGoogleLoading] = useState(false)
+  const [isMagicLoading, setIsMagicLoading] = useState(false)
 
   async function submit(event) {
     event.preventDefault()
@@ -5326,7 +5349,39 @@ function LoginPage({ onLogin, onGoogleLogin, onSaveUser, onImportContacts, onImp
             className="secondary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
           >
             <Cloud size={18} />
-            {isGoogleLoading ? 'Conectando...' : 'Entrar com Google'}
+            {isGoogleLoading ? 'Conectando...' : supabaseAuthEnabled ? 'Entrar com Google via Supabase' : 'Entrar com Google'}
+          </button>
+          <button
+            type="button"
+            disabled={isMagicLoading}
+            onClick={async () => {
+              if (!email.trim()) {
+                setErrors((current) => ({ ...current, email: 'Informe o email para receber o link.' }))
+                return
+              }
+              setStatus('Enviando magic link...')
+              setIsMagicLoading(true)
+              try {
+                await onMagicLink(email.trim())
+                setStatus('Enviamos um link de acesso para seu email.')
+              } catch (error) {
+                setStatus(error.message || 'Não foi possível enviar o magic link.')
+              } finally {
+                setIsMagicLoading(false)
+              }
+            }}
+            className="secondary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Sparkles size={18} />
+            {isMagicLoading ? 'Enviando...' : 'Receber magic link'}
+          </button>
+          <button
+            type="button"
+            disabled
+            className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 text-sm font-black text-slate-500"
+          >
+            <Lock size={17} />
+            Apple login em breve
           </button>
         </form>
       ) : (
@@ -5841,11 +5896,63 @@ export default function App() {
       suggestions: [],
     },
   ])
+  const lastSupabaseUserRef = useRef('')
 
   useEffect(() => {
     const handlePopState = () => setRoute(parsePath())
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  useEffect(() => {
+    const client = getSupabaseClient()
+    if (!client) return undefined
+    let active = true
+
+    async function syncSession(session) {
+      if (!active || !session?.user?.email) return
+      if (lastSupabaseUserRef.current === session.user.id && user?.email === session.user.email) return
+      lastSupabaseUserRef.current = session.user.id
+      try {
+        const response = await apiRequest('/api/google-login', {
+          method: 'POST',
+          body: JSON.stringify({
+            sub: session.user.id,
+            email: session.user.email,
+            name: session.user.user_metadata?.full_name || session.user.user_metadata?.name || session.user.email,
+            picture: session.user.user_metadata?.avatar_url || '',
+          }),
+        })
+        const loggedUser = apiUserToLocal(response)
+        if (!loggedUser || !active) return
+        setBackendOnline(true)
+        rememberUser(loggedUser)
+        if (isCadastroIncomplete(loggedUser)) {
+          navigate(ROUTES.REGISTER)
+        } else if (parsePath().page === 'login') {
+          navigate(ROUTES.DASHBOARD)
+        }
+      } catch {
+        if (active) {
+          setBackendOnline(false)
+          showToast('Sessão Supabase ativa, mas não consegui sincronizar o perfil.')
+        }
+      }
+    }
+
+    client.auth.getSession().then(({ data }) => syncSession(data.session))
+    const { data } = client.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_OUT') {
+        lastSupabaseUserRef.current = ''
+        return
+      }
+      syncSession(session)
+    })
+
+    return () => {
+      active = false
+      data.subscription.unsubscribe()
+    }
   }, [])
 
   useEffect(() => {
@@ -6523,6 +6630,15 @@ export default function App() {
   }
 
   async function loginWithGoogle() {
+    const client = getSupabaseClient()
+    if (client) {
+      const { error } = await client.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: window.location.origin },
+      })
+      if (error) throw error
+      return
+    }
     const { profile } = await getGoogleProfileWithToken()
     const response = await apiRequest('/api/google-login', {
       method: 'POST',
@@ -6549,6 +6665,18 @@ export default function App() {
     }
     showToast('Login Google realizado.')
     navigate(ROUTES.DASHBOARD)
+  }
+
+  async function sendMagicLink(email) {
+    const client = getSupabaseClient()
+    if (!client) {
+      throw new Error('Magic link estará disponível quando o Supabase Auth for configurado.')
+    }
+    const { error } = await client.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: window.location.origin },
+    })
+    if (error) throw error
   }
 
   async function saveUser(nextUser, pendingContacts = [], options = {}) {
@@ -6592,6 +6720,7 @@ export default function App() {
   }
 
   function logout() {
+    void getSupabaseClient()?.auth.signOut()
     setUser(null)
     localStorage.removeItem(AUTH_STORAGE_KEY)
     showToast('Sessão encerrada.')
@@ -6623,7 +6752,7 @@ export default function App() {
 
   let page
   if (effectiveRoute.page === 'login') {
-    page = <LoginPage onLogin={loginUser} onGoogleLogin={loginWithGoogle} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} />
+    page = <LoginPage onLogin={loginUser} onGoogleLogin={loginWithGoogle} onMagicLink={sendMagicLink} supabaseAuthEnabled={SUPABASE_AUTH_ENABLED} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} />
   } else if (effectiveRoute.page === 'register') {
     page = <RegisterPage user={user} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'publicProfile') {

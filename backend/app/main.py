@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -13,9 +14,17 @@ import re
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+try:
+    import jwt
+    from jwt import PyJWTError
+except ImportError:
+    jwt = None
+    PyJWTError = Exception
+
 from .categories import classify_service, infer_service_from_contact, is_generic_service, normalize
 from .database import (
     authenticate_user,
+    find_user_by_email,
     get_connection,
     find_user_by_phone,
     init_db,
@@ -52,6 +61,7 @@ def load_local_env() -> None:
 load_local_env()
 
 app = FastAPI(title="Network Agenda API", version="0.1.0")
+AUTH_CONTEXT: ContextVar[dict | None] = ContextVar("AUTH_CONTEXT", default=None)
 
 
 def cors_allowed_origins() -> list[str]:
@@ -71,6 +81,61 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def decode_supabase_token(token: str) -> dict | None:
+    jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "").strip()
+    if not token or not jwt_secret or jwt is None:
+        return None
+    try:
+        claims = jwt.decode(token, jwt_secret, algorithms=["HS256"], options={"verify_aud": False})
+    except PyJWTError:
+        return None
+    email = str(claims.get("email") or "").strip()
+    subject = str(claims.get("sub") or "").strip()
+    if not email or not subject:
+        return None
+    return {"sub": subject, "email": email}
+
+
+def auth_context_from_header(authorization: str) -> dict | None:
+    if not authorization.lower().startswith("bearer "):
+        return None
+    claims = decode_supabase_token(authorization.split(" ", 1)[1].strip())
+    if claims is None:
+        return None
+    owner_id = ""
+    with get_connection() as connection:
+        row = find_user_by_email(connection, claims["email"])
+        if row is None:
+            row = upsert_google_user(
+                connection,
+                {
+                    "sub": claims["sub"],
+                    "email": claims["email"],
+                    "name": claims["email"].split("@", 1)[0],
+                },
+            )
+            connection.commit()
+        if row is not None:
+            owner_id = str(row["id"])
+    return {**claims, "owner_id": owner_id}
+
+
+def authenticated_owner_id(fallback: str | None = "demo-user") -> str:
+    context = AUTH_CONTEXT.get()
+    if context and context.get("owner_id"):
+        return str(context["owner_id"])
+    return str(fallback or "demo-user")
+
+
+@app.middleware("http")
+async def load_auth_context(request, call_next):
+    token = AUTH_CONTEXT.set(auth_context_from_header(request.headers.get("authorization", "")))
+    try:
+        return await call_next(request)
+    finally:
+        AUTH_CONTEXT.reset(token)
 
 
 @app.on_event("startup")
@@ -96,7 +161,7 @@ def contacts(
     user_id: str = Query(default="demo-user"),
 ) -> list[dict]:
     normalized_query = normalize(query)
-    owner_id = str(user_id or "demo-user")
+    owner_id = authenticated_owner_id(user_id)
     with get_connection() as connection:
         rows = connection.execute(
             "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC, id DESC",
@@ -138,7 +203,8 @@ def ensure_follow_up_slot_available(connection, owner_id: str, next_follow_up_at
 def create_contact(payload: ContactCreate) -> dict:
     with get_connection() as connection:
         data = payload.model_dump()
-        owner_id = str(data.get("owner_id") or "demo-user")
+        owner_id = authenticated_owner_id(data.get("owner_id"))
+        data["owner_id"] = owner_id
         ensure_follow_up_slot_available(connection, owner_id, data.get("next_follow_up_at"))
         registered_user = find_user_by_phone(connection, data["phone"])
         if registered_user is not None:
@@ -156,7 +222,8 @@ def create_contact(payload: ContactCreate) -> dict:
 def edit_contact(contact_id: int, payload: ContactCreate) -> dict:
     with get_connection() as connection:
         data = payload.model_dump()
-        owner_id = str(data.get("owner_id") or "demo-user")
+        owner_id = authenticated_owner_id(data.get("owner_id"))
+        data["owner_id"] = owner_id
         ensure_follow_up_slot_available(connection, owner_id, data.get("next_follow_up_at"), contact_id)
         registered_user = find_user_by_phone(connection, data["phone"])
         if registered_user is not None:
@@ -174,7 +241,7 @@ def edit_contact(contact_id: int, payload: ContactCreate) -> dict:
 @app.delete("/api/contacts/{contact_id}", status_code=204, response_class=Response)
 def delete_contact(contact_id: int, user_id: str = Query(default="demo-user")) -> Response:
     with get_connection() as connection:
-        cursor = connection.execute("DELETE FROM contacts WHERE id = ? AND owner_id = ?", (contact_id, str(user_id or "demo-user")))
+        cursor = connection.execute("DELETE FROM contacts WHERE id = ? AND owner_id = ?", (contact_id, authenticated_owner_id(user_id)))
         connection.commit()
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Contato não encontrado.")
@@ -184,14 +251,14 @@ def delete_contact(contact_id: int, user_id: str = Query(default="demo-user")) -
 @app.get("/api/merge-suggestions", response_model=list[MergeSuggestionOut])
 def merge_suggestions(user_id: str = Query(default="demo-user")) -> list[dict]:
     with get_connection() as connection:
-        return list_merge_suggestions(connection, str(user_id or "demo-user"))
+        return list_merge_suggestions(connection, authenticated_owner_id(user_id))
 
 
 @app.post("/api/merge-suggestions/ignore", status_code=204, response_class=Response)
 def ignore_duplicate(payload: MergeDecisionIn) -> Response:
     with get_connection() as connection:
         try:
-            ignore_merge_suggestion(connection, payload.owner_id, payload.primary_contact_id, payload.duplicate_contact_id)
+            ignore_merge_suggestion(connection, authenticated_owner_id(payload.owner_id), payload.primary_contact_id, payload.duplicate_contact_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         connection.commit()
@@ -202,7 +269,7 @@ def ignore_duplicate(payload: MergeDecisionIn) -> Response:
 def merge_duplicate(payload: MergeDecisionIn) -> dict:
     with get_connection() as connection:
         try:
-            row = merge_contacts(connection, payload.owner_id, payload.primary_contact_id, payload.duplicate_contact_id)
+            row = merge_contacts(connection, authenticated_owner_id(payload.owner_id), payload.primary_contact_id, payload.duplicate_contact_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         connection.commit()
@@ -349,7 +416,7 @@ def public_profiles(query: str = Query(default="")) -> list[dict]:
 
 @app.get("/api/search", response_model=SearchOut)
 def search(query: str = Query(default=""), user_id: str = Query(default="demo-user")) -> dict:
-    private_results = contacts(query=query, category="all", user_id=str(user_id or "demo-user"))
+    private_results = contacts(query=query, category="all", user_id=authenticated_owner_id(user_id))
     public_results = public_profiles(query=query)
     return {
         "query": query,
@@ -909,7 +976,7 @@ def call_openai_chat(message: str, rows: list, suggestions: list[dict]) -> str |
 
 @app.post("/api/ai/chat", response_model=AiChatOut)
 def ai_chat(payload: AiChatIn) -> dict:
-    owner_id = str(payload.user_id or "demo-user")
+    owner_id = authenticated_owner_id(payload.user_id)
     with get_connection() as connection:
         rows = connection.execute(
             "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC, id DESC",

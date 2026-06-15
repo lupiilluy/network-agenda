@@ -722,6 +722,13 @@ def find_user_by_phone(connection: DbConnection, phone: str):
     return connection.execute("SELECT * FROM users WHERE phone_digits = ?", (digits,)).fetchone()
 
 
+def find_user_by_email(connection: DbConnection, email: str):
+    normalized = str(email or "").strip()
+    if not normalized:
+        return None
+    return connection.execute("SELECT * FROM users WHERE lower(email) = lower(?)", (normalized,)).fetchone()
+
+
 def authenticate_user(connection: DbConnection, email: str, password: str):
     row = connection.execute("SELECT * FROM users WHERE lower(email) = lower(?)", (email,)).fetchone()
     if row is None or not verify_password(password, row["password_hash"]):

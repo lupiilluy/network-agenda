@@ -3,7 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import jwt
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from app import database, main
 from app.schemas import AiChatIn, ContactCreate, GoogleLoginIn, UserCreate
@@ -136,6 +138,58 @@ class NetworkAgendaApiTests(unittest.TestCase):
         )
 
         self.assertTrue(user["google_connected"])
+
+    def test_supabase_token_owner_overrides_client_owner_id(self):
+        os.environ["SUPABASE_JWT_SECRET"] = "test-secret"
+        try:
+            user = main.google_login(
+                GoogleLoginIn(
+                    sub="supabase-user-1",
+                    email="supabase@example.com",
+                    name="Supabase User",
+                )
+            )
+            token = jwt.encode(
+                {"sub": "supabase-user-1", "email": "supabase@example.com", "aud": "authenticated"},
+                "test-secret",
+                algorithm="HS256",
+            )
+
+            client = TestClient(main.app)
+            response = client.post(
+                "/api/contacts",
+                headers={"Authorization": f"Bearer {token}"},
+                json=contact_payload(owner_id="spoofed-owner", name="Contato Seguro", phone="11 97777-1010").model_dump(),
+            )
+
+            self.assertEqual(response.status_code, 201)
+            self.assertEqual(response.json()["owner_id"], str(user["id"]))
+        finally:
+            os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+    def test_supabase_token_creates_owner_before_contact_write(self):
+        os.environ["SUPABASE_JWT_SECRET"] = "test-secret"
+        try:
+            token = jwt.encode(
+                {"sub": "supabase-user-2", "email": "new-supabase@example.com", "aud": "authenticated"},
+                "test-secret",
+                algorithm="HS256",
+            )
+
+            client = TestClient(main.app)
+            response = client.post(
+                "/api/contacts",
+                headers={"Authorization": f"Bearer {token}"},
+                json=contact_payload(owner_id="spoofed-owner", name="Contato Sincronizado", phone="11 97777-2020").model_dump(),
+            )
+
+            self.assertEqual(response.status_code, 201)
+            self.assertNotEqual(response.json()["owner_id"], "spoofed-owner")
+            with database.get_connection() as connection:
+                user = database.find_user_by_email(connection, "new-supabase@example.com")
+            self.assertEqual(response.json()["owner_id"], str(user["id"]))
+        finally:
+            os.environ.pop("SUPABASE_JWT_SECRET", None)
 
 
 if __name__ == "__main__":
