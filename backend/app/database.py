@@ -171,6 +171,13 @@ def row_text(value: Any) -> str:
     return str(value)
 
 
+def db_bool(connection: "DbConnection", value: Any) -> bool | int:
+    normalized = bool(value)
+    if connection.dialect == "postgres":
+        return normalized
+    return 1 if normalized else 0
+
+
 @contextmanager
 def get_connection() -> Iterator[DbConnection]:
     if use_postgres():
@@ -587,11 +594,11 @@ def upsert_user(connection: DbConnection, payload: dict):
         payload.get("neighborhood") or "",
         payload.get("city") or "",
         payload.get("state") or "",
-        1 if payload.get("address_visible") else 0,
+        db_bool(connection, payload.get("address_visible")),
         interests,
-        1 if payload.get("is_collaborator") else 0,
+        db_bool(connection, payload.get("is_collaborator")),
         payload.get("offered_services") or "",
-        1 if payload.get("use_different_service_address") else 0,
+        db_bool(connection, payload.get("use_different_service_address")),
         payload.get("service_cep") or "",
         payload.get("service_address") or "",
         payload.get("service_address_line") or "",
@@ -600,8 +607,8 @@ def upsert_user(connection: DbConnection, payload: dict):
         payload.get("service_neighborhood") or "",
         payload.get("service_city") or "",
         payload.get("service_state") or "",
-        1 if payload.get("service_address_visible", True) else 0,
-        1 if payload.get("public_visible") else 0,
+        db_bool(connection, payload.get("service_address_visible", True)),
+        db_bool(connection, payload.get("public_visible")),
         payload.get("public_description") or "",
         payload.get("public_demand") or "",
         payload.get("public_solves") or "",
@@ -610,7 +617,7 @@ def upsert_user(connection: DbConnection, payload: dict):
         payload.get("public_instagram") or "",
         payload.get("public_linkedin") or "",
         payload.get("public_url") or "",
-        1 if payload.get("google_connected") else 0,
+        db_bool(connection, payload.get("google_connected")),
         payload.get("google_contacts_imported_at") or "",
         payload.get("google_profile_synced_at") or "",
         payload.get("role") or "user",
@@ -682,7 +689,7 @@ def upsert_google_user(connection: DbConnection, payload: dict):
         connection.execute(
             """
             UPDATE users
-            SET google_connected = 1,
+            SET google_connected = true,
                 google_profile_synced_at = COALESCE(NULLIF(google_profile_synced_at, ''), CURRENT_TIMESTAMP)
             WHERE id = ?
             """,
