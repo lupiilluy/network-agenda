@@ -129,6 +129,8 @@ Frontend:
 
 ```env
 VITE_API_URL=http://127.0.0.1:8006
+VITE_SUPABASE_URL=https://seu-projeto.supabase.co
+VITE_SUPABASE_ANON_KEY=cole_aqui_a_anon_key_publica
 VITE_GOOGLE_CLIENT_ID=seu_client_id_google
 VITE_GOOGLE_MAPS_API_KEY=sua_chave_google_maps
 ```
@@ -138,6 +140,7 @@ Backend:
 ```env
 DATABASE_URL=
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:5174,http://localhost:5174
+SUPABASE_JWT_SECRET=
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```

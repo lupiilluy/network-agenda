@@ -2,7 +2,7 @@
 
 ## O que vai para o Supabase
 
-Supabase deve entrar como banco Postgres gerenciado primeiro. Depois podemos migrar login para Supabase Auth.
+Supabase entra como banco Postgres gerenciado e tambem pode assumir Auth. O app mantem o login antigo como fallback quando as variaveis de Auth nao estao configuradas.
 
 O backend ja suporta Postgres/Supabase quando `DATABASE_URL` aponta para uma connection string `postgresql://...`. Sem essa variavel, ele continua usando SQLite local.
 
@@ -23,6 +23,7 @@ Backend:
 ```env
 DATABASE_URL=postgresql://...
 CORS_ALLOWED_ORIGINS=https://seu-app.vercel.app
+SUPABASE_JWT_SECRET=...
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
@@ -31,15 +32,17 @@ Frontend:
 
 ```env
 VITE_API_URL=https://sua-api-em-producao
+VITE_SUPABASE_URL=https://seu-projeto.supabase.co
+VITE_SUPABASE_ANON_KEY=...
 VITE_GOOGLE_CLIENT_ID=...
 VITE_GOOGLE_MAPS_API_KEY=...
 ```
 
-Quando migrarmos Auth para Supabase:
+Com essas variaveis, o frontend usa Supabase para Google OAuth e magic link. O backend valida o bearer token com `SUPABASE_JWT_SECRET` e usa o usuario autenticado como dono real dos contatos.
+
+Nao use no navegador:
 
 ```env
-VITE_SUPABASE_URL=https://seu-projeto.supabase.co
-VITE_SUPABASE_ANON_KEY=...
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
@@ -52,7 +55,8 @@ SUPABASE_SERVICE_ROLE_KEY=...
 3. Configurar `DATABASE_URL` no host da API.
 4. Hospedar a API FastAPI em Render, Railway, Fly.io ou container equivalente.
 5. Configurar `VITE_API_URL` no Vercel apontando para a API.
-6. Depois migrar login local para Supabase Auth e ativar RLS nas tabelas expostas.
+6. Configurar `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `SUPABASE_JWT_SECRET`.
+7. Depois ativar RLS nas tabelas expostas, caso o frontend passe a chamar Supabase direto.
 
 ## Seguranca
 
