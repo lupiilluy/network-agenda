@@ -30,18 +30,28 @@ from .database import (
     init_db,
     ignore_merge_suggestion,
     insert_contact,
+    add_group_contact,
+    add_group_member,
+    can_access_group,
+    can_manage_group,
+    create_group,
     list_merge_suggestions,
     list_categories,
+    list_group_contacts,
+    list_groups_for_user,
     merge_contacts,
+    remove_group_contact,
+    remove_group_member,
     row_to_contact,
     row_to_public_profile,
     row_to_public_user_profile,
     row_to_user,
+    update_group,
     update_contact,
     upsert_google_user,
     upsert_user,
 )
-from .schemas import AddressLookupOut, AiChatIn, AiChatOut, CategoryOut, ContactCreate, ContactOut, GoogleLoginIn, LoginIn, MergeDecisionIn, MergeSuggestionOut, PublicProfileOut, SearchOut, UserCreate, UserOut
+from .schemas import AddressLookupOut, AiChatIn, AiChatOut, CategoryOut, ContactCreate, ContactOut, GoogleLoginIn, GroupContactLinkIn, GroupCreate, GroupMemberCreate, GroupMemberOut, GroupOut, LoginIn, MergeDecisionIn, MergeSuggestionOut, PublicProfileOut, SearchOut, UserCreate, UserOut
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -167,13 +177,12 @@ def contacts(
             "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC, id DESC",
             (owner_id,),
         ).fetchall()
-
-    results = []
-    for row in rows:
-      category_match = category == "all" or row["category_id"] == category
-      search_match = not normalized_query or normalized_query in row["search_text"]
-      if category_match and search_match:
-          results.append(row_to_contact(row))
+        results = []
+        for row in rows:
+          category_match = category == "all" or row["category_id"] == category
+          search_match = not normalized_query or normalized_query in row["search_text"]
+          if category_match and search_match:
+              results.append(row_to_contact(row, connection))
 
     return results
 
@@ -215,7 +224,7 @@ def create_contact(payload: ContactCreate) -> dict:
             data["source"] = "Perfil cadastrado"
         row = insert_contact(connection, data)
         connection.commit()
-        return row_to_contact(row)
+        return row_to_contact(row, connection)
 
 
 @app.put("/api/contacts/{contact_id}", response_model=ContactOut)
@@ -235,13 +244,18 @@ def edit_contact(contact_id: int, payload: ContactCreate) -> dict:
         connection.commit()
         if row is None:
             raise HTTPException(status_code=404, detail="Contato não encontrado.")
-        return row_to_contact(row)
+        return row_to_contact(row, connection)
 
 
 @app.delete("/api/contacts/{contact_id}", status_code=204, response_class=Response)
 def delete_contact(contact_id: int, user_id: str = Query(default="demo-user")) -> Response:
     with get_connection() as connection:
-        cursor = connection.execute("DELETE FROM contacts WHERE id = ? AND owner_id = ?", (contact_id, authenticated_owner_id(user_id)))
+        owner_id = authenticated_owner_id(user_id)
+        connection.execute("DELETE FROM contact_phones WHERE contact_id = ? AND owner_id = ?", (contact_id, owner_id))
+        connection.execute("DELETE FROM contact_emails WHERE contact_id = ? AND owner_id = ?", (contact_id, owner_id))
+        connection.execute("DELETE FROM contact_tags WHERE contact_id = ? AND owner_id = ?", (contact_id, owner_id))
+        connection.execute("DELETE FROM custom_field_values WHERE contact_id = ? AND owner_id = ?", (contact_id, owner_id))
+        cursor = connection.execute("DELETE FROM contacts WHERE id = ? AND owner_id = ?", (contact_id, owner_id))
         connection.commit()
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Contato não encontrado.")
@@ -273,7 +287,109 @@ def merge_duplicate(payload: MergeDecisionIn) -> dict:
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         connection.commit()
-        return row_to_contact(row)
+        return row_to_contact(row, connection)
+
+
+@app.get("/api/groups", response_model=list[GroupOut])
+def groups(user_id: str = Query(default="demo-user")) -> list[dict]:
+    with get_connection() as connection:
+        return list_groups_for_user(connection, authenticated_owner_id(user_id))
+
+
+@app.post("/api/groups", response_model=GroupOut, status_code=201)
+def create_shared_group(payload: GroupCreate) -> dict:
+    owner_id = authenticated_owner_id(payload.owner_id)
+    with get_connection() as connection:
+        try:
+            group = create_group(connection, {**payload.model_dump(), "owner_id": owner_id})
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        connection.commit()
+        return group
+
+
+@app.put("/api/groups/{group_id}", response_model=GroupOut)
+def edit_shared_group(group_id: int, payload: GroupCreate) -> dict:
+    requester_id = authenticated_owner_id(payload.owner_id)
+    with get_connection() as connection:
+        if not can_manage_group(connection, group_id, requester_id):
+            raise HTTPException(status_code=403, detail="Você não pode editar este grupo.")
+        group = update_group(connection, group_id, payload.model_dump())
+        if group is None:
+            raise HTTPException(status_code=404, detail="Grupo não encontrado.")
+        connection.commit()
+        return group
+
+
+@app.post("/api/groups/{group_id}/members", response_model=GroupMemberOut, status_code=201)
+def create_group_member(group_id: int, payload: GroupMemberCreate) -> dict:
+    requester_id = authenticated_owner_id(payload.requester_id)
+    with get_connection() as connection:
+        if not can_manage_group(connection, group_id, requester_id):
+            raise HTTPException(status_code=403, detail="Você não pode gerenciar membros deste grupo.")
+        try:
+            member = add_group_member(connection, group_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        connection.commit()
+        return member
+
+
+@app.delete("/api/groups/{group_id}/members/{member_id}", status_code=204, response_class=Response)
+def delete_group_member(group_id: int, member_id: int, requester_id: str = Query(default="demo-user")) -> Response:
+    requester_owner_id = authenticated_owner_id(requester_id)
+    with get_connection() as connection:
+        if not can_manage_group(connection, group_id, requester_owner_id):
+            raise HTTPException(status_code=403, detail="Você não pode gerenciar membros deste grupo.")
+        if not remove_group_member(connection, group_id, member_id):
+            raise HTTPException(status_code=404, detail="Membro não encontrado.")
+        connection.commit()
+    return Response(status_code=204)
+
+
+@app.get("/api/groups/{group_id}/contacts", response_model=list[ContactOut])
+def group_contacts(group_id: int, user_id: str = Query(default="demo-user")) -> list[dict]:
+    requester_id = authenticated_owner_id(user_id)
+    with get_connection() as connection:
+        if not can_access_group(connection, group_id, requester_id):
+            raise HTTPException(status_code=403, detail="Você não pode acessar este grupo.")
+        return list_group_contacts(connection, group_id)
+
+
+@app.post("/api/groups/{group_id}/contacts", response_model=ContactOut, status_code=201)
+def create_group_contact(group_id: int, payload: GroupContactLinkIn) -> dict:
+    requester_id = authenticated_owner_id(payload.requester_id)
+    with get_connection() as connection:
+        if not can_manage_group(connection, group_id, requester_id):
+            raise HTTPException(status_code=403, detail="Você não pode adicionar contatos neste grupo.")
+        try:
+            contact = add_group_contact(
+                connection,
+                group_id,
+                {
+                    "contact_id": payload.contact_id,
+                    "owner_id": authenticated_owner_id(payload.owner_id),
+                    "added_by": requester_id,
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        connection.commit()
+        return contact
+
+
+@app.delete("/api/groups/{group_id}/contacts/{contact_id}", status_code=204, response_class=Response)
+def delete_group_contact(group_id: int, contact_id: int, requester_id: str = Query(default="demo-user")) -> Response:
+    requester_owner_id = authenticated_owner_id(requester_id)
+    with get_connection() as connection:
+        if not can_manage_group(connection, group_id, requester_owner_id):
+            raise HTTPException(status_code=403, detail="Você não pode remover contatos deste grupo.")
+        if not remove_group_contact(connection, group_id, contact_id):
+            raise HTTPException(status_code=404, detail="Contato não encontrado no grupo.")
+        connection.commit()
+    return Response(status_code=204)
 
 
 @app.post("/api/users", response_model=UserOut)
@@ -706,8 +822,8 @@ def build_action_suggestions(message: str, rows: list, target_contact_id: int | 
                 "last_contact_at": datetime.now().date().isoformat(),
                 "next_follow_up_at": "",
                 "crm_status": "Conversa iniciada" if row["crm_status"] == "Follow-up" else row["crm_status"],
-                "crm_note": f"Follow-up concluido em {format_follow_up(datetime.now().date().isoformat())}.",
-                "reason": f"Vou marcar o follow-up de {row['name']} como concluido e limpar a proxima data.",
+                "crm_note": f"Follow-up concluído em {format_follow_up(datetime.now().date().isoformat())}.",
+                "reason": f"Vou marcar o follow-up de {row['name']} como concluído e limpar a próxima data.",
             })
         elif clear_request:
             suggestions.append({

@@ -32,8 +32,8 @@ CONTACTS_SEED = (
         "phone": "11 99418-2300",
         "service": "eletricista residencial",
         "note": "Atende emergencia e instalacao de chuveiro",
-        "city": "Sao Paulo",
-        "address": "Avenida Paulista, Sao Paulo, SP",
+        "city": "São Paulo",
+        "address": "Avenida Paulista, São Paulo, SP",
         "trust": "Recomendado",
         "source": "Google Contacts",
     },
@@ -62,10 +62,10 @@ CONTACTS_SEED = (
         "phone": "11 97340-8932",
         "service": "designer de site",
         "note": "Landing pages e identidade simples",
-        "city": "Sao Paulo",
-        "address": "Pinheiros, Sao Paulo, SP",
+        "city": "São Paulo",
+        "address": "Pinheiros, São Paulo, SP",
         "trust": "Novo",
-        "source": "Indicacao",
+        "source": "Indicação",
     },
     {
         "name": "Carlos Nogueira",
@@ -83,7 +83,7 @@ PUBLIC_PROFILES_SEED = (
     {
         "name": "Grupo de eletricistas verificados",
         "service": "eletricista, manutenção residencial, instalação",
-        "area": "Sao Paulo e ABC",
+        "area": "São Paulo e ABC",
         "people": 42,
         "response": "18 min",
         "score": 4.8,
@@ -99,7 +99,7 @@ PUBLIC_PROFILES_SEED = (
     {
         "name": "Profissionais de casa e reforma",
         "service": "pintura, reforma, encanador, marceneiro",
-        "area": "Grande Sao Paulo",
+        "area": "Grande São Paulo",
         "people": 67,
         "response": "25 min",
         "score": 4.6,
@@ -148,7 +148,12 @@ def use_postgres() -> bool:
 
 
 def to_postgres_sql(sql: str) -> str:
-    return sql.replace("datetime(created_at)", "created_at").replace("?", "%s")
+    return (
+        sql.replace("datetime(created_at)", "created_at")
+        .replace("datetime(groups.created_at)", "groups.created_at")
+        .replace("datetime(group_contacts.created_at)", "group_contacts.created_at")
+        .replace("?", "%s")
+    )
 
 
 def split_sql_script(sql: str) -> list[str]:
@@ -311,18 +316,121 @@ def init_db() -> None:
               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
               UNIQUE(owner_id, primary_contact_id, duplicate_contact_id, match_type, match_value)
             );
+
+            CREATE TABLE IF NOT EXISTS contact_phones (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              contact_id INTEGER NOT NULL,
+              owner_id TEXT NOT NULL,
+              phone TEXT NOT NULL,
+              phone_digits TEXT NOT NULL,
+              ddd TEXT NOT NULL DEFAULT '',
+              label TEXT NOT NULL DEFAULT 'Principal',
+              is_primary INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(contact_id, phone_digits)
+            );
+
+            CREATE TABLE IF NOT EXISTS contact_emails (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              contact_id INTEGER NOT NULL,
+              owner_id TEXT NOT NULL,
+              email TEXT NOT NULL,
+              normalized_email TEXT NOT NULL,
+              label TEXT NOT NULL DEFAULT 'Principal',
+              is_primary INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(contact_id, normalized_email)
+            );
+
+            CREATE TABLE IF NOT EXISTS tags (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              owner_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              normalized_name TEXT NOT NULL,
+              usage_count INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(owner_id, normalized_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS contact_tags (
+              contact_id INTEGER NOT NULL,
+              tag_id INTEGER NOT NULL,
+              owner_id TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(contact_id, tag_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS custom_fields (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              owner_id TEXT NOT NULL,
+              scope_type TEXT NOT NULL DEFAULT 'user',
+              scope_id TEXT NOT NULL DEFAULT '',
+              name TEXT NOT NULL,
+              field_key TEXT NOT NULL,
+              field_type TEXT NOT NULL DEFAULT 'text_short',
+              options TEXT NOT NULL DEFAULT '[]',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(owner_id, scope_type, scope_id, field_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS custom_field_values (
+              contact_id INTEGER NOT NULL,
+              field_id INTEGER NOT NULL,
+              owner_id TEXT NOT NULL,
+              value TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(contact_id, field_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS groups (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              owner_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              created_by_email TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS group_members (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              group_id INTEGER NOT NULL,
+              user_id TEXT NOT NULL DEFAULT '',
+              email TEXT NOT NULL DEFAULT '',
+              role TEXT NOT NULL DEFAULT 'member',
+              status TEXT NOT NULL DEFAULT 'active',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(group_id, email)
+            );
+
+            CREATE TABLE IF NOT EXISTS group_contacts (
+              group_id INTEGER NOT NULL,
+              contact_id INTEGER NOT NULL,
+              owner_id TEXT NOT NULL,
+              added_by TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(group_id, contact_id)
+            );
             """
             )
             ensure_contact_columns(connection)
             ensure_user_columns(connection)
+            ensure_normalized_contact_tables(connection)
+            ensure_group_tables(connection)
+            repair_text_encoding(connection)
         seed_db(connection)
         assign_demo_contacts(connection)
         reclassify_contacts(connection)
+        repair_text_encoding(connection)
+        sync_all_contact_structures(connection)
 
 
 def init_postgres_db(connection: DbConnection) -> None:
     schema_path = Path(__file__).resolve().parent / "postgres_schema.sql"
     connection.executescript(schema_path.read_text(encoding="utf-8"))
+    ensure_normalized_contact_tables(connection)
+    ensure_group_tables(connection)
+    repair_text_encoding(connection)
 
 
 def ensure_contact_columns(connection: DbConnection) -> None:
@@ -358,7 +466,8 @@ def ensure_contact_columns(connection: DbConnection) -> None:
     ):
         if column not in columns:
             connection.execute(f"ALTER TABLE contacts ADD COLUMN {column} TEXT NOT NULL DEFAULT '{default}'")
-    connection.execute("UPDATE contacts SET crm_priority = 'Média' WHERE crm_priority = 'MÃ©dia'")
+    connection.execute("UPDATE contacts SET crm_priority = 'Média' WHERE crm_priority LIKE 'M%dia' AND crm_priority != 'Média'")
+    standardize_display_text(connection)
 
 
 def ensure_user_columns(connection: DbConnection) -> None:
@@ -407,6 +516,301 @@ def ensure_user_columns(connection: DbConnection) -> None:
     connection.execute("UPDATE users SET password_hash = ? WHERE password_hash = ''", (default_hash,))
 
 
+def ensure_normalized_contact_tables(connection: DbConnection) -> None:
+    statements = (
+        """
+        CREATE TABLE IF NOT EXISTS contact_phones (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          contact_id BIGINT NOT NULL,
+          owner_id TEXT NOT NULL,
+          phone TEXT NOT NULL,
+          phone_digits TEXT NOT NULL,
+          ddd TEXT NOT NULL DEFAULT '',
+          label TEXT NOT NULL DEFAULT 'Principal',
+          is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(contact_id, phone_digits)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS contact_emails (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          contact_id BIGINT NOT NULL,
+          owner_id TEXT NOT NULL,
+          email TEXT NOT NULL,
+          normalized_email TEXT NOT NULL,
+          label TEXT NOT NULL DEFAULT 'Principal',
+          is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(contact_id, normalized_email)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS tags (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          normalized_name TEXT NOT NULL,
+          usage_count INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(owner_id, normalized_name)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS contact_tags (
+          contact_id BIGINT NOT NULL,
+          tag_id BIGINT NOT NULL,
+          owner_id TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(contact_id, tag_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS custom_fields (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          scope_type TEXT NOT NULL DEFAULT 'user',
+          scope_id TEXT NOT NULL DEFAULT '',
+          name TEXT NOT NULL,
+          field_key TEXT NOT NULL,
+          field_type TEXT NOT NULL DEFAULT 'text_short',
+          options TEXT NOT NULL DEFAULT '[]',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(owner_id, scope_type, scope_id, field_key)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS custom_field_values (
+          contact_id BIGINT NOT NULL,
+          field_id BIGINT NOT NULL,
+          owner_id TEXT NOT NULL,
+          value TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(contact_id, field_id)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS contact_phones_owner_ddd_idx ON contact_phones(owner_id, ddd)",
+        "CREATE INDEX IF NOT EXISTS contact_phones_digits_idx ON contact_phones(owner_id, phone_digits)",
+        "CREATE INDEX IF NOT EXISTS contact_emails_normalized_idx ON contact_emails(owner_id, normalized_email)",
+        "CREATE INDEX IF NOT EXISTS tags_owner_name_idx ON tags(owner_id, normalized_name)",
+        "CREATE INDEX IF NOT EXISTS contact_tags_owner_idx ON contact_tags(owner_id, tag_id)",
+        "CREATE INDEX IF NOT EXISTS custom_field_values_owner_idx ON custom_field_values(owner_id, field_id)",
+    )
+    if connection.dialect == "postgres":
+        for statement in statements:
+            connection.execute(statement)
+        return
+
+    # SQLite tables are created in the main script. Add indexes here so old DBs get them too.
+    for statement in statements[-6:]:
+        connection.execute(statement)
+
+
+def ensure_group_tables(connection: DbConnection) -> None:
+    statements = (
+        """
+        CREATE TABLE IF NOT EXISTS groups (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          created_by_email TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS group_members (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          group_id BIGINT NOT NULL,
+          user_id TEXT NOT NULL DEFAULT '',
+          email TEXT NOT NULL DEFAULT '',
+          role TEXT NOT NULL DEFAULT 'member',
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(group_id, email)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS group_contacts (
+          group_id BIGINT NOT NULL,
+          contact_id BIGINT NOT NULL,
+          owner_id TEXT NOT NULL,
+          added_by TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(group_id, contact_id)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS groups_owner_idx ON groups(owner_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS group_members_group_idx ON group_members(group_id, status)",
+        "CREATE INDEX IF NOT EXISTS group_members_user_idx ON group_members(user_id, email)",
+        "CREATE INDEX IF NOT EXISTS group_contacts_group_idx ON group_contacts(group_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS group_contacts_contact_idx ON group_contacts(contact_id)",
+    )
+    if connection.dialect == "postgres":
+        for statement in statements:
+            connection.execute(statement)
+        return
+    for statement in statements[-5:]:
+        connection.execute(statement)
+
+
+def looks_mojibake(value: str) -> bool:
+    return any(marker in value for marker in ("Ã", "Â", "Ă", "Ä", "Ĺ", "Ľ", "�"))
+
+
+def mojibake_score(value: str) -> int:
+    return sum(value.count(marker) for marker in ("Ã", "Â", "Ă", "Ä", "Ĺ", "Ľ", "�"))
+
+
+def repair_mojibake(value: str) -> str:
+    if not value or not looks_mojibake(value):
+        return value
+    current = value
+    for _ in range(5):
+        try:
+            decoded = current.encode("latin1").decode("utf-8")
+        except UnicodeError:
+            break
+        if decoded == current:
+            break
+        if mojibake_score(decoded) > mojibake_score(current):
+            break
+        current = decoded
+        if not looks_mojibake(current):
+            break
+    return current
+
+
+def repair_text_encoding(connection: DbConnection) -> None:
+    text_columns = {
+        "contacts": (
+            "name", "phone", "service", "note", "city", "address", "trust", "source",
+            "description", "demand", "solves", "tags", "email", "whatsapp", "instagram",
+            "linkedin", "custom_url", "custom_fields", "crm_status", "crm_priority",
+            "last_contact_at", "next_follow_up_at", "crm_note", "category_id",
+            "category_label", "category_group", "search_text",
+        ),
+        "users": (
+            "name", "birth_date", "email", "phone", "cep", "address", "address_line",
+            "address_number", "address_complement", "neighborhood", "city", "state",
+            "interests", "offered_services", "service_cep", "service_address",
+            "service_address_line", "service_address_number", "service_address_complement",
+            "service_neighborhood", "service_city", "service_state", "public_description",
+            "public_demand", "public_solves", "public_tags", "public_whatsapp",
+            "public_instagram", "public_linkedin", "public_url", "google_contacts_imported_at",
+            "google_profile_synced_at", "role",
+        ),
+        "public_profiles": ("name", "service", "area", "response", "category_id", "category_label", "category_group", "search_text"),
+        "tags": ("name", "normalized_name"),
+        "custom_fields": ("name", "field_key", "field_type", "options"),
+        "custom_field_values": ("value",),
+        "contact_phones": ("phone", "phone_digits", "ddd", "label"),
+        "contact_emails": ("email", "normalized_email", "label"),
+    }
+
+    for table, columns in text_columns.items():
+        try:
+            selector = "id, *" if connection.dialect == "postgres" else "rowid, *"
+            rows = connection.execute(f"SELECT {selector} FROM {table}").fetchall()
+        except Exception:
+            continue
+        for row in rows:
+            changes = {}
+            for column in columns:
+                try:
+                    value = row[column]
+                except (KeyError, IndexError):
+                    continue
+                if isinstance(value, str):
+                    repaired = repair_mojibake(value)
+                    if repaired != value:
+                        changes[column] = repaired
+            if changes:
+                assignments = ", ".join(f"{column} = ?" for column in changes)
+                params = tuple(changes.values()) + (row["id"] if "id" in row.keys() else row["rowid"],)
+                key_column = "id" if "id" in row.keys() else "rowid"
+                connection.execute(f"UPDATE {table} SET {assignments} WHERE {key_column} = ?", params)
+
+
+DISPLAY_TEXT_REPLACEMENTS = (
+    ("Sao Paulo", "São Paulo"),
+    ("Minha regiao", "Minha região"),
+    ("Indicacao", "Indicação"),
+    ("Casa e manutencao", "Casa e manutenção"),
+    ("Servicos domesticos", "Serviços domésticos"),
+    ("Juridico", "Jurídico"),
+    ("Servicos profissionais", "Serviços profissionais"),
+    ("Saude", "Saúde"),
+    ("Empresas e negocios", "Empresas e negócios"),
+    ("Operacao", "Operação"),
+    ("Educacao", "Educação"),
+    ("Veiculos", "Veículos"),
+    ("Beleza e estetica", "Beleza e estética"),
+    ("Alimentacao e eventos", "Alimentação e eventos"),
+    ("Experiencias", "Experiências"),
+    ("Imoveis", "Imóveis"),
+    ("Moradia e patrimonio", "Moradia e patrimônio"),
+    ("Financas e seguros", "Finanças e seguros"),
+    ("Comunicacao e conteudo", "Comunicação e conteúdo"),
+    ("Servicos gerais", "Serviços gerais"),
+    ("Rede util", "Rede útil"),
+    ("Rede juridica", "Rede jurídica"),
+    ("pequenos negocios", "pequenos negócios"),
+    ("Tecnologia para negocios", "Tecnologia para negócios"),
+    ("automacao", "automação"),
+    ("manutencao", "manutenção"),
+    ("instalacao", "instalação"),
+    ("juridico", "jurídico"),
+    ("societario", "societário"),
+    ("Follow-up concluido", "Follow-up concluído"),
+    ("Follow-up removido", "Follow-up removido"),
+)
+
+
+def standardize_display_text(connection: DbConnection) -> None:
+    columns_by_table = {
+        "contacts": (
+            "city", "address", "source", "description", "demand", "solves", "tags",
+            "crm_status", "crm_priority", "crm_note", "category_label", "category_group",
+        ),
+        "users": (
+            "address", "address_line", "address_complement", "neighborhood", "city",
+            "service_address", "service_address_line", "service_address_complement",
+            "service_neighborhood", "service_city", "public_description", "public_demand",
+            "public_solves", "public_tags", "offered_services",
+        ),
+        "public_profiles": ("name", "service", "area", "category_label", "category_group"),
+        "tags": ("name",),
+        "custom_fields": ("name",),
+        "custom_field_values": ("value",),
+    }
+    for table, columns in columns_by_table.items():
+        try:
+            rows = connection.execute(f"SELECT id, * FROM {table}" if connection.dialect == "postgres" else f"SELECT rowid, * FROM {table}").fetchall()
+        except Exception:
+            continue
+        for row in rows:
+            changes = {}
+            for column in columns:
+                try:
+                    value = row[column]
+                except (KeyError, IndexError):
+                    continue
+                if not isinstance(value, str) or not value:
+                    continue
+                next_value = value
+                for source, target in DISPLAY_TEXT_REPLACEMENTS:
+                    next_value = next_value.replace(source, target)
+                if next_value != value:
+                    changes[column] = next_value
+            if changes:
+                assignments = ", ".join(f"{column} = ?" for column in changes)
+                key_column = "id" if "id" in row.keys() else "rowid"
+                params = tuple(changes.values()) + (row[key_column],)
+                connection.execute(f"UPDATE {table} SET {assignments} WHERE {key_column} = ?", params)
+
+
 def seed_db(connection: DbConnection) -> None:
     contact_count = first_value(connection.execute("SELECT COUNT(*) FROM contacts").fetchone())
     if contact_count == 0:
@@ -452,8 +856,8 @@ def seed_db(connection: DbConnection) -> None:
                 "address_number": "",
                 "address_complement": "",
                 "neighborhood": "Bela Vista",
-                "address": "Avenida Paulista, Bela Vista, Sao Paulo - SP",
-                "city": "Sao Paulo",
+                "address": "Avenida Paulista, Bela Vista, São Paulo - SP",
+                "city": "São Paulo",
                 "state": "SP",
                 "address_visible": False,
                 "interests": ["home", "tech"],
@@ -470,7 +874,7 @@ def reclassify_contacts(connection: DbConnection) -> None:
     rows = connection.execute("SELECT * FROM contacts").fetchall()
     generated_services = {normalize(category.label) for category in CATEGORY_CATALOG}
     generated_services.add(normalize("contato para revisar"))
-    generated_services.add(normalize("servicos gerais"))
+    generated_services.add(normalize("serviços gerais"))
     for row in rows:
         should_reinfer = row["source"] == "Google People API" and normalize(row["service"]) in generated_services
         if should_reinfer:
@@ -543,6 +947,260 @@ def assign_demo_contacts(connection: DbConnection) -> None:
 
 def phone_digits(value: str) -> str:
     return "".join(char for char in str(value or "") if char.isdigit())
+
+
+def extract_ddd(value: str) -> str:
+    digits = phone_digits(value)
+    if digits.startswith("55") and len(digits) >= 12:
+        digits = digits[2:]
+    if len(digits) >= 10:
+        return digits[:2]
+    return ""
+
+
+def split_multi_value(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = re.split(r"[,;\n|]+", str(value or ""))
+    results: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        item = str(raw or "").strip()
+        key = normalize(item)
+        if item and key and key not in seen:
+            seen.add(key)
+            results.append(item)
+    return results
+
+
+def field_key(value: str) -> str:
+    normalized = normalize(value)
+    key = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+    return key or "campo"
+
+
+def normalized_email(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def payload_phone_items(payload: dict) -> list[dict]:
+    candidates: list[tuple[str, str]] = []
+    phones = payload.get("phones") or []
+    if isinstance(phones, list):
+        for item in phones:
+            if isinstance(item, dict):
+                candidates.append((item.get("phone") or item.get("value") or "", item.get("label") or "Telefone"))
+            else:
+                candidates.append((str(item), "Telefone"))
+    candidates.insert(0, (payload.get("phone") or "", "Principal"))
+    if payload.get("whatsapp"):
+        candidates.append((payload.get("whatsapp") or "", "WhatsApp"))
+
+    results: list[dict] = []
+    seen: set[str] = set()
+    for phone, label in candidates:
+        digits = phone_digits(phone)
+        if len(digits) < 4 or digits in seen:
+            continue
+        seen.add(digits)
+        results.append({"phone": str(phone).strip(), "phone_digits": digits, "ddd": extract_ddd(phone), "label": label or "Telefone"})
+    return results
+
+
+def payload_email_items(payload: dict) -> list[dict]:
+    candidates: list[tuple[str, str]] = []
+    emails = payload.get("emails") or []
+    if isinstance(emails, list):
+        for item in emails:
+            if isinstance(item, dict):
+                candidates.append((item.get("email") or item.get("value") or "", item.get("label") or "Email"))
+            else:
+                candidates.append((str(item), "Email"))
+    candidates.insert(0, (payload.get("email") or "", "Principal"))
+
+    results: list[dict] = []
+    seen: set[str] = set()
+    for email, label in candidates:
+        normalized = normalized_email(email)
+        if "@" not in normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        results.append({"email": str(email).strip(), "normalized_email": normalized, "label": label or "Email"})
+    return results
+
+
+def payload_tag_items(payload: dict) -> list[str]:
+    values = split_multi_value(payload.get("tags") or "")
+    for item in payload.get("tag_items") or []:
+        values.extend(split_multi_value(item.get("name") if isinstance(item, dict) else item))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = normalize(value)
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(value)
+    return deduped
+
+
+def payload_custom_field_items(payload: dict) -> list[dict]:
+    values: list[dict] = []
+    incoming = payload.get("custom_field_values") or []
+    if isinstance(incoming, list):
+        values.extend(item for item in incoming if isinstance(item, dict))
+
+    try:
+        legacy = json.loads(payload.get("custom_fields") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        legacy = []
+    if isinstance(legacy, list):
+        values.extend(item for item in legacy if isinstance(item, dict))
+
+    results: list[dict] = []
+    seen: set[str] = set()
+    for item in values:
+        name = str(item.get("name") or item.get("label") or item.get("key") or "").strip()
+        value = item.get("value", "")
+        if not name or value in (None, ""):
+            continue
+        key = field_key(str(item.get("key") or name))
+        if key in seen:
+            continue
+        seen.add(key)
+        field_type = str(item.get("field_type") or item.get("type") or "text_short")
+        options = item.get("options") if isinstance(item.get("options"), list) else []
+        results.append({"name": name, "field_key": key, "field_type": field_type, "options": options, "value": str(value)})
+    return results
+
+
+def upsert_tag(connection: DbConnection, owner_id: str, name: str) -> int:
+    normalized_name = normalize(name)
+    connection.execute(
+        """
+        INSERT INTO tags (owner_id, name, normalized_name)
+        VALUES (?, ?, ?)
+        ON CONFLICT(owner_id, normalized_name) DO UPDATE SET name = excluded.name
+        """,
+        (owner_id, name, normalized_name),
+    )
+    row = connection.execute("SELECT id FROM tags WHERE owner_id = ? AND normalized_name = ?", (owner_id, normalized_name)).fetchone()
+    return int(first_value(row))
+
+
+def upsert_custom_field(connection: DbConnection, owner_id: str, item: dict) -> int:
+    options = json.dumps(item.get("options") or [], ensure_ascii=False)
+    connection.execute(
+        """
+        INSERT INTO custom_fields (owner_id, scope_type, scope_id, name, field_key, field_type, options)
+        VALUES (?, 'user', '', ?, ?, ?, ?)
+        ON CONFLICT(owner_id, scope_type, scope_id, field_key)
+        DO UPDATE SET name = excluded.name, field_type = excluded.field_type, options = excluded.options
+        """,
+        (owner_id, item["name"], item["field_key"], item["field_type"], options),
+    )
+    row = connection.execute(
+        "SELECT id FROM custom_fields WHERE owner_id = ? AND scope_type = 'user' AND scope_id = '' AND field_key = ?",
+        (owner_id, item["field_key"]),
+    ).fetchone()
+    return int(first_value(row))
+
+
+def sync_contact_structures(connection: DbConnection, contact_id: int, payload: dict) -> None:
+    owner_id = str(payload.get("owner_id") or "demo-user")
+    connection.execute("DELETE FROM contact_phones WHERE contact_id = ? AND owner_id = ?", (contact_id, owner_id))
+    connection.execute("DELETE FROM contact_emails WHERE contact_id = ? AND owner_id = ?", (contact_id, owner_id))
+    connection.execute("DELETE FROM contact_tags WHERE contact_id = ? AND owner_id = ?", (contact_id, owner_id))
+    connection.execute("DELETE FROM custom_field_values WHERE contact_id = ? AND owner_id = ?", (contact_id, owner_id))
+
+    for index, item in enumerate(payload_phone_items(payload)):
+        connection.execute(
+            """
+            INSERT INTO contact_phones (contact_id, owner_id, phone, phone_digits, ddd, label, is_primary)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(contact_id, phone_digits) DO UPDATE
+            SET phone = excluded.phone, ddd = excluded.ddd, label = excluded.label, is_primary = excluded.is_primary
+            """,
+            (contact_id, owner_id, item["phone"], item["phone_digits"], item["ddd"], item["label"], db_bool(connection, index == 0)),
+        )
+
+    for index, item in enumerate(payload_email_items(payload)):
+        connection.execute(
+            """
+            INSERT INTO contact_emails (contact_id, owner_id, email, normalized_email, label, is_primary)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(contact_id, normalized_email) DO UPDATE
+            SET email = excluded.email, label = excluded.label, is_primary = excluded.is_primary
+            """,
+            (contact_id, owner_id, item["email"], item["normalized_email"], item["label"], db_bool(connection, index == 0)),
+        )
+
+    for tag in payload_tag_items(payload):
+        tag_id = upsert_tag(connection, owner_id, tag)
+        connection.execute(
+            """
+            INSERT INTO contact_tags (contact_id, tag_id, owner_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(contact_id, tag_id) DO NOTHING
+            """,
+            (contact_id, tag_id, owner_id),
+        )
+
+    for item in payload_custom_field_items(payload):
+        field_id = upsert_custom_field(connection, owner_id, item)
+        connection.execute(
+            """
+            INSERT INTO custom_field_values (contact_id, field_id, owner_id, value)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(contact_id, field_id) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+            """,
+            (contact_id, field_id, owner_id, item["value"]),
+        )
+
+    refresh_tag_usage(connection, owner_id)
+
+
+def refresh_tag_usage(connection: DbConnection, owner_id: str) -> None:
+    rows = connection.execute("SELECT id FROM tags WHERE owner_id = ?", (owner_id,)).fetchall()
+    for row in rows:
+        tag_id = int(row["id"])
+        count = first_value(connection.execute("SELECT COUNT(*) FROM contact_tags WHERE owner_id = ? AND tag_id = ?", (owner_id, tag_id)).fetchone()) or 0
+        connection.execute("UPDATE tags SET usage_count = ? WHERE id = ?", (count, tag_id))
+
+
+def sync_all_contact_structures(connection: DbConnection) -> None:
+    rows = connection.execute("SELECT * FROM contacts").fetchall()
+    for row in rows:
+        sync_contact_structures(connection, int(row["id"]), row_to_payload(row))
+
+
+def row_to_payload(row) -> dict:
+    return {
+        "owner_id": row["owner_id"],
+        "name": row["name"],
+        "phone": row["phone"],
+        "service": row["service"],
+        "note": row["note"],
+        "city": row["city"],
+        "address": row["address"],
+        "trust": row["trust"],
+        "source": row["source"],
+        "description": row["description"],
+        "demand": row["demand"],
+        "solves": row["solves"],
+        "tags": row["tags"],
+        "email": row["email"],
+        "whatsapp": row["whatsapp"],
+        "instagram": row["instagram"],
+        "linkedin": row["linkedin"],
+        "custom_url": row["custom_url"],
+        "custom_fields": row["custom_fields"],
+        "crm_status": row["crm_status"],
+        "crm_priority": row["crm_priority"],
+        "last_contact_at": row["last_contact_at"],
+        "next_follow_up_at": row["next_follow_up_at"],
+        "crm_note": row["crm_note"],
+    }
 
 
 def extract_contact_emails(row) -> set[str]:
@@ -729,6 +1387,12 @@ def find_user_by_email(connection: DbConnection, email: str):
     return connection.execute("SELECT * FROM users WHERE lower(email) = lower(?)", (normalized,)).fetchone()
 
 
+def find_user_by_id(connection: DbConnection, user_id: str | int | None):
+    if user_id in (None, ""):
+        return None
+    return connection.execute("SELECT * FROM users WHERE id = ?", (str(user_id),)).fetchone()
+
+
 def authenticate_user(connection: DbConnection, email: str, password: str):
     row = connection.execute("SELECT * FROM users WHERE lower(email) = lower(?)", (email,)).fetchone()
     if row is None or not verify_password(password, row["password_hash"]):
@@ -793,13 +1457,13 @@ def insert_contact(connection: DbConnection, payload: dict):
     incoming_service = payload.get("service")
     generated_services = {normalize(category.label) for category in CATEGORY_CATALOG}
     generated_services.add(normalize("contato para revisar"))
-    generated_services.add(normalize("servicos gerais"))
+    generated_services.add(normalize("serviços gerais"))
     if payload.get("source") == "Google People API" and normalize(incoming_service) in generated_services:
         service = infer_service_from_contact(payload["name"], "", note, "")
     else:
         service = infer_service_from_contact(payload["name"], incoming_service, note, payload.get("source"))
     category = classify_service(" ".join([service, payload["name"], note, payload.get("source") or ""]))
-    city = payload.get("city") or "Minha regiao"
+    city = payload.get("city") or "Minha região"
     address = payload.get("address") or city
     trust = payload.get("trust") or "Novo"
     source = payload.get("source") or "Manual"
@@ -864,6 +1528,33 @@ def insert_contact(connection: DbConnection, payload: dict):
         ),
     )
     contact_id = first_value(cursor.fetchone()) if connection.dialect == "postgres" else cursor.lastrowid
+    sync_payload = {
+        **payload,
+        "owner_id": owner_id,
+        "phone": payload["phone"],
+        "service": service,
+        "note": note,
+        "city": city,
+        "address": address,
+        "trust": trust,
+        "source": source,
+        "description": description,
+        "demand": demand,
+        "solves": solves,
+        "tags": tags,
+        "email": email,
+        "whatsapp": whatsapp,
+        "instagram": instagram,
+        "linkedin": linkedin,
+        "custom_url": custom_url,
+        "custom_fields": custom_fields,
+        "crm_status": crm_status,
+        "crm_priority": crm_priority,
+        "last_contact_at": last_contact_at,
+        "next_follow_up_at": next_follow_up_at,
+        "crm_note": crm_note,
+    }
+    sync_contact_structures(connection, int(contact_id), sync_payload)
     return connection.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
 
 
@@ -872,7 +1563,7 @@ def update_contact(connection: DbConnection, contact_id: int, payload: dict):
     note = payload.get("note") or ""
     service = infer_service_from_contact(payload["name"], payload.get("service"), note, payload.get("source"))
     category = classify_service(" ".join([service, payload["name"], note, payload.get("source") or ""]))
-    city = payload.get("city") or "Minha regiao"
+    city = payload.get("city") or "Minha região"
     address = payload.get("address") or city
     trust = payload.get("trust") or "Novo"
     source = payload.get("source") or "Manual"
@@ -959,6 +1650,33 @@ def update_contact(connection: DbConnection, contact_id: int, payload: dict):
     )
     if cursor.rowcount == 0:
         return None
+    sync_payload = {
+        **payload,
+        "owner_id": owner_id,
+        "phone": payload["phone"],
+        "service": service,
+        "note": note,
+        "city": city,
+        "address": address,
+        "trust": trust,
+        "source": source,
+        "description": description,
+        "demand": demand,
+        "solves": solves,
+        "tags": tags,
+        "email": email,
+        "whatsapp": whatsapp,
+        "instagram": instagram,
+        "linkedin": linkedin,
+        "custom_url": custom_url,
+        "custom_fields": custom_fields,
+        "crm_status": crm_status,
+        "crm_priority": crm_priority,
+        "last_contact_at": last_contact_at,
+        "next_follow_up_at": next_follow_up_at,
+        "crm_note": crm_note,
+    }
+    sync_contact_structures(connection, contact_id, sync_payload)
     return connection.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
 
 
@@ -1016,8 +1734,8 @@ def list_merge_suggestions(connection: DbConnection, owner_id: str) -> list[dict
                         "owner_id": owner_id,
                         "match_type": match_type,
                         "match_value": value,
-                        "primary_contact": row_to_contact(primary if primary["id"] == primary_id else duplicate),
-                        "duplicate_contact": row_to_contact(duplicate if duplicate["id"] == duplicate_id else primary),
+                        "primary_contact": row_to_contact(primary if primary["id"] == primary_id else duplicate, connection),
+                        "duplicate_contact": row_to_contact(duplicate if duplicate["id"] == duplicate_id else primary, connection),
                     }
                 )
 
@@ -1110,11 +1828,113 @@ def merge_contacts(connection: DbConnection, owner_id: str, primary_id: int, dup
                 """,
                 (owner_id, primary_id, duplicate_id, suggestion["match_type"], suggestion["match_value"]),
             )
+    connection.execute("DELETE FROM contact_phones WHERE owner_id = ? AND contact_id = ?", (owner_id, duplicate_id))
+    connection.execute("DELETE FROM contact_emails WHERE owner_id = ? AND contact_id = ?", (owner_id, duplicate_id))
+    connection.execute("DELETE FROM contact_tags WHERE owner_id = ? AND contact_id = ?", (owner_id, duplicate_id))
+    connection.execute("DELETE FROM custom_field_values WHERE owner_id = ? AND contact_id = ?", (owner_id, duplicate_id))
     connection.execute("DELETE FROM contacts WHERE owner_id = ? AND id = ?", (owner_id, duplicate_id))
+    refresh_tag_usage(connection, owner_id)
     return connection.execute("SELECT * FROM contacts WHERE id = ?", (primary_id,)).fetchone()
 
 
-def row_to_contact(row) -> dict:
+def contact_structured_data(connection: DbConnection | None, row) -> dict:
+    fallback_phone = {
+        "phone": row["phone"],
+        "phone_digits": phone_digits(row["phone"]),
+        "ddd": extract_ddd(row["phone"]),
+        "label": "Principal",
+        "is_primary": True,
+    } if row["phone"] else None
+    fallback_email = {
+        "email": row["email"],
+        "normalized_email": normalized_email(row["email"]),
+        "label": "Principal",
+        "is_primary": True,
+    } if row["email"] else None
+    fallback_tags = tag_list = split_multi_value(row["tags"])
+    fallback_fields = payload_custom_field_items({"custom_fields": row["custom_fields"]})
+
+    if connection is None:
+        return {
+            "phones": [fallback_phone] if fallback_phone else [],
+            "emails": [fallback_email] if fallback_email else [],
+            "tag_items": fallback_tags,
+            "ddd": fallback_phone["ddd"] if fallback_phone else "",
+            "custom_field_values": fallback_fields,
+        }
+
+    phones = [
+        {
+            "phone": item["phone"],
+            "phone_digits": item["phone_digits"],
+            "ddd": item["ddd"],
+            "label": item["label"],
+            "is_primary": bool(item["is_primary"]),
+        }
+        for item in connection.execute(
+            "SELECT * FROM contact_phones WHERE contact_id = ? AND owner_id = ? ORDER BY is_primary DESC, id ASC",
+            (row["id"], row["owner_id"]),
+        ).fetchall()
+    ]
+    emails = [
+        {
+            "email": item["email"],
+            "normalized_email": item["normalized_email"],
+            "label": item["label"],
+            "is_primary": bool(item["is_primary"]),
+        }
+        for item in connection.execute(
+            "SELECT * FROM contact_emails WHERE contact_id = ? AND owner_id = ? ORDER BY is_primary DESC, id ASC",
+            (row["id"], row["owner_id"]),
+        ).fetchall()
+    ]
+    tags = [
+        item["name"]
+        for item in connection.execute(
+            """
+            SELECT tags.name
+            FROM contact_tags
+            JOIN tags ON tags.id = contact_tags.tag_id
+            WHERE contact_tags.contact_id = ? AND contact_tags.owner_id = ?
+            ORDER BY tags.name ASC
+            """,
+            (row["id"], row["owner_id"]),
+        ).fetchall()
+    ]
+    custom_fields = [
+        {
+            "id": item["field_id"],
+            "name": item["name"],
+            "label": item["name"],
+            "key": item["field_key"],
+            "field_type": item["field_type"],
+            "options": json.loads(item["options"] or "[]"),
+            "value": item["value"],
+        }
+        for item in connection.execute(
+            """
+            SELECT custom_field_values.field_id, custom_field_values.value, custom_fields.name,
+                   custom_fields.field_key, custom_fields.field_type, custom_fields.options
+            FROM custom_field_values
+            JOIN custom_fields ON custom_fields.id = custom_field_values.field_id
+            WHERE custom_field_values.contact_id = ? AND custom_field_values.owner_id = ?
+            ORDER BY custom_fields.name ASC
+            """,
+            (row["id"], row["owner_id"]),
+        ).fetchall()
+    ]
+    primary_phone = next((item for item in phones if item["is_primary"]), phones[0] if phones else fallback_phone)
+    return {
+        "phones": phones or ([fallback_phone] if fallback_phone else []),
+        "emails": emails or ([fallback_email] if fallback_email else []),
+        "tag_items": tags or fallback_tags,
+        "ddd": primary_phone["ddd"] if primary_phone else "",
+        "custom_field_values": custom_fields or fallback_fields,
+    }
+
+
+def row_to_contact(row, connection: DbConnection | None = None) -> dict:
+    structured = contact_structured_data(connection, row)
     return {
         "id": row["id"],
         "owner_id": row["owner_id"],
@@ -1142,6 +1962,11 @@ def row_to_contact(row) -> dict:
         "next_follow_up_at": row["next_follow_up_at"],
         "crm_note": row["crm_note"],
         "created_at": row_text(row["created_at"]),
+        "phones": structured["phones"],
+        "emails": structured["emails"],
+        "tag_items": structured["tag_items"],
+        "ddd": structured["ddd"],
+        "custom_field_values": structured["custom_field_values"],
         "category": {
             "id": row["category_id"],
             "label": row["category_label"],
@@ -1151,6 +1976,200 @@ def row_to_contact(row) -> dict:
             "count": 0,
         },
     }
+
+
+def group_member_rows(connection: DbConnection, group_id: int) -> list:
+    return connection.execute(
+        "SELECT * FROM group_members WHERE group_id = ? AND status = 'active' ORDER BY role DESC, email ASC, id ASC",
+        (group_id,),
+    ).fetchall()
+
+
+def group_contact_count(connection: DbConnection, group_id: int) -> int:
+    return int(first_value(connection.execute("SELECT COUNT(*) FROM group_contacts WHERE group_id = ?", (group_id,)).fetchone()) or 0)
+
+
+def row_to_group(row, connection: DbConnection | None = None) -> dict:
+    members = group_member_rows(connection, row["id"]) if connection is not None else []
+    return {
+        "id": row["id"],
+        "owner_id": row["owner_id"],
+        "name": row["name"],
+        "description": row["description"],
+        "created_by_email": row["created_by_email"],
+        "member_count": len(members),
+        "contact_count": group_contact_count(connection, row["id"]) if connection is not None else 0,
+        "members": [row_to_group_member(member) for member in members],
+        "created_at": row_text(row["created_at"]),
+    }
+
+
+def row_to_group_member(row) -> dict:
+    return {
+        "id": row["id"],
+        "group_id": row["group_id"],
+        "user_id": row["user_id"],
+        "email": row["email"],
+        "role": row["role"],
+        "status": row["status"],
+        "created_at": row_text(row["created_at"]),
+    }
+
+
+def user_is_global_admin(connection: DbConnection, user_id: str) -> bool:
+    row = find_user_by_id(connection, user_id)
+    return bool(row and row["role"] == "admin")
+
+
+def group_member_role(connection: DbConnection, group_id: int, user_id: str) -> str:
+    user = find_user_by_id(connection, user_id)
+    emails = [str(user["email"]).lower()] if user is not None else []
+    rows = connection.execute(
+        "SELECT * FROM group_members WHERE group_id = ? AND status = 'active'",
+        (group_id,),
+    ).fetchall()
+    for row in rows:
+        if str(row["user_id"]) == str(user_id) or (row["email"] and row["email"].lower() in emails):
+            return row["role"]
+    return ""
+
+
+def can_access_group(connection: DbConnection, group_id: int, user_id: str) -> bool:
+    row = connection.execute("SELECT * FROM groups WHERE id = ?", (group_id,)).fetchone()
+    if row is None:
+        return False
+    return str(row["owner_id"]) == str(user_id) or user_is_global_admin(connection, user_id) or bool(group_member_role(connection, group_id, user_id))
+
+
+def can_manage_group(connection: DbConnection, group_id: int, user_id: str) -> bool:
+    row = connection.execute("SELECT * FROM groups WHERE id = ?", (group_id,)).fetchone()
+    if row is None:
+        return False
+    role = group_member_role(connection, group_id, user_id)
+    return str(row["owner_id"]) == str(user_id) or user_is_global_admin(connection, user_id) or role in {"owner", "admin"}
+
+
+def create_group(connection: DbConnection, payload: dict) -> dict:
+    owner_id = str(payload.get("owner_id") or "")
+    owner = find_user_by_id(connection, owner_id)
+    if owner is None:
+        raise ValueError("Usuário não encontrado.")
+    name = str(payload.get("name") or "").strip()
+    if len(name) < 2:
+        raise ValueError("Informe um nome para o grupo.")
+    description = str(payload.get("description") or "").strip()
+    returning_clause = " RETURNING id" if connection.dialect == "postgres" else ""
+    cursor = connection.execute(
+        f"""
+        INSERT INTO groups (owner_id, name, description, created_by_email)
+        VALUES (?, ?, ?, ?)
+        {returning_clause}
+        """,
+        (owner_id, name, description, owner["email"]),
+    )
+    group_id = first_value(cursor.fetchone()) if connection.dialect == "postgres" else cursor.lastrowid
+    add_group_member(connection, int(group_id), {"user_id": owner_id, "email": owner["email"], "role": "owner"})
+    row = connection.execute("SELECT * FROM groups WHERE id = ?", (group_id,)).fetchone()
+    return row_to_group(row, connection)
+
+
+def update_group(connection: DbConnection, group_id: int, payload: dict) -> dict | None:
+    name = str(payload.get("name") or "").strip()
+    description = str(payload.get("description") or "").strip()
+    cursor = connection.execute(
+        "UPDATE groups SET name = ?, description = ? WHERE id = ?",
+        (name, description, group_id),
+    )
+    if cursor.rowcount == 0:
+        return None
+    row = connection.execute("SELECT * FROM groups WHERE id = ?", (group_id,)).fetchone()
+    return row_to_group(row, connection)
+
+
+def list_groups_for_user(connection: DbConnection, user_id: str) -> list[dict]:
+    user = find_user_by_id(connection, user_id)
+    email = str(user["email"]).lower() if user is not None else ""
+    if user_is_global_admin(connection, user_id):
+        rows = connection.execute("SELECT * FROM groups ORDER BY datetime(created_at) DESC, id DESC").fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT groups.*
+            FROM groups
+            LEFT JOIN group_members ON group_members.group_id = groups.id AND group_members.status = 'active'
+            WHERE groups.owner_id = ? OR group_members.user_id = ? OR lower(group_members.email) = lower(?)
+            ORDER BY datetime(groups.created_at) DESC, groups.id DESC
+            """,
+            (str(user_id), str(user_id), email),
+        ).fetchall()
+    return [row_to_group(row, connection) for row in rows]
+
+
+def add_group_member(connection: DbConnection, group_id: int, payload: dict) -> dict:
+    user_id = str(payload.get("user_id") or "")
+    email = str(payload.get("email") or "").strip().lower()
+    role = str(payload.get("role") or "member").strip() or "member"
+    if not email and user_id:
+        user = find_user_by_id(connection, user_id)
+        if user is not None:
+            email = user["email"]
+    if email and not user_id:
+        user = find_user_by_email(connection, email)
+        if user is not None:
+            user_id = str(user["id"])
+    if not email:
+        raise ValueError("Informe o email do membro.")
+    connection.execute(
+        """
+        INSERT INTO group_members (group_id, user_id, email, role, status)
+        VALUES (?, ?, ?, ?, 'active')
+        ON CONFLICT(group_id, email) DO UPDATE SET user_id = excluded.user_id, role = excluded.role, status = 'active'
+        """,
+        (group_id, user_id, email, role),
+    )
+    row = connection.execute("SELECT * FROM group_members WHERE group_id = ? AND lower(email) = lower(?)", (group_id, email)).fetchone()
+    return row_to_group_member(row)
+
+
+def remove_group_member(connection: DbConnection, group_id: int, member_id: int) -> bool:
+    cursor = connection.execute("UPDATE group_members SET status = 'removed' WHERE group_id = ? AND id = ? AND role != 'owner'", (group_id, member_id))
+    return cursor.rowcount > 0
+
+
+def add_group_contact(connection: DbConnection, group_id: int, payload: dict) -> dict:
+    contact_id = int(payload.get("contact_id"))
+    owner_id = str(payload.get("owner_id") or "")
+    contact = connection.execute("SELECT * FROM contacts WHERE id = ? AND owner_id = ?", (contact_id, owner_id)).fetchone()
+    if contact is None:
+        raise ValueError("Contato não encontrado para este usuário.")
+    connection.execute(
+        """
+        INSERT INTO group_contacts (group_id, contact_id, owner_id, added_by)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(group_id, contact_id) DO UPDATE SET added_by = excluded.added_by
+        """,
+        (group_id, contact_id, owner_id, str(payload.get("added_by") or owner_id)),
+    )
+    return row_to_contact(contact, connection)
+
+
+def remove_group_contact(connection: DbConnection, group_id: int, contact_id: int) -> bool:
+    cursor = connection.execute("DELETE FROM group_contacts WHERE group_id = ? AND contact_id = ?", (group_id, contact_id))
+    return cursor.rowcount > 0
+
+
+def list_group_contacts(connection: DbConnection, group_id: int) -> list[dict]:
+    rows = connection.execute(
+        """
+        SELECT contacts.*
+        FROM group_contacts
+        JOIN contacts ON contacts.id = group_contacts.contact_id
+        WHERE group_contacts.group_id = ?
+        ORDER BY datetime(group_contacts.created_at) DESC, contacts.id DESC
+        """,
+        (group_id,),
+    ).fetchall()
+    return [row_to_contact(row, connection) for row in rows]
 
 
 def row_to_public_profile(row) -> dict:

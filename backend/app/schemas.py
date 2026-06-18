@@ -32,6 +32,10 @@ class ContactCreate(BaseModel):
     linkedin: str | None = Field(default="", max_length=200)
     custom_url: str | None = Field(default="", max_length=240)
     custom_fields: str | None = Field(default="[]", max_length=2000)
+    phones: list[dict | str] = []
+    emails: list[dict | str] = []
+    tag_items: list[dict | str] = []
+    custom_field_values: list[dict] = []
     crm_status: str | None = Field(default="Novo", max_length=40)
     crm_priority: str | None = Field(default="Média", max_length=20)
     last_contact_at: str | None = Field(default="", max_length=20)
@@ -60,6 +64,11 @@ class ContactOut(BaseModel):
     linkedin: str
     custom_url: str
     custom_fields: str
+    phones: list[dict] = []
+    emails: list[dict] = []
+    tag_items: list[str] = []
+    ddd: str = ""
+    custom_field_values: list[dict] = []
     crm_status: str
     crm_priority: str
     last_contact_at: str
@@ -141,6 +150,47 @@ class MergeDecisionIn(BaseModel):
     owner_id: str = Field(default="demo-user", max_length=80)
     primary_contact_id: int
     duplicate_contact_id: int
+
+
+class GroupCreate(BaseModel):
+    owner_id: str = Field(default="demo-user", max_length=80)
+    name: str = Field(min_length=2, max_length=140)
+    description: str | None = Field(default="", max_length=1000)
+
+
+class GroupMemberCreate(BaseModel):
+    requester_id: str = Field(default="demo-user", max_length=80)
+    user_id: str | None = Field(default="", max_length=80)
+    email: str = Field(min_length=4, max_length=160)
+    role: str | None = Field(default="member", max_length=30)
+
+
+class GroupContactLinkIn(BaseModel):
+    requester_id: str = Field(default="demo-user", max_length=80)
+    owner_id: str = Field(default="demo-user", max_length=80)
+    contact_id: int
+
+
+class GroupMemberOut(BaseModel):
+    id: int
+    group_id: int
+    user_id: str
+    email: str
+    role: str
+    status: str
+    created_at: str
+
+
+class GroupOut(BaseModel):
+    id: int
+    owner_id: str
+    name: str
+    description: str
+    created_by_email: str
+    member_count: int
+    contact_count: int
+    members: list[GroupMemberOut] = []
+    created_at: str
 
 
 class UserCreate(BaseModel):

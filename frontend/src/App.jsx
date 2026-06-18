@@ -53,6 +53,8 @@ const GOOGLE_CONTACTS_SCOPE = 'https://www.googleapis.com/auth/contacts.readonly
 const GOOGLE_ACCOUNT_PROFILE_SCOPE = `${GOOGLE_LOGIN_SCOPE} https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/user.birthday.read`
 const AUTH_STORAGE_KEY = 'network-agenda-user'
 const AUTH_TTL_MS = 24 * 60 * 60 * 1000
+const OFFLINE_DATA_STORAGE_KEY = 'network-agenda-offline-data-v1'
+const OFFLINE_MUTATION_STORAGE_KEY = 'network-agenda-offline-mutations-v1'
 const SUPABASE_AUTH_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
 let supabaseClient = null
 
@@ -83,6 +85,7 @@ const ROUTES = {
   PUBLIC_PROFILE: '/perfil-publico',
   CONTACT: '/contato',
   NEW: '/novo',
+  GROUPS: '/grupos',
   LOGIN: '/login',
   REGISTER: '/cadastro',
   CONNECTIONS: '/admin/conexoes',
@@ -90,7 +93,7 @@ const ROUTES = {
 
 const CATS = [
   { id: 'home', label: 'Casa', col: '#10b981' },
-  { id: 'legal', label: 'Juridico', col: '#3b82f6' },
+  { id: 'legal', label: 'Jurídico', col: '#3b82f6' },
   { id: 'business', label: 'Negocios', col: '#f59e0b' },
   { id: 'tech', label: 'Tech', col: '#06b6d4' },
 ]
@@ -99,13 +102,13 @@ const CONTACTS_SEED = [
   { id: 'c1', name: 'Joao Martins', svc: 'eletricista residencial', city: 'São Paulo', trust: 'Recomendado', src: 'Google', note: 'Emergencia e instalacao de chuveiro', cat: 'home' },
   { id: 'c2', name: 'Mariana Costa', svc: 'advogada trabalhista', city: 'Santo Andre', trust: 'Favorito', src: 'Manual', note: 'Contratos, rescisao e PME', cat: 'legal' },
   { id: 'c3', name: 'Renato Lima', svc: 'contador para MEI', city: 'Rio de Janeiro', trust: 'Confiavel', src: 'Importado', note: 'Abertura de empresa e DAS mensal', cat: 'business' },
-  { id: 'c4', name: 'Aline Prado', svc: 'designer de site', city: 'São Paulo', trust: 'Novo', src: 'Indicacao', note: 'Landing pages e identidade visual', cat: 'tech' },
+  { id: 'c4', name: 'Aline Prado', svc: 'designer de site', city: 'São Paulo', trust: 'Novo', src: 'Indicação', note: 'Landing pages e identidade visual', cat: 'tech' },
   { id: 'c5', name: 'Carlos Nogueira', svc: 'pintor e reformas', city: 'Osasco', trust: 'Recomendado', src: 'iCloud', note: 'Apartamento e acabamento', cat: 'home' },
 ]
 
 const GROUPS_SEED = [
-  { id: 'g1', name: 'Eletricistas SP', svc: 'eletricista · manutencao', people: 42, resp: '18 min', score: 4.8, cat: 'home' },
-  { id: 'g2', name: 'Rede Juridica PME', svc: 'juridico · contratos', people: 28, resp: '1 h', score: 4.7, cat: 'legal' },
+  { id: 'g1', name: 'Eletricistas SP', svc: 'eletricista · manutenção', people: 42, resp: '18 min', score: 4.8, cat: 'home' },
+  { id: 'g2', name: 'Rede Jurídica PME', svc: 'jurídico · contratos', people: 28, resp: '1 h', score: 4.7, cat: 'legal' },
   { id: 'g3', name: 'Casa e Reforma', svc: 'pintura · reforma', people: 67, resp: '25 min', score: 4.6, cat: 'home' },
   { id: 'g4', name: 'Tech Negocios', svc: 'site · software · design', people: 35, resp: '45 min', score: 4.9, cat: 'tech' },
 ]
@@ -292,7 +295,7 @@ const contactsSeed = [
     city: 'São Paulo',
     address: 'Pinheiros, São Paulo, SP',
     trust: 'Novo',
-    source: 'Indicacao',
+    source: 'Indicação',
     created_at: '2026-05-23 12:00:00',
   },
   {
@@ -545,7 +548,9 @@ async function apiRequest(path, options = {}) {
     } catch {
       // Mantém a mensagem padrão quando a API não retorna JSON.
     }
-    throw new Error(message)
+    const error = new Error(message)
+    error.status = response.status
+    throw error
   }
 
   if (response.status === 204) {
@@ -678,8 +683,8 @@ function extractDdd(phone) {
   return digits.slice(0, 2)
 }
 
-function dddLocation(phone) {
-  const ddd = extractDdd(phone)
+function dddLocation(phone, structuredDdd = '') {
+  const ddd = structuredDdd || extractDdd(phone)
   const location = ddd ? dddCoordinates[ddd] : null
   return location ? { ddd, ...location } : null
 }
@@ -692,7 +697,7 @@ function isUsableMapAddress(address) {
 
 function resolveMapLocation(person, fallbackAddress = '') {
   const address = String(fallbackAddress || person?.address || person?.city || '').trim()
-  const byDdd = dddLocation(person?.phone)
+  const byDdd = dddLocation(person?.phone, person?.ddd)
   if (isUsableMapAddress(address)) {
     const addressCoords = findFallbackCoordinate(address)
     const dddCoords = byDdd ? { lat: byDdd.lat, lng: byDdd.lng } : null
@@ -793,10 +798,32 @@ function serializeCustomFields(fields) {
 }
 
 function tagList(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((tag) => (typeof tag === 'string' ? tag : tag?.name))
+      .map((tag) => String(tag || '').trim())
+      .filter(Boolean)
+  }
   return String(value || '')
     .split(',')
     .map((tag) => tag.trim())
     .filter(Boolean)
+}
+
+function contactTags(contact) {
+  return tagList(contact?.tag_items?.length ? contact.tag_items : contact?.tags)
+}
+
+function contactPhones(contact) {
+  const phones = Array.isArray(contact?.phones) ? contact.phones : []
+  if (phones.length) return phones
+  return contact?.phone ? [{ phone: contact.phone, ddd: extractDdd(contact.phone), label: 'Principal', is_primary: true }] : []
+}
+
+function contactEmails(contact) {
+  const emails = Array.isArray(contact?.emails) ? contact.emails : []
+  if (emails.length) return emails
+  return contact?.email ? [{ email: contact.email, label: 'Principal', is_primary: true }] : []
 }
 
 function followUpInputValue(value) {
@@ -818,6 +845,18 @@ function formatFollowUp(value) {
   const [datePart, timePart = ''] = normalized.split('T')
   const [year, month, day] = datePart.split('-')
   return `${day}/${month}/${year}${timePart ? ` às ${timePart.slice(0, 5)}` : ''}`
+}
+
+function formatDateTime(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return String(value)
+  return date.toLocaleString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 function followUpTimestamp(value) {
@@ -849,11 +888,6 @@ function parsePath() {
   if (path.startsWith(`${ROUTES.CONTACT}/`)) {
     return { page: 'contact', contactId: decodeURIComponent(path.replace(`${ROUTES.CONTACT}/`, '')) }
   }
-  if (path === '/grupos') {
-    window.history.replaceState({}, '', ROUTES.PUBLIC)
-    return { page: 'public', categoryId: null }
-  }
-
   const pageByPath = {
     '/buscar': 'agenda',
     [ROUTES.DASHBOARD]: 'dashboard',
@@ -866,6 +900,7 @@ function parsePath() {
     [ROUTES.CRM]: 'crm',
     [ROUTES.PUBLIC_PROFILE]: 'publicProfile',
     [ROUTES.NEW]: 'new',
+    [ROUTES.GROUPS]: 'groups',
     [ROUTES.LOGIN]: 'login',
     [ROUTES.REGISTER]: 'register',
     [ROUTES.CONNECTIONS]: 'connections',
@@ -1166,6 +1201,98 @@ function contactOwnerId(owner) {
   return String(owner?.id ?? owner?.email ?? 'demo-user')
 }
 
+function readStorageJson(key, fallback) {
+  try {
+    const stored = localStorage.getItem(key)
+    return stored ? JSON.parse(stored) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function writeStorageJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // Storage can be unavailable in private browsing or low disk states.
+  }
+}
+
+function loadOfflineSnapshot(owner) {
+  const ownerKey = contactOwnerId(owner)
+  const snapshots = readStorageJson(OFFLINE_DATA_STORAGE_KEY, {})
+  if (owner) return snapshots[ownerKey] || null
+  return snapshots[ownerKey] || snapshots['demo-user'] || null
+}
+
+function saveOfflineSnapshot(owner, payload) {
+  const ownerKey = contactOwnerId(owner)
+  const snapshots = readStorageJson(OFFLINE_DATA_STORAGE_KEY, {})
+  snapshots[ownerKey] = {
+    contacts: payload.contacts ?? [],
+    publicProfiles: payload.publicProfiles ?? [],
+    networkUsers: payload.networkUsers ?? [],
+    duplicateSuggestions: payload.duplicateSuggestions ?? [],
+    sharedGroups: payload.sharedGroups ?? [],
+    groupContactsById: payload.groupContactsById ?? {},
+    cachedAt: new Date().toISOString(),
+  }
+  writeStorageJson(OFFLINE_DATA_STORAGE_KEY, snapshots)
+}
+
+function loadOfflineMutations(owner) {
+  const ownerKey = contactOwnerId(owner)
+  const mutations = readStorageJson(OFFLINE_MUTATION_STORAGE_KEY, {})
+  return mutations[ownerKey] ?? []
+}
+
+function saveOfflineMutations(owner, mutations) {
+  const ownerKey = contactOwnerId(owner)
+  const allMutations = readStorageJson(OFFLINE_MUTATION_STORAGE_KEY, {})
+  allMutations[ownerKey] = mutations
+  writeStorageJson(OFFLINE_MUTATION_STORAGE_KEY, allMutations)
+}
+
+function queueOfflineMutation(owner, mutation) {
+  const queued = loadOfflineMutations(owner)
+  const nextMutations = [
+    ...queued,
+    {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      createdAt: new Date().toISOString(),
+      ...mutation,
+    },
+  ]
+  saveOfflineMutations(owner, nextMutations)
+  return nextMutations
+}
+
+function removeOfflineMutations(owner, syncedIds) {
+  if (!syncedIds.length) return
+  saveOfflineMutations(
+    owner,
+    loadOfflineMutations(owner).filter((mutation) => !syncedIds.includes(mutation.id)),
+  )
+}
+
+function isOfflineRequestError(error) {
+  if (error?.status) return false
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true
+  return error instanceof TypeError || /failed to fetch|networkerror|load failed/i.test(error?.message ?? '')
+}
+
+function offlineMutationTitle(mutation) {
+  const titles = {
+    'contact:create': 'Criar contato',
+    'contact:update': 'Atualizar contato',
+    'contact:delete': 'Remover contato',
+    'user:save': 'Salvar perfil',
+    'duplicate:ignore': 'Ignorar duplicado',
+    'duplicate:merge': 'Mesclar duplicado',
+  }
+  return titles[mutation.type] || 'Sincronizar alteração'
+}
+
 function parseImportedContacts(text) {
   return text
     .split(/\r?\n/)
@@ -1373,7 +1500,7 @@ function loadGoogleMaps() {
   return googleMapsPromise
 }
 
-function Shell({ user, route, online, unread, onNavigate, onLogout, children }) {
+function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onNavigate, onLogout, children }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const isAdmin = user?.role === 'admin'
   const isAuthPage = !user && (route.page === 'login' || route.page === 'register')
@@ -1387,6 +1514,7 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
     { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: LayoutGrid, page: 'dashboard' },
     { label: 'Novo contato', path: ROUTES.NEW, icon: Plus, page: 'new' },
     { label: 'Rede pública', path: ROUTES.PUBLIC, icon: Compass, page: 'public' },
+    { label: 'Grupos', path: ROUTES.GROUPS, icon: UsersRound, page: 'groups' },
     { label: 'Duplicados', path: ROUTES.DUPLICATES, icon: CheckCircle, page: 'duplicates' },
     { label: 'Perfil', path: ROUTES.REGISTER, icon: UserRound, page: 'register' },
     { label: 'Perfil público', path: ROUTES.PUBLIC_PROFILE, icon: UsersRound, page: 'publicProfile' },
@@ -1417,6 +1545,7 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
     { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: LayoutGrid, page: 'dashboard' },
     ...primaryTabs,
     { label: 'Rede pública', path: ROUTES.PUBLIC, icon: Compass, page: 'public' },
+    { label: 'Grupos', path: ROUTES.GROUPS, icon: UsersRound, page: 'groups' },
   ]
   const sidebarSecondary = [
     { label: 'Novo contato', path: ROUTES.NEW, icon: Plus, page: 'new' },
@@ -1451,6 +1580,12 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
           </div>
           <p className="mt-2 text-sm font-black text-slate-100">{online ? 'Operando online' : 'Modo local'}</p>
           <p className="mt-1 text-xs font-semibold text-slate-500">{unread > 0 ? `${unread} novo${unread === 1 ? '' : 's'} contato${unread === 1 ? '' : 's'}` : 'Rede pronta para busca'}</p>
+          {pendingChanges > 0 ? (
+            <button type="button" onClick={onSyncPending} className="mt-3 inline-flex h-8 w-full items-center justify-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-2 text-xs font-black text-amber-200">
+              <Cloud size={14} />
+              {pendingChanges} pendente{pendingChanges === 1 ? '' : 's'}
+            </button>
+          ) : null}
         </div>
 
         <nav className="mt-4 grid gap-1">
@@ -1552,9 +1687,15 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
               <Circle size={9} className={online ? 'fill-emerald-500 text-emerald-500' : 'fill-slate-300 text-slate-300'} />
               {online ? 'online' : 'offline'}
             </span>
+            {pendingChanges > 0 ? (
+              <button type="button" onClick={onSyncPending} className="glass-panel-soft hidden items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-black text-amber-200 sm:inline-flex">
+                <Cloud size={14} />
+                {pendingChanges}
+              </button>
+            ) : null}
             <button type="button" className="secondary-button relative rounded-lg p-2 text-slate-400" aria-label="Atividade">
               <Bell size={18} />
-              {unread > 0 ? <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-cyan-500 px-1 text-[10px] font-black text-white">{unread}</span> : null}
+              {unread + pendingChanges > 0 ? <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-cyan-500 px-1 text-[10px] font-black text-white">{unread + pendingChanges}</span> : null}
             </button>
             <button
               type="button"
@@ -1581,6 +1722,12 @@ function Shell({ user, route, online, unread, onNavigate, onLogout, children }) 
             </div>
             <div className="flex items-center gap-2">
               <span className="rounded-lg border border-slate-800/80 bg-slate-950/40 px-3 py-2 text-xs font-black text-slate-400">{online ? 'API conectada' : 'API offline'}</span>
+              {pendingChanges > 0 ? (
+                <button type="button" onClick={onSyncPending} className="inline-flex h-10 items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 text-sm font-black text-amber-200">
+                  <Cloud size={16} />
+                  {pendingChanges} pendente{pendingChanges === 1 ? '' : 's'}
+                </button>
+              ) : null}
               <button type="button" onClick={() => onNavigate(ROUTES.CHAT)} className="primary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
                 <Sparkles size={16} />
                 Copiloto
@@ -2568,8 +2715,11 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
   }
 
   const category = contact.category ?? categoryDetails(null, contact.service)
-  const tags = tagList(contact.tags)
-  const fields = parseCustomFields(contact.custom_fields)
+  const tags = contactTags(contact)
+  const phones = contactPhones(contact)
+  const emails = contactEmails(contact)
+  const ddd = contact.ddd || phones.find((item) => item.ddd)?.ddd || extractDdd(contact.phone)
+  const fields = contact.custom_field_values?.length ? contact.custom_field_values : parseCustomFields(contact.custom_fields)
   const socialLinks = [
     { label: 'WhatsApp', value: contact.whatsapp || contact.phone, icon: MessageCircle, href: formatPhoneForLink(contact.whatsapp || contact.phone) ? `https://wa.me/55${formatPhoneForLink(contact.whatsapp || contact.phone)}` : '' },
     { label: 'Instagram', value: contact.instagram, icon: ContactRound, href: contact.instagram ? `https://instagram.com/${String(contact.instagram).replace('@', '').replace(/^https?:\/\/(www\.)?instagram\.com\//, '')}` : '' },
@@ -2598,7 +2748,7 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
               <p className="text-xs font-black uppercase tracking-widest text-cyan-400">{category.label}</p>
               <h1 className="mt-1 truncate text-2xl font-black text-slate-100">{contact.name}</h1>
               <p className="mt-1 text-sm font-semibold text-slate-400">{contact.service}</p>
-              <p className="mt-1 text-xs font-medium text-slate-500">{contact.phone} · {contact.city || 'Sem cidade'}</p>
+              <p className="mt-1 text-xs font-medium text-slate-500">{contact.phone} · {contact.city || 'Sem cidade'}{ddd ? ` · DDD ${ddd}` : ''}</p>
             </div>
           </div>
           <button type="button" onClick={() => onEdit(contact)} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-cyan-500 px-3 text-sm font-black text-slate-950">
@@ -2648,7 +2798,27 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
           <div className="glass-panel rounded-lg p-4">
             <h2 className="text-sm font-black text-slate-100">Links</h2>
             <div className="mt-3 grid gap-2">
-              {contact.email ? <DetailRow label="Email" value={contact.email} /> : null}
+              {phones.length ? (
+                <div className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+                  <p className="text-xs font-black uppercase tracking-widest text-slate-500">Telefones</p>
+                  <div className="mt-2 grid gap-1.5">
+                    {phones.map((item, index) => (
+                      <p key={`${item.phone}-${index}`} className="text-sm font-semibold text-slate-200">
+                        {item.phone}
+                        {item.ddd ? <span className="ml-2 rounded-md bg-cyan-400/10 px-1.5 py-0.5 text-[11px] font-black text-cyan-200">DDD {item.ddd}</span> : null}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {emails.length ? (
+                <div className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+                  <p className="text-xs font-black uppercase tracking-widest text-slate-500">Emails</p>
+                  <div className="mt-2 grid gap-1.5">
+                    {emails.map((item, index) => <p key={`${item.email}-${index}`} className="break-all text-sm font-semibold text-slate-200">{item.email}</p>)}
+                  </div>
+                </div>
+              ) : null}
               {socialLinks.length ? socialLinks.map((link) => {
                 const Icon = link.icon
                 return (
@@ -3269,12 +3439,38 @@ function DuplicateContactPreview({ label, contact }) {
   )
 }
 
-function SettingsPage({ user, contacts, duplicateCount, backendOnline, recents, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onExportContacts, onClearRecents, onLogout }) {
+function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onExportContacts, onClearRecents, onLogout }) {
   const visibleName = user?.name || 'Perfil'
   const googleContactsImported = Boolean(user?.googleContactsImportedAt)
   return (
     <div className="space-y-4">
       <PageTitle eyebrow="Configurações" title="Menu da conta" description="Perfil, organização da agenda, dados locais e estado do app." />
+
+      {pendingMutations.length ? (
+        <section className="glass-panel rounded-lg border-amber-400/20 p-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-xs font-black uppercase tracking-widest text-amber-200">Sincronização pendente</p>
+              <h2 className="mt-1 text-base font-black text-slate-100">
+                {pendingMutations.length} alteração{pendingMutations.length === 1 ? '' : 'es'} salva{pendingMutations.length === 1 ? '' : 's'} neste dispositivo
+              </h2>
+              <p className="mt-1 text-sm font-semibold text-slate-500">Elas serão enviadas automaticamente quando a API voltar a responder.</p>
+            </div>
+            <button type="button" onClick={onSyncPending} className="inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-amber-300 px-3 text-sm font-black text-slate-950">
+              <Cloud size={17} />
+              Sincronizar agora
+            </button>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {pendingMutations.slice(0, 6).map((mutation) => (
+              <div key={mutation.id} className="rounded-lg border border-slate-800 bg-slate-950/35 px-3 py-2">
+                <p className="text-sm font-black text-slate-200">{offlineMutationTitle(mutation)}</p>
+                <p className="mt-0.5 text-xs font-semibold text-slate-500">{formatDateTime(mutation.createdAt)}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="glass-panel rounded-lg p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -3677,7 +3873,7 @@ function AddressOptionList({ options, onChoose }) {
   )
 }
 
-function NewContactPage({ form, updateForm, addContact, inferredCategory, onNavigate }) {
+function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSuggestions, onNavigate }) {
   const [showAddress, setShowAddress] = useState(Boolean(form.address))
   const [addressStatus, setAddressStatus] = useState('')
   const [addressOptions, setAddressOptions] = useState([])
@@ -3759,7 +3955,8 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, onNavi
               </Field>
             </div>
             <Field label="Tags">
-              <input value={form.tags} onChange={(event) => updateForm('tags', event.target.value)} className="field-input" placeholder="limpeza, evento, indicação, urgente" />
+              <input value={form.tags} onChange={(event) => updateForm('tags', event.target.value)} className="field-input" placeholder="limpeza, evento, indicação, urgente" list="network-agenda-tag-suggestions" />
+              <TagSuggestionDatalist id="network-agenda-tag-suggestions" tags={tagSuggestions} />
             </Field>
           </div>
         </div>
@@ -3901,7 +4098,7 @@ function CustomFieldsEditor({ value, onChange }) {
   )
 }
 
-function EditContactModal({ contact, onClose, onSave }) {
+function EditContactModal({ contact, tagSuggestions, onClose, onSave }) {
   const [draft, setDraft] = useState(() => contactToEditForm(contact))
   const [showAddress, setShowAddress] = useState(Boolean(contact.address))
   const [addressStatus, setAddressStatus] = useState('')
@@ -3997,7 +4194,8 @@ function EditContactModal({ contact, onClose, onSave }) {
               </Field>
             </div>
             <Field label="Tags">
-              <input value={draft.tags} onChange={(event) => updateDraft('tags', event.target.value)} className="field-input" placeholder="Tags separadas por vírgula" />
+              <input value={draft.tags} onChange={(event) => updateDraft('tags', event.target.value)} className="field-input" placeholder="Tags separadas por vírgula" list="network-agenda-edit-tag-suggestions" />
+              <TagSuggestionDatalist id="network-agenda-edit-tag-suggestions" tags={tagSuggestions} />
             </Field>
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="Email">
@@ -4095,6 +4293,15 @@ function Field({ label, className = '', required = false, error = '', children }
   )
 }
 
+function TagSuggestionDatalist({ id, tags }) {
+  if (!tags?.length) return null
+  return (
+    <datalist id={id}>
+      {tags.map((tag) => <option key={tag} value={tag} />)}
+    </datalist>
+  )
+}
+
 function GroupsPage({ publicProfiles, user, queryDraft, setQueryDraft, onSearch, recents, contacts, onOpenGroup, onNavigate }) {
   const groups = getRecommendedGroups(publicProfiles.filter((profile) => (profile.kind ?? 'group') !== 'person'), user, queryDraft)
   const publicPeopleCount = publicProfiles.filter((profile) => (profile.kind ?? 'group') === 'person').length
@@ -4120,6 +4327,274 @@ function GroupsPage({ publicProfiles, user, queryDraft, setQueryDraft, onSearch,
           <PublicGroupCard key={profile.id} profile={profile} onOpen={onOpenGroup} />
         ))}
       </div>
+    </div>
+  )
+}
+
+function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateGroup, onUpdateGroup, onAddMember, onAddContact, onLoadContacts, onNavigate }) {
+  const [draft, setDraft] = useState({ name: '', description: '' })
+  const [editDraft, setEditDraft] = useState({ name: '', description: '' })
+  const [memberEmail, setMemberEmail] = useState('')
+  const [selectedGroupId, setSelectedGroupId] = useState(groups[0]?.id ?? '')
+  const [selectedContactId, setSelectedContactId] = useState('')
+  const currentUserId = contactOwnerId(user)
+  const canCreateGroup = Boolean(user)
+  const isAdmin = user?.role === 'admin'
+  const findGroupMembership = (group) => group?.members?.find((member) => String(member.user_id) === currentUserId || normalize(member.email) === normalize(user?.email))
+  const groupRole = (group) => {
+    if (!group) return ''
+    if (String(group.owner_id) === currentUserId) return 'owner'
+    const membership = findGroupMembership(group)
+    if (membership?.role) return membership.role
+    return isAdmin ? 'admin_global' : ''
+  }
+  const roleMeta = (role) => ({
+    owner: { label: 'Owner', tone: 'text-emerald-200 border-emerald-400/20 bg-emerald-400/10' },
+    admin: { label: 'Admin', tone: 'text-cyan-200 border-cyan-400/20 bg-cyan-400/10' },
+    admin_global: { label: 'Admin global', tone: 'text-cyan-200 border-cyan-400/20 bg-cyan-400/10' },
+    member: { label: 'Member', tone: 'text-amber-200 border-amber-400/20 bg-amber-400/10' },
+  }[role] || { label: 'Leitura', tone: 'text-slate-300 border-slate-700 bg-slate-900/60' })
+  const selectedGroup = groups.find((group) => String(group.id) === String(selectedGroupId)) || groups[0]
+  const selectedContacts = selectedGroup ? (groupContactsById[selectedGroup.id] ?? []) : []
+  const selectedGroupRole = groupRole(selectedGroup)
+  const canManageSelectedGroup = Boolean(selectedGroup && ['owner', 'admin', 'admin_global'].includes(selectedGroupRole))
+  const ownedGroups = groups.filter((group) => String(group.owner_id) === currentUserId)
+  const participatingGroups = groups.filter((group) => String(group.owner_id) !== currentUserId && ['owner', 'admin', 'member'].includes(groupRole(group)))
+  const visibleAdminGroups = isAdmin ? groups.filter((group) => String(group.owner_id) !== currentUserId && !findGroupMembership(group)) : []
+  const privateAvailable = selectedGroup
+    ? contacts.filter((contact) => !selectedContacts.some((item) => String(item.id) === String(contact.id)))
+    : contacts
+
+  useEffect(() => {
+    if (!selectedGroup?.id) return
+    setSelectedGroupId(selectedGroup.id)
+    onLoadContacts(selectedGroup.id)
+  }, [selectedGroup?.id])
+
+  useEffect(() => {
+    if (!selectedGroup) {
+      setEditDraft({ name: '', description: '' })
+      return
+    }
+    setEditDraft({
+      name: selectedGroup.name || '',
+      description: selectedGroup.description || '',
+    })
+  }, [selectedGroup?.id, selectedGroup?.name, selectedGroup?.description])
+
+  async function submitGroup(event) {
+    event.preventDefault()
+    if (!draft.name.trim()) return
+    const created = await onCreateGroup({ name: draft.name.trim(), description: draft.description.trim() })
+    if (created?.id) setSelectedGroupId(created.id)
+    setDraft({ name: '', description: '' })
+  }
+
+  function submitMember(event) {
+    event.preventDefault()
+    if (!selectedGroup || !memberEmail.trim()) return
+    onAddMember(selectedGroup.id, memberEmail.trim())
+    setMemberEmail('')
+  }
+
+  function submitContact(event) {
+    event.preventDefault()
+    if (!selectedGroup || !selectedContactId) return
+    onAddContact(selectedGroup.id, selectedContactId)
+    setSelectedContactId('')
+  }
+
+  function submitGroupUpdate(event) {
+    event.preventDefault()
+    if (!selectedGroup || !canManageSelectedGroup || !editDraft.name.trim()) return
+    onUpdateGroup(selectedGroup.id, {
+      name: editDraft.name.trim(),
+      description: editDraft.description.trim(),
+    })
+  }
+
+  function GroupList({ title, items, emptyText }) {
+    return (
+      <section className="glass-panel rounded-lg p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-sm font-black text-slate-100">{title}</h2>
+          <span className="text-xs font-black text-slate-500">{items.length}</span>
+        </div>
+        <div className="grid gap-2">
+          {items.length ? items.map((group) => {
+            const meta = roleMeta(groupRole(group))
+            const isSelected = String(selectedGroup?.id) === String(group.id)
+            return (
+              <button key={group.id} type="button" onClick={() => setSelectedGroupId(group.id)} className={['action-card rounded-lg p-3 text-left', isSelected ? 'border-cyan-400/60' : ''].join(' ')}>
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-sm font-black text-slate-100">{group.name}</p>
+                  <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${meta.tone}`}>{meta.label}</span>
+                </div>
+                <p className="mt-1 line-clamp-2 text-xs font-semibold text-slate-500">{group.description || 'Sem descrição.'}</p>
+                <div className="mt-2 flex gap-2 text-[11px] font-black text-cyan-200">
+                  <span>{group.member_count} membros</span>
+                  <span>{group.contact_count} contatos</span>
+                </div>
+              </button>
+            )
+          }) : <p className="rounded-lg border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">{emptyText}</p>}
+        </div>
+      </section>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <PageTitle
+        eyebrow="Grupos compartilhados"
+        title="Bases de networking por contexto"
+        description="Crie grupos para eventos, comunidades e hubs. A agenda privada continua separada, mas contatos podem ser compartilhados por vínculo."
+        action={<button type="button" onClick={() => onNavigate(ROUTES.PUBLIC)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black"><Compass size={17} />Rede pública</button>}
+      />
+
+      <section className="grid gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
+        <div className="space-y-4">
+          <section className="glass-panel rounded-lg p-4">
+            <div className="flex items-start gap-3">
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-200"><ShieldCheck size={20} /></span>
+              <div>
+                <h2 className="text-base font-black text-slate-100">Criar grupo</h2>
+                <p className="mt-1 text-sm font-semibold text-slate-500">Qualquer conta autenticada pode criar um grupo e convidar membros depois.</p>
+              </div>
+            </div>
+            <form onSubmit={submitGroup} className="mt-4 grid gap-3">
+              <Field label="Nome">
+                <input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} className="field-input" disabled={!canCreateGroup} placeholder="Ex: Hub de fundadores" />
+              </Field>
+              <Field label="Descrição">
+                <textarea value={draft.description} onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))} className="field-input min-h-20 resize-y" disabled={!canCreateGroup} placeholder="Contexto, objetivo e tipo de rede." />
+              </Field>
+              <button type="submit" disabled={!canCreateGroup} className="primary-button inline-flex h-10 items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-50">
+                <Plus size={17} />
+                Criar grupo
+              </button>
+            </form>
+          </section>
+
+          <GroupList title="Meus grupos" items={ownedGroups} emptyText="Você ainda não criou grupos." />
+          <GroupList title="Participando" items={participatingGroups} emptyText="Você ainda não participa de grupos criados por outras pessoas." />
+          {visibleAdminGroups.length ? <GroupList title="Outros grupos visíveis" items={visibleAdminGroups} emptyText="" /> : null}
+        </div>
+
+        <section className="glass-panel rounded-lg p-4">
+          {selectedGroup ? (
+            <div className="space-y-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Grupo selecionado</p>
+                  <h2 className="mt-1 text-xl font-black text-slate-100">{selectedGroup.name}</h2>
+                  <p className="mt-1 text-sm font-semibold text-slate-500">{selectedGroup.description || 'Sem descrição.'}</p>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${roleMeta(selectedGroupRole).tone}`}>{roleMeta(selectedGroupRole).label}</span>
+                    <span className="text-xs font-semibold text-slate-400">
+                      {canManageSelectedGroup ? 'Você pode editar, convidar membros e compartilhar contatos neste grupo.' : 'Você participa deste grupo com acesso de leitura.'}
+                    </span>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-center">
+                  <Metric value={selectedGroup.member_count} label="membros" />
+                  <Metric value={selectedGroup.contact_count} label="contatos" />
+                </div>
+              </div>
+
+              <form onSubmit={submitGroupUpdate} className="glass-panel-soft rounded-lg p-3">
+                <div className="flex items-start gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-950 text-cyan-300">
+                    <Pencil size={18} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-sm font-black text-slate-100">Editar grupo</h3>
+                    {!canManageSelectedGroup ? <p className="mt-1 text-xs font-semibold text-slate-500">Só quem gerencia o grupo pode alterar nome e descrição.</p> : null}
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                  <Field label="Nome">
+                    <input
+                      value={editDraft.name}
+                      onChange={(event) => setEditDraft((current) => ({ ...current, name: event.target.value }))}
+                      className="field-input h-10"
+                      disabled={!canManageSelectedGroup}
+                      placeholder="Nome do grupo"
+                    />
+                  </Field>
+                  <Field label="Descrição">
+                    <input
+                      value={editDraft.description}
+                      onChange={(event) => setEditDraft((current) => ({ ...current, description: event.target.value }))}
+                      className="field-input h-10"
+                      disabled={!canManageSelectedGroup}
+                      placeholder="Descrição do grupo"
+                    />
+                  </Field>
+                  <div className="flex items-end">
+                    <button type="submit" disabled={!canManageSelectedGroup} className="secondary-button h-10 rounded-lg px-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-50">
+                      Salvar
+                    </button>
+                  </div>
+                </div>
+              </form>
+
+              <div className="grid gap-3 lg:grid-cols-2">
+                <form onSubmit={submitMember} className="glass-panel-soft rounded-lg p-3">
+                  <h3 className="text-sm font-black text-slate-100">Convidar membro</h3>
+                  {!canManageSelectedGroup ? <p className="mt-1 text-xs font-semibold text-slate-500">Somente quem gerencia o grupo pode enviar convites.</p> : null}
+                  <div className="mt-3 flex gap-2">
+                    <input value={memberEmail} onChange={(event) => setMemberEmail(event.target.value)} className="field-input h-10" type="email" disabled={!canManageSelectedGroup} placeholder="email@exemplo.com" />
+                    <button type="submit" disabled={!canManageSelectedGroup} className="secondary-button h-10 rounded-lg px-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-50">Adicionar</button>
+                  </div>
+                </form>
+                <form onSubmit={submitContact} className="glass-panel-soft rounded-lg p-3">
+                  <h3 className="text-sm font-black text-slate-100">Adicionar contato privado</h3>
+                  {!canManageSelectedGroup ? <p className="mt-1 text-xs font-semibold text-slate-500">Somente quem gerencia o grupo pode compartilhar contatos privados.</p> : null}
+                  <div className="mt-3 flex gap-2">
+                    <select value={selectedContactId} onChange={(event) => setSelectedContactId(event.target.value)} className="field-input h-10" disabled={!canManageSelectedGroup}>
+                      <option value="">Escolha</option>
+                      {privateAvailable.map((contact) => <option key={contact.id} value={contact.id}>{contact.name} - {contact.service}</option>)}
+                    </select>
+                    <button type="submit" disabled={!canManageSelectedGroup} className="secondary-button h-10 rounded-lg px-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-50">Adicionar</button>
+                  </div>
+                </form>
+              </div>
+
+              <div className="grid gap-3 lg:grid-cols-2">
+                <div>
+                  <h3 className="mb-2 text-sm font-black text-slate-100">Membros</h3>
+                  <div className="grid gap-2">
+                    {selectedGroup.members.map((member) => (
+                      <div key={member.id} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+                        <p className="text-sm font-black text-slate-200">{member.email}</p>
+                        <p className="mt-1 text-xs font-black uppercase tracking-widest text-slate-500">{member.role}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <h3 className="mb-2 text-sm font-black text-slate-100">Contatos compartilhados</h3>
+                  <div className="grid gap-2">
+                    {selectedContacts.length ? selectedContacts.map((contact) => (
+                      <button key={contact.id} type="button" onClick={() => onNavigate(`${ROUTES.CONTACT}/${contact.id}`)} className="action-card rounded-lg p-3 text-left">
+                        <p className="text-sm font-black text-slate-100">{contact.name}</p>
+                        <p className="mt-1 text-xs font-semibold text-slate-500">{contact.service} - {contact.city || 'Sem cidade'}</p>
+                      </button>
+                    )) : <p className="rounded-lg border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">Nenhum contato compartilhado neste grupo.</p>}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="py-10 text-center">
+              <UsersRound className="mx-auto text-cyan-300" size={36} />
+              <h2 className="mt-3 text-lg font-black text-slate-100">Selecione ou crie um grupo</h2>
+              <p className="mt-1 text-sm font-semibold text-slate-500">A base compartilhada aparece aqui quando houver um grupo ativo.</p>
+            </div>
+          )}
+        </section>
+      </section>
     </div>
   )
 }
@@ -4288,7 +4763,7 @@ function NetworkGraphMap({ user, contacts }) {
             locationQuery: location.query,
             locationSource: location.source,
             locationSourceLabel: location.sourceLabel,
-            ddd: extractDdd(contact.phone),
+            ddd: contact.ddd || extractDdd(contact.phone),
             distanceKm,
             distanceLabel: formatDistanceKm(distanceKm),
             distanceSourceLabel: distanceKm === null ? 'sem DDD/localização' : usesDdd ? 'por DDD' : location.source.startsWith('address') ? 'por endereço' : 'estimada',
@@ -5841,13 +6316,19 @@ function getRecommendedGroups(publicProfiles, user, query) {
 }
 
 export default function App() {
-  const [contacts, setContacts] = useState(contactsSeed)
-  const [publicProfiles, setPublicProfiles] = useState(publicProfilesSeed)
-  const [networkUsers, setNetworkUsers] = useState([])
+  const [user, setUser] = useState(loadStoredUser)
+  const initialOfflineData = loadOfflineSnapshot(user)
+  const [contacts, setContacts] = useState(() => Array.isArray(initialOfflineData?.contacts) ? initialOfflineData.contacts : contactsSeed)
+  const [publicProfiles, setPublicProfiles] = useState(() => Array.isArray(initialOfflineData?.publicProfiles) ? initialOfflineData.publicProfiles : publicProfilesSeed)
+  const [networkUsers, setNetworkUsers] = useState(() => initialOfflineData?.networkUsers ?? [])
+  const [sharedGroups, setSharedGroups] = useState(() => Array.isArray(initialOfflineData?.sharedGroups) ? initialOfflineData.sharedGroups : [])
+  const [groupContactsById, setGroupContactsById] = useState(() => initialOfflineData?.groupContactsById ?? {})
   const [backendOnline, setBackendOnline] = useState(false)
+  const [browserOnline, setBrowserOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine)
+  const [syncNonce, setSyncNonce] = useState(0)
+  const [pendingMutations, setPendingMutations] = useState(() => loadOfflineMutations(user))
   const [queryDraft, setQueryDraft] = useState('')
   const [route, setRoute] = useState(parsePath)
-  const [user, setUser] = useState(loadStoredUser)
   const [recents, setRecents] = useState(loadRecentSearches)
   const emptyContactForm = {
     name: '',
@@ -5884,7 +6365,7 @@ export default function App() {
   const [selectedGroup, setSelectedGroup] = useState(null)
   const [newCount, setNewCount] = useState(0)
   const [isImporting, setIsImporting] = useState(false)
-  const [duplicateSuggestions, setDuplicateSuggestions] = useState([])
+  const [duplicateSuggestions, setDuplicateSuggestions] = useState(() => initialOfflineData?.duplicateSuggestions ?? [])
   const [isCheckingDuplicates, setIsCheckingDuplicates] = useState(false)
   const [isChatThinking, setIsChatThinking] = useState(false)
   const [chatMessages, setChatMessages] = useState([
@@ -5898,10 +6379,138 @@ export default function App() {
   ])
   const lastSupabaseUserRef = useRef('')
 
+  function refreshPendingMutations(owner = user) {
+    const pending = loadOfflineMutations(owner)
+    setPendingMutations(pending)
+    return pending
+  }
+
+  function queueLocalMutation(mutation, owner = user) {
+    const pending = queueOfflineMutation(owner, mutation)
+    setPendingMutations(pending)
+    return pending
+  }
+
+  function applyOfflineSnapshot(snapshot) {
+    if (!snapshot) return false
+    setContacts(Array.isArray(snapshot.contacts) ? snapshot.contacts : contactsSeed)
+    setPublicProfiles(Array.isArray(snapshot.publicProfiles) ? snapshot.publicProfiles : publicProfilesSeed)
+    setNetworkUsers((snapshot.networkUsers ?? []).map((item) => (item?.birthDate !== undefined ? normalizeUserDraft(item) : apiUserToLocal(item))).filter(Boolean))
+    setDuplicateSuggestions(snapshot.duplicateSuggestions ?? [])
+    setSharedGroups(Array.isArray(snapshot.sharedGroups) ? snapshot.sharedGroups : [])
+    setGroupContactsById(snapshot.groupContactsById ?? {})
+    return true
+  }
+
+  async function syncPendingOfflineChanges(owner = user) {
+    if (!owner || (typeof navigator !== 'undefined' && navigator.onLine === false)) return 0
+    const pending = loadOfflineMutations(owner)
+    setPendingMutations(pending)
+    if (!pending.length) return 0
+
+    const syncedIds = []
+    const groupIdMap = new globalThis.Map()
+    for (const mutation of pending) {
+      if (mutation.type === 'contact:create') {
+        await apiRequest('/api/contacts', {
+          method: 'POST',
+          body: JSON.stringify(mutation.payload),
+        })
+      } else if (mutation.type === 'contact:update') {
+        await apiRequest(`/api/contacts/${mutation.contactId}`, {
+          method: 'PUT',
+          body: JSON.stringify(mutation.payload),
+        })
+      } else if (mutation.type === 'contact:delete') {
+        await apiRequest(`/api/contacts/${mutation.contactId}?user_id=${encodeURIComponent(contactOwnerId(owner))}`, { method: 'DELETE' })
+      } else if (mutation.type === 'user:save') {
+        await apiRequest('/api/users', {
+          method: 'POST',
+          body: JSON.stringify(mutation.payload),
+        })
+      } else if (mutation.type === 'duplicate:ignore') {
+        await apiRequest('/api/merge-suggestions/ignore', {
+          method: 'POST',
+          body: JSON.stringify(mutation.payload),
+        })
+      } else if (mutation.type === 'duplicate:merge') {
+        await apiRequest('/api/merge-suggestions/merge', {
+          method: 'POST',
+          body: JSON.stringify(mutation.payload),
+        })
+      } else if (mutation.type === 'group:create') {
+        const created = await apiRequest('/api/groups', {
+          method: 'POST',
+          body: JSON.stringify(mutation.payload),
+        })
+        if (mutation.clientGroupId) {
+          groupIdMap.set(String(mutation.clientGroupId), created.id)
+        }
+      } else if (mutation.type === 'group:update') {
+        const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
+        await apiRequest(`/api/groups/${groupId}`, {
+          method: 'PUT',
+          body: JSON.stringify(mutation.payload),
+        })
+      } else if (mutation.type === 'group:member:add') {
+        const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
+        await apiRequest(`/api/groups/${groupId}/members`, {
+          method: 'POST',
+          body: JSON.stringify(mutation.payload),
+        })
+      } else if (mutation.type === 'group:contact:add') {
+        const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
+        await apiRequest(`/api/groups/${groupId}/contacts`, {
+          method: 'POST',
+          body: JSON.stringify(mutation.payload),
+        })
+      }
+      syncedIds.push(mutation.id)
+      removeOfflineMutations(owner, syncedIds)
+      refreshPendingMutations(owner)
+    }
+    return syncedIds.length
+  }
+
+  async function syncPendingNow() {
+    if (!user) return
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      showToast('Sem conexão. Vou sincronizar quando a internet voltar.')
+      return
+    }
+    try {
+      const syncedCount = await syncPendingOfflineChanges(user)
+      setSyncNonce((value) => value + 1)
+      showToast(syncedCount > 0 ? `${syncedCount} alteração${syncedCount === 1 ? '' : 'es'} sincronizada${syncedCount === 1 ? '' : 's'}.` : 'Nenhuma alteração pendente.')
+    } catch (error) {
+      setBackendOnline(false)
+      showToast(error.message || 'Não consegui sincronizar agora.')
+    }
+  }
+
   useEffect(() => {
     const handlePopState = () => setRoute(parsePath())
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setBrowserOnline(true)
+      showToast('Conexão retomada. Sincronizando dados...')
+      setSyncNonce((value) => value + 1)
+    }
+    const handleOffline = () => {
+      setBrowserOnline(false)
+      setBackendOnline(false)
+      showToast('Modo offline ativo. Dados carregados continuam disponíveis.')
+    }
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
+    }
   }, [])
 
   useEffect(() => {
@@ -5971,26 +6580,55 @@ export default function App() {
   }, [user?.id, user?.email])
 
   useEffect(() => {
+    refreshPendingMutations(user)
+  }, [user?.id, user?.email])
+
+  useEffect(() => {
     let cancelled = false
 
     async function loadData() {
+      if (!browserOnline) {
+        const cached = loadOfflineSnapshot(user)
+        if (!cancelled && cached) applyOfflineSnapshot(cached)
+        if (!cancelled) setBackendOnline(false)
+        return
+      }
+
       try {
+        const syncedCount = await syncPendingOfflineChanges(user)
         const contactsPath = user ? `/api/contacts?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
         const duplicatesPath = user ? `/api/merge-suggestions?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
-        const [remoteContacts, remoteProfiles, remoteUsers, remoteDuplicates] = await Promise.all([
+        const groupsPath = user ? `/api/groups?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
+        const [remoteContacts, remoteProfiles, remoteUsers, remoteDuplicates, remoteGroups] = await Promise.all([
           contactsPath ? apiRequest(contactsPath) : Promise.resolve([]),
           apiRequest('/api/public-profiles'),
           apiRequest('/api/users'),
           duplicatesPath ? apiRequest(duplicatesPath) : Promise.resolve([]),
+          groupsPath ? apiRequest(groupsPath) : Promise.resolve([]),
         ])
         if (cancelled) return
+        const localUsers = remoteUsers.map(apiUserToLocal).filter(Boolean)
         setContacts(remoteContacts)
         setPublicProfiles(remoteProfiles)
-        setNetworkUsers(remoteUsers.map(apiUserToLocal).filter(Boolean))
+        setNetworkUsers(localUsers)
         setDuplicateSuggestions(remoteDuplicates)
+        setSharedGroups(remoteGroups)
+        saveOfflineSnapshot(user, {
+          contacts: remoteContacts,
+          publicProfiles: remoteProfiles,
+          networkUsers: localUsers,
+          duplicateSuggestions: remoteDuplicates,
+          sharedGroups: remoteGroups,
+          groupContactsById,
+        })
         setBackendOnline(true)
+        if (syncedCount > 0) showToast(`${syncedCount} alteração${syncedCount === 1 ? '' : 'es'} offline sincronizada${syncedCount === 1 ? '' : 's'}.`)
       } catch {
-        if (!cancelled) setBackendOnline(false)
+        if (!cancelled) {
+          const cached = loadOfflineSnapshot(user)
+          if (cached) applyOfflineSnapshot(cached)
+          setBackendOnline(false)
+        }
       }
     }
 
@@ -5998,7 +6636,21 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [user?.id, user?.email])
+  }, [user?.id, user?.email, browserOnline, syncNonce])
+
+  useEffect(() => {
+    if (!user) return
+    const hasLocalOfflineState = Boolean(loadOfflineSnapshot(user)) || loadOfflineMutations(user).length > 0
+    if (!backendOnline && !hasLocalOfflineState) return
+    saveOfflineSnapshot(user, {
+      contacts,
+      publicProfiles,
+      networkUsers,
+      duplicateSuggestions,
+      sharedGroups,
+      groupContactsById,
+    })
+  }, [user?.id, user?.email, contacts, publicProfiles, networkUsers, duplicateSuggestions, sharedGroups, groupContactsById, backendOnline])
 
   useEffect(() => {
     if (!toast) return undefined
@@ -6090,7 +6742,10 @@ export default function App() {
         body: JSON.stringify(newContact),
       })
       setBackendOnline(true)
-    } catch {
+    } catch (error) {
+      if (isOfflineRequestError(error)) {
+        queueLocalMutation({ type: 'contact:create', payload: newContact }, owner)
+      }
       setBackendOnline(false)
     }
 
@@ -6213,34 +6868,229 @@ export default function App() {
     }
   }
 
+  async function refreshSharedGroups(owner = user) {
+    if (!owner) return []
+    try {
+      const groups = await apiRequest(`/api/groups?user_id=${encodeURIComponent(contactOwnerId(owner))}`)
+      setSharedGroups(groups)
+      setBackendOnline(true)
+      return groups
+    } catch (error) {
+      setBackendOnline(false)
+      showToast(error.message || 'Não foi possível carregar grupos.')
+      return []
+    }
+  }
+
+  async function loadGroupContacts(groupId, owner = user) {
+    if (!owner || !groupId) return []
+    try {
+      const groupContacts = await apiRequest(`/api/groups/${groupId}/contacts?user_id=${encodeURIComponent(contactOwnerId(owner))}`)
+      setGroupContactsById((current) => ({ ...current, [groupId]: groupContacts }))
+      setBackendOnline(true)
+      return groupContacts
+    } catch (error) {
+      setBackendOnline(false)
+      showToast(error.message || 'Não foi possível carregar contatos do grupo.')
+      return []
+    }
+  }
+
+  async function createSharedGroup(payload) {
+    if (!user) return
+    const requestPayload = { ...payload, owner_id: contactOwnerId(user) }
+    try {
+      const group = await apiRequest('/api/groups', {
+        method: 'POST',
+        body: JSON.stringify(requestPayload),
+      })
+      setSharedGroups((current) => [group, ...current.filter((item) => item.id !== group.id)])
+      setBackendOnline(true)
+      showToast('Grupo criado.')
+      return group
+    } catch (error) {
+      setBackendOnline(false)
+      if (isOfflineRequestError(error)) {
+        const tempId = `local-group-${Date.now()}`
+        const createdAt = new Date().toISOString()
+        const optimisticGroup = {
+          id: tempId,
+          owner_id: contactOwnerId(user),
+          name: payload.name?.trim() || 'Novo grupo',
+          description: payload.description?.trim() || '',
+          created_by_email: user.email || '',
+          member_count: 1,
+          contact_count: 0,
+          members: [
+            {
+              id: `local-member-${Date.now()}`,
+              group_id: tempId,
+              user_id: contactOwnerId(user),
+              email: user.email || '',
+              role: 'owner',
+              status: 'active',
+              created_at: createdAt,
+            },
+          ],
+          created_at: createdAt,
+        }
+        queueLocalMutation({ type: 'group:create', clientGroupId: tempId, payload: requestPayload })
+        setSharedGroups((current) => [optimisticGroup, ...current.filter((item) => String(item.id) !== String(tempId))])
+        setGroupContactsById((current) => ({ ...current, [tempId]: current[tempId] ?? [] }))
+        showToast('Grupo salvo offline. Vou sincronizar ao reconectar.')
+        return optimisticGroup
+      }
+      showToast(error.message || 'Não foi possível criar o grupo.')
+      return null
+    }
+  }
+
+  async function updateSharedGroup(groupId, payload) {
+    if (!user || !groupId) return
+    const requestPayload = { ...payload, owner_id: contactOwnerId(user) }
+    try {
+      const group = await apiRequest(`/api/groups/${groupId}`, {
+        method: 'PUT',
+        body: JSON.stringify(requestPayload),
+      })
+      setSharedGroups((current) => current.map((item) => (String(item.id) === String(group.id) ? group : item)))
+      setBackendOnline(true)
+      showToast('Grupo atualizado.')
+      return group
+    } catch (error) {
+      setBackendOnline(false)
+      if (isOfflineRequestError(error)) {
+        queueLocalMutation({ type: 'group:update', groupId, payload: requestPayload })
+        setSharedGroups((current) =>
+          current.map((item) => (String(item.id) === String(groupId) ? { ...item, name: payload.name?.trim() || item.name, description: payload.description?.trim() || '' } : item)),
+        )
+        showToast('Grupo atualizado offline. Vou sincronizar ao reconectar.')
+        return { id: groupId, ...requestPayload }
+      }
+      showToast(error.message || 'Não foi possível salvar o grupo.')
+      return null
+    }
+  }
+
+  async function addSharedGroupMember(groupId, email) {
+    if (!user || !groupId) return
+    const normalizedEmail = email.trim().toLowerCase()
+    const requestPayload = { requester_id: contactOwnerId(user), email: normalizedEmail, role: 'member' }
+    try {
+      await apiRequest(`/api/groups/${groupId}/members`, {
+        method: 'POST',
+        body: JSON.stringify(requestPayload),
+      })
+      await refreshSharedGroups(user)
+      showToast('Membro adicionado.')
+    } catch (error) {
+      setBackendOnline(false)
+      if (isOfflineRequestError(error)) {
+        queueLocalMutation({ type: 'group:member:add', groupId, payload: requestPayload })
+        setSharedGroups((current) =>
+          current.map((group) => {
+            if (String(group.id) !== String(groupId)) return group
+            const members = Array.isArray(group.members) ? group.members : []
+            const exists = members.some((member) => normalize(member.email) === normalize(normalizedEmail))
+            if (exists) return group
+            return {
+              ...group,
+              member_count: Number(group.member_count ?? members.length) + 1,
+              members: [
+                ...members,
+                {
+                  id: `local-member-${Date.now()}`,
+                  group_id: groupId,
+                  user_id: '',
+                  email: normalizedEmail,
+                  role: 'member',
+                  status: 'active',
+                  created_at: new Date().toISOString(),
+                },
+              ],
+            }
+          }),
+        )
+        showToast('Convite salvo offline. Vou sincronizar ao reconectar.')
+        return
+      }
+      showToast(error.message || 'Não foi possível adicionar membro.')
+    }
+  }
+
+  async function addContactToSharedGroup(groupId, contactId) {
+    if (!user || !groupId || !contactId) return
+    const numericContactId = Number(contactId)
+    const requestPayload = { requester_id: contactOwnerId(user), owner_id: contactOwnerId(user), contact_id: numericContactId }
+    try {
+      await apiRequest(`/api/groups/${groupId}/contacts`, {
+        method: 'POST',
+        body: JSON.stringify(requestPayload),
+      })
+      await Promise.all([refreshSharedGroups(user), loadGroupContacts(groupId, user)])
+      showToast('Contato adicionado ao grupo.')
+    } catch (error) {
+      setBackendOnline(false)
+      if (isOfflineRequestError(error)) {
+        const contactToShare = contacts.find((item) => String(item.id) === String(contactId) || String(item.id) === String(numericContactId))
+        queueLocalMutation({ type: 'group:contact:add', groupId, payload: requestPayload })
+        if (contactToShare) {
+          setGroupContactsById((current) => {
+            const existing = current[groupId] ?? []
+            if (existing.some((item) => String(item.id) === String(contactToShare.id))) return current
+            return { ...current, [groupId]: [contactToShare, ...existing] }
+          })
+          setSharedGroups((current) =>
+            current.map((group) =>
+              String(group.id) === String(groupId)
+                ? { ...group, contact_count: Number(group.contact_count ?? 0) + 1 }
+                : group,
+            ),
+          )
+        }
+        showToast('Contato vinculado offline. Vou sincronizar ao reconectar.')
+        return
+      }
+      showToast(error.message || 'Não foi possível adicionar contato ao grupo.')
+    }
+  }
+
   async function ignoreDuplicateSuggestion(suggestion) {
+    const payload = {
+      owner_id: contactOwnerId(user),
+      primary_contact_id: suggestion.primary_contact.id,
+      duplicate_contact_id: suggestion.duplicate_contact.id,
+    }
     try {
       await apiRequest('/api/merge-suggestions/ignore', {
         method: 'POST',
-        body: JSON.stringify({
-          owner_id: contactOwnerId(user),
-          primary_contact_id: suggestion.primary_contact.id,
-          duplicate_contact_id: suggestion.duplicate_contact.id,
-        }),
+        body: JSON.stringify(payload),
       })
       setDuplicateSuggestions((current) => current.filter((item) => item.id !== suggestion.id))
       setBackendOnline(true)
       showToast('Duplicado ignorado.')
-    } catch {
+    } catch (error) {
       setBackendOnline(false)
-      showToast('Não foi possível ignorar este duplicado.')
+      if (isOfflineRequestError(error)) {
+        queueLocalMutation({ type: 'duplicate:ignore', payload })
+        setDuplicateSuggestions((current) => current.filter((item) => item.id !== suggestion.id))
+        showToast('Decisão salva offline. Vou sincronizar ao reconectar.')
+        return
+      }
+      showToast(error.message || 'Não foi possível ignorar este duplicado.')
     }
   }
 
   async function mergeDuplicateSuggestion(suggestion) {
+    const payload = {
+      owner_id: contactOwnerId(user),
+      primary_contact_id: suggestion.primary_contact.id,
+      duplicate_contact_id: suggestion.duplicate_contact.id,
+    }
     try {
       const merged = await apiRequest('/api/merge-suggestions/merge', {
         method: 'POST',
-        body: JSON.stringify({
-          owner_id: contactOwnerId(user),
-          primary_contact_id: suggestion.primary_contact.id,
-          duplicate_contact_id: suggestion.duplicate_contact.id,
-        }),
+        body: JSON.stringify(payload),
       })
       setContacts((current) =>
         current
@@ -6251,9 +7101,16 @@ export default function App() {
       setBackendOnline(true)
       showToast('Contatos mesclados.')
       await refreshDuplicates()
-    } catch {
+    } catch (error) {
       setBackendOnline(false)
-      showToast('Não foi possível mesclar os contatos.')
+      if (isOfflineRequestError(error)) {
+        queueLocalMutation({ type: 'duplicate:merge', payload })
+        setContacts((current) => current.filter((contact) => contact.id !== suggestion.duplicate_contact.id))
+        setDuplicateSuggestions((current) => current.filter((item) => item.id !== suggestion.id))
+        showToast('Mescla salva offline. Vou sincronizar ao reconectar.')
+        return
+      }
+      showToast(error.message || 'Não foi possível mesclar os contatos.')
     }
   }
 
@@ -6309,7 +7166,7 @@ export default function App() {
         {
           id: `assistant-${Date.now()}`,
           role: 'assistant',
-          text: suggestions.length ? `Encontrei ${suggestions.length} contato(s) para revisar.` : 'Nao consegui falar com a API agora, mas nao encontrei pendencias locais.',
+          text: suggestions.length ? `Encontrei ${suggestions.length} contato(s) para revisar.` : 'Não consegui falar com a API agora, mas não encontrei pendências locais.',
           provider: 'local',
           suggestions,
         },
@@ -6473,34 +7330,50 @@ export default function App() {
       crm_note: form.crm_note || '',
     }
 
+    let queuedOffline = false
     try {
       newContact = await apiRequest('/api/contacts', {
         method: 'POST',
         body: JSON.stringify(newContact),
       })
       setBackendOnline(true)
-    } catch {
+    } catch (error) {
       setBackendOnline(false)
+      if (isOfflineRequestError(error)) {
+        queueLocalMutation({ type: 'contact:create', payload: newContact })
+        queuedOffline = true
+      } else {
+        showToast(error.message || 'Não foi possível salvar no banco.')
+        return
+      }
     }
 
     setContacts((current) => [newContact, ...current])
     setNewCount((count) => count + 1)
-    await refreshDuplicates(user)
+    if (!queuedOffline) await refreshDuplicates(user)
     setForm(emptyContactForm)
-    showToast('Contato salvo.')
+    showToast(queuedOffline ? 'Contato salvo offline. Vou sincronizar ao reconectar.' : 'Contato salvo.')
     navigate(ROUTES.AGENDA)
   }
 
   async function deleteContact(id) {
+    let queuedOffline = false
     try {
       await apiRequest(`/api/contacts/${id}?user_id=${encodeURIComponent(contactOwnerId(user))}`, { method: 'DELETE' })
       setBackendOnline(true)
-    } catch {
+    } catch (error) {
       setBackendOnline(false)
+      if (isOfflineRequestError(error)) {
+        queueLocalMutation({ type: 'contact:delete', contactId: id })
+        queuedOffline = true
+      } else {
+        showToast(error.message || 'Não foi possível remover no banco.')
+        return
+      }
     }
     setContacts((prev) => prev.filter((contact) => contact.id !== id))
-    await refreshDuplicates(user)
-    showToast('Contato removido.')
+    if (!queuedOffline) await refreshDuplicates(user)
+    showToast(queuedOffline ? 'Contato removido offline. Vou sincronizar ao reconectar.' : 'Contato removido.')
   }
 
   async function saveEditedContact(nextContact, options = {}) {
@@ -6545,6 +7418,13 @@ export default function App() {
       setBackendOnline(true)
     } catch (error) {
       setBackendOnline(false)
+      if (isOfflineRequestError(error)) {
+        queueLocalMutation({ type: 'contact:update', contactId: nextContact.id, payload })
+        setContacts((current) => current.map((contact) => (contact.id === nextContact.id ? saved : contact)))
+        setEditingContact(null)
+        if (!options.silent) showToast('Alteração salva offline. Vou sincronizar ao reconectar.')
+        return saved
+      }
       if (!options.silent) showToast(error.message || 'Não foi possível salvar no banco.')
       throw error
     }
@@ -6681,6 +7561,7 @@ export default function App() {
 
   async function saveUser(nextUser, pendingContacts = [], options = {}) {
     let savedUser = normalizeUserDraft(nextUser)
+    let queuedOffline = false
     try {
       const response = await apiRequest('/api/users', {
         method: 'POST',
@@ -6690,8 +7571,13 @@ export default function App() {
       setBackendOnline(true)
     } catch (error) {
       setBackendOnline(false)
-      showToast(error.message || 'Não foi possível salvar o perfil no backend.')
-      throw error
+      if (isOfflineRequestError(error)) {
+        queueLocalMutation({ type: 'user:save', payload: userToApiPayload(savedUser) }, savedUser)
+        queuedOffline = true
+      } else {
+        showToast(error.message || 'Não foi possível salvar o perfil no backend.')
+        throw error
+      }
     }
     setUser(savedUser)
     setNetworkUsers((current) => {
@@ -6702,26 +7588,34 @@ export default function App() {
     if (pendingContacts.length) {
       await importContactsForOwner(pendingContacts, savedUser)
     }
-    try {
-      const [remoteProfiles, remoteUsers] = await Promise.all([
-        apiRequest('/api/public-profiles'),
-        apiRequest('/api/users'),
-      ])
-      setPublicProfiles(remoteProfiles)
-      setNetworkUsers(remoteUsers.map(apiUserToLocal).filter(Boolean))
-    } catch {
+    if (!queuedOffline) {
+      try {
+        const [remoteProfiles, remoteUsers] = await Promise.all([
+          apiRequest('/api/public-profiles'),
+          apiRequest('/api/users'),
+        ])
+        setPublicProfiles(remoteProfiles)
+        setNetworkUsers(remoteUsers.map(apiUserToLocal).filter(Boolean))
+      } catch {
+        setNetworkUsers((current) => {
+          const others = current.filter((item) => normalize(item.email) !== normalize(savedUser.email))
+          return [savedUser, ...others]
+        })
+      }
+    } else {
       setNetworkUsers((current) => {
         const others = current.filter((item) => normalize(item.email) !== normalize(savedUser.email))
         return [savedUser, ...others]
       })
     }
-    showToast(options.successMessage ?? 'Cadastro salvo.')
+    showToast(queuedOffline ? 'Perfil salvo offline. Vou sincronizar ao reconectar.' : options.successMessage ?? 'Cadastro salvo.')
     navigate(options.redirectTo ?? (savedUser.publicVisible ? ROUTES.PUBLIC : ROUTES.DASHBOARD))
   }
 
   function logout() {
     void getSupabaseClient()?.auth.signOut()
     setUser(null)
+    setPendingMutations([])
     localStorage.removeItem(AUTH_STORAGE_KEY)
     showToast('Sessão encerrada.')
     navigate(ROUTES.LOGIN)
@@ -6745,6 +7639,18 @@ export default function App() {
       })),
     [publicProfiles],
   )
+  const tagSuggestions = useMemo(() => {
+    const counts = new globalThis.Map()
+    contactsWithCategory.forEach((contact) => {
+      contactTags(contact).forEach((tag) => {
+        counts.set(tag, (counts.get(tag) ?? 0) + 1)
+      })
+    })
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([tag]) => tag)
+      .slice(0, 40)
+  }, [contactsWithCategory])
 
   const inferredCategory = form.service ? classifyService(form.service) : null
   const isAuthRoute = !user && (route.page === 'login' || route.page === 'register')
@@ -6783,11 +7689,26 @@ export default function App() {
   } else if (effectiveRoute.page === 'crm') {
     page = <CrmPage contacts={contactsWithCategory} onEdit={setEditingContact} onCompleteFollowUp={completeFollowUp} onCancelFollowUp={cancelFollowUp} onNavigate={navigate} onAsk={askCopilot} messages={chatMessages} isThinking={isChatThinking} />
   } else if (effectiveRoute.page === 'new') {
-    page = <NewContactPage form={form} updateForm={updateForm} addContact={addContact} inferredCategory={inferredCategory} onNavigate={navigate} />
+    page = <NewContactPage form={form} updateForm={updateForm} addContact={addContact} inferredCategory={inferredCategory} tagSuggestions={tagSuggestions} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'map') {
     page = <MapPage contacts={contactsWithCategory} users={networkUsers} user={user} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'public') {
     page = <PublicNetworkPage publicProfiles={publicProfilesWithCategory} contacts={contactsWithCategory} user={user} onNavigate={navigate} onOpenGroup={setSelectedGroup} />
+  } else if (effectiveRoute.page === 'groups') {
+    page = (
+      <SharedGroupsPage
+        user={user}
+        groups={sharedGroups}
+        contacts={contactsWithCategory}
+        groupContactsById={groupContactsById}
+        onCreateGroup={createSharedGroup}
+        onUpdateGroup={updateSharedGroup}
+        onAddMember={addSharedGroupMember}
+        onAddContact={addContactToSharedGroup}
+        onLoadContacts={loadGroupContacts}
+        onNavigate={navigate}
+      />
+    )
   } else if (effectiveRoute.page === 'chat') {
     page = <ChatPage contacts={contactsWithCategory} messages={chatMessages} onAsk={askCopilot} onApplySuggestion={applyCopilotSuggestion} onNavigate={navigate} isThinking={isChatThinking} />
   } else if (effectiveRoute.page === 'settings') {
@@ -6797,10 +7718,12 @@ export default function App() {
         contacts={contactsWithCategory}
         duplicateCount={duplicateSuggestions.length}
         backendOnline={backendOnline}
+        pendingMutations={pendingMutations}
         recents={recents}
         onNavigate={navigate}
         onRefreshDuplicates={refreshDuplicates}
         onImportGoogleContacts={importGoogleContactsFromSettings}
+        onSyncPending={syncPendingNow}
         onExportContacts={exportContacts}
         onClearRecents={clearRecentSearches}
         onLogout={logout}
@@ -6825,10 +7748,10 @@ export default function App() {
   }
 
   return (
-    <Shell user={user} route={effectiveRoute} online={backendOnline} unread={newCount} onNavigate={navigate} onLogout={logout}>
+    <Shell user={user} route={effectiveRoute} online={backendOnline} unread={newCount} pendingChanges={pendingMutations.length} onSyncPending={syncPendingNow} onNavigate={navigate} onLogout={logout}>
       <Toast message={toast} />
       {page}
-      {editingContact ? <EditContactModal contact={editingContact} onClose={() => setEditingContact(null)} onSave={saveEditedContact} /> : null}
+      {editingContact ? <EditContactModal contact={editingContact} tagSuggestions={tagSuggestions} onClose={() => setEditingContact(null)} onSave={saveEditedContact} /> : null}
       {selectedGroup ? <GroupModal profile={selectedGroup} onClose={() => setSelectedGroup(null)} onToast={showToast} /> : null}
     </Shell>
   )

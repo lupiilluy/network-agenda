@@ -1,19 +1,42 @@
 {
+  "id": "/",
   "name": "Network Agenda",
   "short_name": "Agenda",
   "description": "Agenda inteligente para contatos uteis e networking.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "fullscreen", "minimal-ui"],
   "background_color": "#f3f5f2",
   "theme_color": "#020617",
   "orientation": "portrait-primary",
+  "categories": ["business", "productivity", "social"],
   "icons": [
     {
       "src": "/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Contatos",
+      "short_name": "Contatos",
+      "url": "/agenda",
+      "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+    },
+    {
+      "name": "CRM",
+      "short_name": "CRM",
+      "url": "/crm",
+      "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+    },
+    {
+      "name": "Chat",
+      "short_name": "Chat",
+      "url": "/chat",
+      "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
     }
   ]
 }

@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import database, main
-from app.schemas import AiChatIn, ContactCreate, GoogleLoginIn, UserCreate
+from app.schemas import AiChatIn, ContactCreate, GoogleLoginIn, GroupContactLinkIn, GroupCreate, GroupMemberCreate, UserCreate
 
 
 def contact_payload(**overrides):
@@ -94,6 +94,33 @@ class NetworkAgendaApiTests(unittest.TestCase):
         created = main.create_contact(contact_payload(owner_id="owner-b", name="Bia Souza", phone="11 90000-3333", next_follow_up_at=slot))
 
         self.assertEqual(created["owner_id"], "owner-b")
+
+    def test_contact_structured_tables_are_synced(self):
+        created = main.create_contact(
+            contact_payload(
+                owner_id="owner-a",
+                name="Contato Estruturado",
+                phone="+55 11 98888-7777",
+                email="contato@example.com",
+                tags="limpeza, evento",
+                custom_fields='[{"label":"Origem","value":"Evento ABC"}]',
+            )
+        )
+
+        self.assertEqual(created["ddd"], "11")
+        self.assertEqual([item["phone_digits"] for item in created["phones"]], ["5511988887777"])
+        self.assertEqual(created["emails"][0]["normalized_email"], "contato@example.com")
+        self.assertEqual(created["tag_items"], ["evento", "limpeza"])
+        self.assertEqual(created["custom_field_values"][0]["value"], "Evento ABC")
+
+        with database.get_connection() as connection:
+            phone_rows = connection.execute("SELECT * FROM contact_phones WHERE contact_id = ?", (created["id"],)).fetchall()
+            tag_rows = connection.execute("SELECT * FROM contact_tags WHERE contact_id = ?", (created["id"],)).fetchall()
+            field_rows = connection.execute("SELECT * FROM custom_field_values WHERE contact_id = ?", (created["id"],)).fetchall()
+
+        self.assertEqual(len(phone_rows), 1)
+        self.assertEqual(len(tag_rows), 2)
+        self.assertEqual(len(field_rows), 1)
 
     def test_chat_prepares_follow_up_for_selected_contact(self):
         contact = main.create_contact(contact_payload(owner_id="owner-a", name="Aline Prado", phone="11 90000-2222"))
@@ -190,6 +217,148 @@ class NetworkAgendaApiTests(unittest.TestCase):
             self.assertEqual(response.json()["owner_id"], str(user["id"]))
         finally:
             os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+    def test_admin_can_create_group_and_share_contact(self):
+        admin = main.save_user(
+            UserCreate(
+                name="Grupo Admin",
+                email="grupo-admin@example.com",
+                password="123456",
+                phone="11 96666-1000",
+                google_connected=True,
+                role="admin",
+            )
+        )
+        contact = main.create_contact(contact_payload(owner_id=str(admin["id"]), name="Contato de Grupo", phone="11 96666-2000"))
+
+        group = main.create_shared_group(
+            GroupCreate(
+                owner_id=str(admin["id"]),
+                name="Hub de Teste",
+                description="Grupo compartilhado para testes.",
+            )
+        )
+        member = main.create_group_member(
+            group["id"],
+            GroupMemberCreate(
+                requester_id=str(admin["id"]),
+                email="membro@example.com",
+                role="member",
+            ),
+        )
+        shared_contact = main.create_group_contact(
+            group["id"],
+            GroupContactLinkIn(
+                requester_id=str(admin["id"]),
+                owner_id=str(admin["id"]),
+                contact_id=contact["id"],
+            ),
+        )
+        contacts = main.group_contacts(group["id"], user_id=str(admin["id"]))
+
+        self.assertEqual(group["name"], "Hub de Teste")
+        self.assertEqual(member["email"], "membro@example.com")
+        self.assertEqual(shared_contact["id"], contact["id"])
+        self.assertEqual([item["id"] for item in contacts], [contact["id"]])
+
+    def test_standard_user_can_create_group(self):
+        user = main.google_login(
+            GoogleLoginIn(
+                sub="standard-user-group",
+                email="standard-group@example.com",
+                name="Standard User",
+            )
+        )
+
+        group = main.create_shared_group(
+            GroupCreate(
+                owner_id=str(user["id"]),
+                name="Grupo Aberto",
+                description="Criado por usuário padrão.",
+            )
+        )
+
+        self.assertEqual(group["name"], "Grupo Aberto")
+        self.assertEqual(str(group["owner_id"]), str(user["id"]))
+        self.assertEqual(group["member_count"], 1)
+        self.assertEqual(group["members"][0]["role"], "owner")
+
+    def test_group_owner_can_edit_group(self):
+        user = main.google_login(
+            GoogleLoginIn(
+                sub="group-owner-edit",
+                email="group-owner@example.com",
+                name="Group Owner",
+            )
+        )
+        group = main.create_shared_group(
+            GroupCreate(
+                owner_id=str(user["id"]),
+                name="Grupo Inicial",
+                description="Descricao inicial.",
+            )
+        )
+
+        updated = main.edit_shared_group(
+            group["id"],
+            GroupCreate(
+                owner_id=str(user["id"]),
+                name="Grupo Atualizado",
+                description="Descricao atualizada.",
+            ),
+        )
+
+        self.assertEqual(updated["name"], "Grupo Atualizado")
+        self.assertEqual(updated["description"], "Descricao atualizada.")
+
+    def test_group_member_can_access_but_cannot_manage_contacts(self):
+        admin = main.save_user(
+            UserCreate(
+                name="Admin de Grupo Restrito",
+                email="admin-restrito@example.com",
+                password="123456",
+                phone="11 96666-3000",
+                google_connected=True,
+                role="admin",
+            )
+        )
+        member = main.google_login(
+            GoogleLoginIn(
+                sub="member-group-readonly",
+                email="membro-restrito@example.com",
+                name="Membro Restrito",
+            )
+        )
+        contact = main.create_contact(contact_payload(owner_id=str(member["id"]), name="Contato Privado", phone="11 96666-4000"))
+        group = main.create_shared_group(
+            GroupCreate(
+                owner_id=str(admin["id"]),
+                name="Grupo Somente Admin",
+                description="Membros acessam, mas nao gerenciam contatos.",
+            )
+        )
+        main.create_group_member(
+            group["id"],
+            GroupMemberCreate(
+                requester_id=str(admin["id"]),
+                email=member["email"],
+                role="member",
+            ),
+        )
+
+        contacts = main.group_contacts(group["id"], user_id=str(member["id"]))
+        with self.assertRaises(HTTPException) as raised:
+            main.create_group_contact(
+                group["id"],
+                GroupContactLinkIn(
+                    requester_id=str(member["id"]),
+                    owner_id=str(member["id"]),
+                    contact_id=contact["id"],
+                ),
+            )
+
+        self.assertEqual(contacts, [])
+        self.assertEqual(raised.exception.status_code, 403)
 
 
 if __name__ == "__main__":
