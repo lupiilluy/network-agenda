@@ -155,6 +155,8 @@ class MergeDecisionIn(BaseModel):
 class GroupCreate(BaseModel):
     owner_id: str = Field(default="demo-user", max_length=80)
     name: str = Field(min_length=2, max_length=140)
+    area: str = Field(min_length=2, max_length=160)
+    people_goal: int = Field(ge=3, le=100000)
     description: str | None = Field(default="", max_length=1000)
 
 
@@ -171,6 +173,11 @@ class GroupContactLinkIn(BaseModel):
     contact_id: int
 
 
+class GroupMessageCreate(BaseModel):
+    requester_id: str = Field(default="demo-user", max_length=80)
+    message: str = Field(min_length=1, max_length=2000)
+
+
 class GroupMemberOut(BaseModel):
     id: int
     group_id: int
@@ -185,12 +192,52 @@ class GroupOut(BaseModel):
     id: int
     owner_id: str
     name: str
+    area: str
+    people_goal: int
     description: str
     created_by_email: str
     member_count: int
     contact_count: int
     members: list[GroupMemberOut] = []
     created_at: str
+
+
+class GroupMessageOut(BaseModel):
+    id: int
+    group_id: int
+    sender_id: str
+    sender_name: str
+    sender_email: str
+    message: str
+    created_at: str
+
+
+class CustomFieldDefinitionIn(BaseModel):
+    owner_id: str = Field(default="demo-user", max_length=80)
+    scope_type: str = Field(default="user", max_length=20)
+    scope_id: str | None = Field(default="", max_length=80)
+    name: str = Field(min_length=1, max_length=120)
+    field_key: str | None = Field(default="", max_length=120)
+    field_type: str = Field(default="text_short", max_length=40)
+    options: list[str] = []
+
+
+class CustomFieldDefinitionOut(BaseModel):
+    id: int
+    owner_id: str
+    scope_type: str
+    scope_id: str
+    name: str
+    field_key: str
+    field_type: str
+    options: list[str] = []
+    created_at: str
+
+
+class GroupContactCustomFieldsIn(BaseModel):
+    requester_id: str = Field(default="demo-user", max_length=80)
+    owner_id: str = Field(default="demo-user", max_length=80)
+    custom_field_values: list[dict] = []
 
 
 class UserCreate(BaseModel):
@@ -233,6 +280,7 @@ class UserCreate(BaseModel):
     google_connected: bool = False
     google_contacts_imported_at: str | None = Field(default="", max_length=40)
     google_profile_synced_at: str | None = Field(default="", max_length=40)
+    notification_preference: str | None = Field(default="relevant", max_length=40)
     role: str | None = Field(default="user", max_length=40)
 
 
@@ -276,6 +324,7 @@ class UserOut(BaseModel):
     google_connected: bool = False
     google_contacts_imported_at: str = ""
     google_profile_synced_at: str = ""
+    notification_preference: str = "relevant"
     role: str
 
 

@@ -79,13 +79,54 @@ button {
   color: #f1f5f9;
 }
 
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 212, 255, 0.34) rgba(7, 16, 29, 0.86);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(7, 16, 29, 0.86);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid rgba(7, 16, 29, 0.86);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(0, 212, 255, 0.42), rgba(53, 211, 153, 0.28));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(0, 212, 255, 0.62), rgba(53, 211, 153, 0.42));
+}
+
+::-webkit-scrollbar-corner {
+  background: rgba(7, 16, 29, 0.86);
+}
+
 .thin-scrollbar::-webkit-scrollbar {
   width: 7px;
+  height: 7px;
+}
+
+.thin-scrollbar::-webkit-scrollbar-track {
+  background: rgba(5, 10, 19, 0.72);
+  border-radius: 999px;
 }
 
 .thin-scrollbar::-webkit-scrollbar-thumb {
-  background: #213047;
+  border: 1px solid rgba(5, 10, 19, 0.72);
   border-radius: 999px;
+  background: linear-gradient(180deg, rgba(0, 212, 255, 0.36), rgba(53, 211, 153, 0.24));
+}
+
+.thin-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(0, 212, 255, 0.54), rgba(53, 211, 153, 0.34));
 }
 
 .field-input {

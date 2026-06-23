@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import database, main
-from app.schemas import AiChatIn, ContactCreate, GoogleLoginIn, GroupContactLinkIn, GroupCreate, GroupMemberCreate, UserCreate
+from app.schemas import AiChatIn, ContactCreate, CustomFieldDefinitionIn, GoogleLoginIn, GroupContactCustomFieldsIn, GroupContactLinkIn, GroupCreate, GroupMemberCreate, GroupMessageCreate, UserCreate
 
 
 def contact_payload(**overrides):
@@ -155,6 +155,24 @@ class NetworkAgendaApiTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(profiles), 1)
 
+    def test_public_profile_whatsapp_requires_explicit_public_value(self):
+        user = main.save_user(
+            UserCreate(
+                name="Perfil Sem WhatsApp",
+                email="perfil-sem-whatsapp@example.com",
+                password="123456",
+                phone="11 95555-7777",
+                google_connected=True,
+                public_visible=True,
+                public_description="Perfil publico de teste.",
+                public_solves="Resolve problemas de networking.",
+            )
+        )
+
+        profile = next(item for item in main.public_profiles(query="Perfil Sem WhatsApp") if item["source_user_id"] == user["id"])
+
+        self.assertEqual(profile["whatsapp"], "")
+
     def test_google_login_works_on_sqlite_defaults(self):
         user = main.google_login(
             GoogleLoginIn(
@@ -229,12 +247,14 @@ class NetworkAgendaApiTests(unittest.TestCase):
                 role="admin",
             )
         )
-        contact = main.create_contact(contact_payload(owner_id=str(admin["id"]), name="Contato de Grupo", phone="11 96666-2000"))
+        contact = main.create_contact(contact_payload(owner_id=str(admin["id"]), name="Contato de Grupo", phone="11 96666-2000", tags="Comunidade empresarial"))
 
         group = main.create_shared_group(
             GroupCreate(
                 owner_id=str(admin["id"]),
                 name="Hub de Teste",
+                area="Comunidade empresarial",
+                people_goal=3,
                 description="Grupo compartilhado para testes.",
             )
         )
@@ -255,13 +275,27 @@ class NetworkAgendaApiTests(unittest.TestCase):
             ),
         )
         contacts = main.group_contacts(group["id"], user_id=str(admin["id"]))
+        message = main.create_shared_group_message(
+            group["id"],
+            GroupMessageCreate(requester_id=str(admin["id"]), message="Bem-vindos ao grupo."),
+        )
+        messages = main.group_messages(group["id"], user_id=str(admin["id"]))
+        client = TestClient(main.app)
+        cleared = client.delete(f"/api/groups/{group['id']}/messages?requester_id={admin['id']}")
+        messages_after_clear = main.group_messages(group["id"], user_id=str(admin["id"]))
 
         self.assertEqual(group["name"], "Hub de Teste")
+        self.assertEqual(group["area"], "Comunidade empresarial")
+        self.assertEqual(group["people_goal"], 3)
         self.assertEqual(member["email"], "membro@example.com")
         self.assertEqual(shared_contact["id"], contact["id"])
         self.assertEqual([item["id"] for item in contacts], [contact["id"]])
+        self.assertEqual(message["message"], "Bem-vindos ao grupo.")
+        self.assertEqual([item["message"] for item in messages], ["Bem-vindos ao grupo."])
+        self.assertEqual(cleared.status_code, 204)
+        self.assertEqual(messages_after_clear, [])
 
-    def test_standard_user_can_create_group(self):
+    def test_standard_user_cannot_create_group(self):
         user = main.google_login(
             GoogleLoginIn(
                 sub="standard-user-group",
@@ -270,31 +304,62 @@ class NetworkAgendaApiTests(unittest.TestCase):
             )
         )
 
-        group = main.create_shared_group(
-            GroupCreate(
-                owner_id=str(user["id"]),
-                name="Grupo Aberto",
-                description="Criado por usuário padrão.",
+        with self.assertRaises(HTTPException) as raised:
+            main.create_shared_group(
+                GroupCreate(
+                    owner_id=str(user["id"]),
+                    name="Grupo Aberto",
+                    area="Eventos",
+                    people_goal=3,
+                    description="Criado por usuario padrao.",
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 403)
+
+    def test_group_creation_requires_at_least_three_people(self):
+        admin = main.save_user(
+            UserCreate(
+                name="Admin Grupo Pequeno",
+                email="admin-grupo-pequeno@example.com",
+                password="123456",
+                phone="11 96666-2400",
+                google_connected=True,
+                role="admin",
             )
         )
 
-        self.assertEqual(group["name"], "Grupo Aberto")
-        self.assertEqual(str(group["owner_id"]), str(user["id"]))
-        self.assertEqual(group["member_count"], 1)
-        self.assertEqual(group["members"][0]["role"], "owner")
+        client = TestClient(main.app)
+        response = client.post(
+            "/api/groups",
+            json={
+                "owner_id": str(admin["id"]),
+                "name": "Grupo Pequeno",
+                "area": "Eventos",
+                "people_goal": 2,
+                "description": "Grupo abaixo do mínimo.",
+            },
+        )
 
-    def test_group_owner_can_edit_group(self):
-        user = main.google_login(
-            GoogleLoginIn(
-                sub="group-owner-edit",
-                email="group-owner@example.com",
+        self.assertEqual(response.status_code, 422)
+
+    def test_admin_group_owner_can_edit_group(self):
+        user = main.save_user(
+            UserCreate(
                 name="Group Owner",
+                email="group-owner@example.com",
+                password="123456",
+                phone="11 96666-2500",
+                google_connected=True,
+                role="admin",
             )
         )
         group = main.create_shared_group(
             GroupCreate(
                 owner_id=str(user["id"]),
                 name="Grupo Inicial",
+                area="Networking B2B",
+                people_goal=3,
                 description="Descricao inicial.",
             )
         )
@@ -304,11 +369,15 @@ class NetworkAgendaApiTests(unittest.TestCase):
             GroupCreate(
                 owner_id=str(user["id"]),
                 name="Grupo Atualizado",
+                area="Networking atualizado",
+                people_goal=5,
                 description="Descricao atualizada.",
             ),
         )
 
         self.assertEqual(updated["name"], "Grupo Atualizado")
+        self.assertEqual(updated["area"], "Networking atualizado")
+        self.assertEqual(updated["people_goal"], 5)
         self.assertEqual(updated["description"], "Descricao atualizada.")
 
     def test_group_member_can_access_but_cannot_manage_contacts(self):
@@ -334,6 +403,8 @@ class NetworkAgendaApiTests(unittest.TestCase):
             GroupCreate(
                 owner_id=str(admin["id"]),
                 name="Grupo Somente Admin",
+                area="Comunidade fechada",
+                people_goal=3,
                 description="Membros acessam, mas nao gerenciam contatos.",
             )
         )
@@ -359,6 +430,152 @@ class NetworkAgendaApiTests(unittest.TestCase):
 
         self.assertEqual(contacts, [])
         self.assertEqual(raised.exception.status_code, 403)
+
+    def test_group_contact_must_match_group_area(self):
+        admin = main.save_user(
+            UserCreate(
+                name="Admin Area Grupo",
+                email="admin-area-grupo@example.com",
+                password="123456",
+                phone="11 96666-5100",
+                google_connected=True,
+                role="admin",
+            )
+        )
+        contact = main.create_contact(contact_payload(owner_id=str(admin["id"]), name="Contato Fora da Area", phone="11 96666-5200", tags="Tecnologia"))
+        group = main.create_shared_group(
+            GroupCreate(
+                owner_id=str(admin["id"]),
+                name="Grupo Limpeza",
+                area="Limpeza",
+                people_goal=3,
+                description="Apenas contatos da area de limpeza.",
+            )
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            main.create_group_contact(
+                group["id"],
+                GroupContactLinkIn(
+                    requester_id=str(admin["id"]),
+                    owner_id=str(admin["id"]),
+                    contact_id=contact["id"],
+                ),
+            )
+
+        self.assertEqual(raised.exception.status_code, 422)
+
+    def test_user_custom_field_definition_crud(self):
+        user = main.google_login(
+            GoogleLoginIn(
+                sub="custom-field-user",
+                email="custom-field-user@example.com",
+                name="Campo User",
+            )
+        )
+
+        created = main.create_custom_field(
+            CustomFieldDefinitionIn(
+                owner_id=str(user["id"]),
+                scope_type="user",
+                scope_id="",
+                name="Empresa",
+                field_type="text_short",
+                options=[],
+            )
+        )
+        listed = main.custom_fields(user_id=str(user["id"]), scope_type="user", scope_id="")
+        updated = main.edit_custom_field(
+            created["id"],
+            CustomFieldDefinitionIn(
+                owner_id=str(user["id"]),
+                scope_type="user",
+                scope_id="",
+                name="Empresa atual",
+                field_type="text_long",
+                options=[],
+            ),
+        )
+        main.remove_custom_field(created["id"], requester_id=str(user["id"]))
+        listed_after_delete = main.custom_fields(user_id=str(user["id"]), scope_type="user", scope_id="")
+
+        self.assertEqual(created["name"], "Empresa")
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(updated["name"], "Empresa atual")
+        self.assertEqual(updated["field_type"], "text_long")
+        self.assertEqual(listed_after_delete, [])
+
+    def test_group_custom_fields_can_be_saved_for_shared_contact(self):
+        admin = main.save_user(
+            UserCreate(
+                name="Admin Campo Grupo",
+                email="admin-campo-grupo@example.com",
+                password="123456",
+                phone="11 98888-1000",
+                google_connected=True,
+                role="admin",
+            )
+        )
+        contact = main.create_contact(contact_payload(owner_id=str(admin["id"]), name="Contato Campo Grupo", phone="11 98888-2000", tags="Eventos e stands"))
+        group = main.create_shared_group(
+            GroupCreate(
+                owner_id=str(admin["id"]),
+                name="Grupo Campos",
+                area="Eventos e stands",
+                people_goal=3,
+                description="Grupo para validar campos customizados.",
+            )
+        )
+        main.create_group_contact(
+            group["id"],
+            GroupContactLinkIn(
+                requester_id=str(admin["id"]),
+                owner_id=str(admin["id"]),
+                contact_id=contact["id"],
+            ),
+        )
+        field = main.create_custom_field(
+            CustomFieldDefinitionIn(
+                owner_id=str(admin["id"]),
+                scope_type="group",
+                scope_id=str(group["id"]),
+                name="Stand",
+                field_type="dropdown",
+                options=["A1", "B2"],
+            )
+        )
+
+        updated_contact = main.edit_group_contact_custom_fields(
+            group["id"],
+            contact["id"],
+            GroupContactCustomFieldsIn(
+                requester_id=str(admin["id"]),
+                owner_id=str(admin["id"]),
+                custom_field_values=[
+                    {
+                        "name": "Stand",
+                        "key": field["field_key"],
+                        "field_type": "dropdown",
+                        "scope_type": "group",
+                        "scope_id": str(group["id"]),
+                        "options": ["A1", "B2"],
+                        "value": "A1",
+                    }
+                ],
+            ),
+        )
+
+        group_fields = main.custom_fields(user_id=str(admin["id"]), scope_type="group", scope_id=str(group["id"]))
+
+        self.assertEqual(group_fields[0]["name"], "Stand")
+        self.assertTrue(
+            any(
+                item["scope_type"] == "group"
+                and item["scope_id"] == str(group["id"])
+                and item["value"] == "A1"
+                for item in updated_contact["custom_field_values"]
+            )
+        )
 
 
 if __name__ == "__main__":

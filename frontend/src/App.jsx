@@ -27,6 +27,7 @@ import {
   Menu,
   MessageCircle,
   Navigation,
+  MoreVertical,
   Phone,
   Plus,
   Route,
@@ -78,6 +79,7 @@ const ROUTES = {
   AGENDA: '/agenda',
   MAP: '/mapa',
   PUBLIC: '/rede',
+  FEED: '/feed',
   CHAT: '/chat',
   SETTINGS: '/configuracoes',
   DUPLICATES: '/duplicados',
@@ -86,6 +88,7 @@ const ROUTES = {
   CONTACT: '/contato',
   NEW: '/novo',
   GROUPS: '/grupos',
+  API_DOCS: '/api-docs',
   LOGIN: '/login',
   REGISTER: '/cadastro',
   CONNECTIONS: '/admin/conexoes',
@@ -93,9 +96,25 @@ const ROUTES = {
 
 const CATS = [
   { id: 'home', label: 'Casa', col: '#10b981' },
-  { id: 'legal', label: 'Jurídico', col: '#3b82f6' },
+  { id: 'legal', label: 'Juridico', col: '#3b82f6' },
   { id: 'business', label: 'Negocios', col: '#f59e0b' },
   { id: 'tech', label: 'Tech', col: '#06b6d4' },
+]
+
+const CUSTOM_FIELD_TYPE_OPTIONS = [
+  { id: 'text_short', label: 'Texto curto' },
+  { id: 'text_long', label: 'Texto longo' },
+  { id: 'number', label: 'Número' },
+  { id: 'dropdown', label: 'Dropdown' },
+  { id: 'checkbox', label: 'Checkbox' },
+  { id: 'multiselect', label: 'Multiselect' },
+  { id: 'date', label: 'Data' },
+]
+
+const NOTIFICATION_OPTIONS = [
+  { id: 'relevant', label: 'Relevante', description: 'Pode gerar alerta normal quando houver oportunidade ou ação importante.' },
+  { id: 'low_in_app', label: 'Pouco relevante', description: 'Mostra apenas dentro do app, sem notificação externa.' },
+  { id: 'irrelevant', label: 'Irrelevante', description: 'Silencia eventos que não exigem atenção.' },
 ]
 
 const CONTACTS_SEED = [
@@ -392,6 +411,7 @@ const defaultUser = {
   googleConnected: false,
   googleContactsImportedAt: '',
   googleProfileSyncedAt: '',
+  notificationPreference: 'relevant',
   role: 'user',
 }
 
@@ -436,6 +456,7 @@ const adminUser = {
   googleConnected: false,
   googleContactsImportedAt: '',
   googleProfileSyncedAt: '',
+  notificationPreference: 'relevant',
   role: 'admin',
 }
 
@@ -797,6 +818,125 @@ function serializeCustomFields(fields) {
   return JSON.stringify(fields ?? [])
 }
 
+function customFieldScopeKey(scopeType = 'user', scopeId = '') {
+  return `${scopeType}:${scopeId || ''}`
+}
+
+function customFieldTypeLabel(fieldType) {
+  return CUSTOM_FIELD_TYPE_OPTIONS.find((item) => item.id === fieldType)?.label ?? 'Texto curto'
+}
+
+function customFieldKey(value) {
+  return normalize(value)
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80)
+}
+
+function parseCustomFieldStoredValue(item) {
+  const fieldType = item?.field_type || item?.type || 'text_short'
+  const value = item?.value
+  if (fieldType === 'checkbox') {
+    return value === true || String(value).toLowerCase() === 'true'
+  }
+  if (fieldType === 'multiselect') {
+    if (Array.isArray(value)) return value
+    try {
+      const parsed = JSON.parse(value || '[]')
+      return Array.isArray(parsed) ? parsed.map((entry) => String(entry)) : []
+    } catch {
+      return String(value || '')
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    }
+  }
+  return value ?? ''
+}
+
+function serializeCustomFieldStoredValue(fieldType, value) {
+  if (fieldType === 'checkbox') return Boolean(value)
+  if (fieldType === 'multiselect') return Array.isArray(value) ? value : []
+  if (fieldType === 'number') return value === '' || value === null || value === undefined ? '' : String(value)
+  return value ?? ''
+}
+
+function normalizeCustomFieldValueItem(item, fallback = {}) {
+  const name = String(item?.name || item?.label || fallback.name || '').trim()
+  const fieldType = String(item?.field_type || item?.type || fallback.field_type || 'text_short')
+  const scopeType = String(item?.scope_type || fallback.scope_type || 'user')
+  const scopeId = String(item?.scope_id || fallback.scope_id || '')
+  return {
+    id: item?.id ?? fallback.id ?? '',
+    owner_id: item?.owner_id ?? fallback.owner_id ?? '',
+    name,
+    label: name,
+    key: String(item?.key || item?.field_key || fallback.key || fallback.field_key || customFieldKey(name)),
+    field_type: fieldType,
+    type: fieldType,
+    scope_type: scopeType,
+    scope_id: scopeId,
+    options: Array.isArray(item?.options) ? item.options.map((entry) => String(entry)) : (Array.isArray(fallback.options) ? fallback.options : []),
+    value: parseCustomFieldStoredValue({ ...fallback, ...item, field_type: fieldType }),
+  }
+}
+
+function normalizeCustomFieldDefinition(item, fallback = {}) {
+  const name = String(item?.name || fallback.name || '').trim()
+  const fieldType = String(item?.field_type || fallback.field_type || 'text_short')
+  return {
+    id: item?.id ?? fallback.id ?? '',
+    owner_id: item?.owner_id ?? fallback.owner_id ?? '',
+    name,
+    label: name,
+    key: String(item?.key || item?.field_key || fallback.key || fallback.field_key || customFieldKey(name)),
+    field_type: fieldType,
+    scope_type: String(item?.scope_type || fallback.scope_type || 'user'),
+    scope_id: String(item?.scope_id || fallback.scope_id || ''),
+    options: Array.isArray(item?.options) ? item.options.map((entry) => String(entry)) : [],
+    created_at: item?.created_at || fallback.created_at || '',
+  }
+}
+
+function filterCustomFieldValuesByScope(values, scopeType = 'user', scopeId = '') {
+  return (Array.isArray(values) ? values : [])
+    .map((item) => normalizeCustomFieldValueItem(item, { scope_type: scopeType, scope_id: scopeId }))
+    .filter((item) => String(item.scope_type || 'user') === String(scopeType) && String(item.scope_id || '') === String(scopeId || ''))
+}
+
+function mergeCustomFieldScopeValues(allValues, nextScopedValues, scopeType = 'user', scopeId = '') {
+  const others = (Array.isArray(allValues) ? allValues : [])
+    .map((item) => normalizeCustomFieldValueItem(item))
+    .filter((item) => !(String(item.scope_type || 'user') === String(scopeType) && String(item.scope_id || '') === String(scopeId || '')))
+  return [...others, ...nextScopedValues.map((item) => normalizeCustomFieldValueItem(item, { scope_type: scopeType, scope_id: scopeId }))]
+}
+
+function prepareCustomFieldPayload(values) {
+  return (Array.isArray(values) ? values : [])
+    .map((item) => normalizeCustomFieldValueItem(item))
+    .map((item) => ({
+      id: item.id || undefined,
+      owner_id: item.owner_id || undefined,
+      name: item.name,
+      label: item.name,
+      key: item.key || customFieldKey(item.name),
+      field_key: item.key || customFieldKey(item.name),
+      field_type: item.field_type || 'text_short',
+      scope_type: item.scope_type || 'user',
+      scope_id: item.scope_id || '',
+      options: item.options || [],
+      value: serializeCustomFieldStoredValue(item.field_type, item.value),
+    }))
+    .filter((item) => item.name && !(Array.isArray(item.value) && item.value.length === 0) && item.value !== '')
+}
+
+function customFieldDisplayValue(field) {
+  const normalized = normalizeCustomFieldValueItem(field)
+  if (normalized.field_type === 'checkbox') return normalized.value ? 'Sim' : 'Não'
+  if (normalized.field_type === 'multiselect') return normalized.value.length ? normalized.value.join(', ') : '-'
+  return normalized.value || '-'
+}
+
 function tagList(value) {
   if (Array.isArray(value)) {
     return value
@@ -894,6 +1034,7 @@ function parsePath() {
     [ROUTES.AGENDA]: 'agenda',
     [ROUTES.MAP]: 'map',
     [ROUTES.PUBLIC]: 'public',
+    [ROUTES.FEED]: 'feed',
     [ROUTES.CHAT]: 'chat',
     [ROUTES.SETTINGS]: 'settings',
     [ROUTES.DUPLICATES]: 'duplicates',
@@ -901,6 +1042,7 @@ function parsePath() {
     [ROUTES.PUBLIC_PROFILE]: 'publicProfile',
     [ROUTES.NEW]: 'new',
     [ROUTES.GROUPS]: 'groups',
+    [ROUTES.API_DOCS]: 'apiDocs',
     [ROUTES.LOGIN]: 'login',
     [ROUTES.REGISTER]: 'register',
     [ROUTES.CONNECTIONS]: 'connections',
@@ -1010,6 +1152,7 @@ function normalizeUserDraft(user) {
     googleConnected: Boolean(user?.googleConnected),
     googleContactsImportedAt: user?.googleContactsImportedAt ?? '',
     googleProfileSyncedAt: user?.googleProfileSyncedAt ?? '',
+    notificationPreference: user?.notificationPreference ?? 'relevant',
     role: user?.role ?? 'user',
   }
 }
@@ -1141,6 +1284,7 @@ function userToApiPayload(user) {
     google_connected: normalized.googleConnected,
     google_contacts_imported_at: normalized.googleContactsImportedAt,
     google_profile_synced_at: normalized.googleProfileSyncedAt,
+    notification_preference: normalized.notificationPreference,
     role: normalized.role,
   }
 }
@@ -1188,6 +1332,7 @@ function apiUserToLocal(user) {
     googleConnected: user.google_connected,
     googleContactsImportedAt: user.google_contacts_imported_at,
     googleProfileSyncedAt: user.google_profile_synced_at,
+    notificationPreference: user.notification_preference,
     role: user.role,
   })
 }
@@ -1235,6 +1380,9 @@ function saveOfflineSnapshot(owner, payload) {
     duplicateSuggestions: payload.duplicateSuggestions ?? [],
     sharedGroups: payload.sharedGroups ?? [],
     groupContactsById: payload.groupContactsById ?? {},
+    groupMessagesById: payload.groupMessagesById ?? {},
+    customFieldDefinitions: payload.customFieldDefinitions ?? [],
+    groupCustomFieldsById: payload.groupCustomFieldsById ?? {},
     cachedAt: new Date().toISOString(),
   }
   writeStorageJson(OFFLINE_DATA_STORAGE_KEY, snapshots)
@@ -1251,6 +1399,13 @@ function saveOfflineMutations(owner, mutations) {
   const allMutations = readStorageJson(OFFLINE_MUTATION_STORAGE_KEY, {})
   allMutations[ownerKey] = mutations
   writeStorageJson(OFFLINE_MUTATION_STORAGE_KEY, allMutations)
+}
+
+function updateOfflineMutations(owner, updater) {
+  const current = loadOfflineMutations(owner)
+  const next = updater(current)
+  saveOfflineMutations(owner, next)
+  return next
 }
 
 function queueOfflineMutation(owner, mutation) {
@@ -1289,6 +1444,12 @@ function offlineMutationTitle(mutation) {
     'user:save': 'Salvar perfil',
     'duplicate:ignore': 'Ignorar duplicado',
     'duplicate:merge': 'Mesclar duplicado',
+    'group:create': 'Criar grupo',
+    'group:update': 'Atualizar grupo',
+    'group:member:add': 'Adicionar membro ao grupo',
+    'group:member:remove': 'Remover membro do grupo',
+    'group:contact:add': 'Adicionar contato ao grupo',
+    'group:contact:remove': 'Remover contato do grupo',
   }
   return titles[mutation.type] || 'Sincronizar alteração'
 }
@@ -1505,19 +1666,21 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
   const isAdmin = user?.role === 'admin'
   const isAuthPage = !user && (route.page === 'login' || route.page === 'register')
   const primaryTabs = [
+    { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: LayoutGrid, page: 'dashboard' },
     { label: 'Agenda', path: ROUTES.AGENDA, icon: ContactRound, page: 'agenda' },
+    { label: 'Feed', path: ROUTES.FEED, icon: Bell, page: 'feed' },
+    { label: 'Grupos', path: ROUTES.GROUPS, icon: UsersRound, page: 'groups' },
+  ]
+  const menuTabs = [
+    { label: 'Novo contato', path: ROUTES.NEW, icon: Plus, page: 'new' },
     { label: 'CRM', path: ROUTES.CRM, icon: Activity, page: 'crm' },
     { label: 'Mapa', path: ROUTES.MAP, icon: Map, page: 'map' },
     { label: 'Chat', path: ROUTES.CHAT, icon: MessageCircle, page: 'chat' },
-  ]
-  const menuTabs = [
-    { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: LayoutGrid, page: 'dashboard' },
-    { label: 'Novo contato', path: ROUTES.NEW, icon: Plus, page: 'new' },
     { label: 'Rede pública', path: ROUTES.PUBLIC, icon: Compass, page: 'public' },
-    { label: 'Grupos', path: ROUTES.GROUPS, icon: UsersRound, page: 'groups' },
     { label: 'Duplicados', path: ROUTES.DUPLICATES, icon: CheckCircle, page: 'duplicates' },
     { label: 'Perfil', path: ROUTES.REGISTER, icon: UserRound, page: 'register' },
     { label: 'Perfil público', path: ROUTES.PUBLIC_PROFILE, icon: UsersRound, page: 'publicProfile' },
+    { label: 'API docs', path: ROUTES.API_DOCS, icon: Route, page: 'apiDocs' },
     { label: 'Config.', path: ROUTES.SETTINGS, icon: SlidersHorizontal, page: 'settings' },
   ]
 
@@ -1542,19 +1705,63 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
   }
 
   const sidebarPrimary = [
-    { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: LayoutGrid, page: 'dashboard' },
     ...primaryTabs,
+    { label: 'CRM', path: ROUTES.CRM, icon: Activity, page: 'crm' },
+    { label: 'Mapa', path: ROUTES.MAP, icon: Map, page: 'map' },
+    { label: 'Chat', path: ROUTES.CHAT, icon: MessageCircle, page: 'chat' },
     { label: 'Rede pública', path: ROUTES.PUBLIC, icon: Compass, page: 'public' },
-    { label: 'Grupos', path: ROUTES.GROUPS, icon: UsersRound, page: 'groups' },
   ]
   const sidebarSecondary = [
     { label: 'Novo contato', path: ROUTES.NEW, icon: Plus, page: 'new' },
     { label: 'Duplicados', path: ROUTES.DUPLICATES, icon: CheckCircle, page: 'duplicates' },
     { label: 'Perfil', path: ROUTES.REGISTER, icon: UserRound, page: 'register' },
     { label: 'Perfil público', path: ROUTES.PUBLIC_PROFILE, icon: UsersRound, page: 'publicProfile' },
+    { label: 'API docs', path: ROUTES.API_DOCS, icon: Route, page: 'apiDocs' },
     { label: 'Configurações', path: ROUTES.SETTINGS, icon: SlidersHorizontal, page: 'settings' },
     ...(isAdmin ? [{ label: 'Conexões', path: ROUTES.CONNECTIONS, icon: ShieldCheck, page: 'connections' }] : []),
   ]
+  const mobileTabs = [
+    { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: LayoutGrid, page: 'dashboard' },
+    { label: 'Agenda', path: ROUTES.AGENDA, icon: ContactRound, page: 'agenda' },
+    { label: 'Feed', path: ROUTES.FEED, icon: Bell, page: 'feed' },
+    { label: 'Grupos', path: ROUTES.GROUPS, icon: UsersRound, page: 'groups' },
+  ]
+  const menuSections = [
+    {
+      title: 'Operação',
+      items: [
+        { label: 'Novo contato', path: ROUTES.NEW, icon: Plus, page: 'new', hint: 'Importar ou cadastrar' },
+        { label: 'CRM', path: ROUTES.CRM, icon: Activity, page: 'crm', hint: 'Pipeline e follow-up' },
+        { label: 'Mapa', path: ROUTES.MAP, icon: Map, page: 'map', hint: 'Grafo privado' },
+        { label: 'Chat', path: ROUTES.CHAT, icon: MessageCircle, page: 'chat', hint: 'Copiloto' },
+      ],
+    },
+    {
+      title: 'Rede',
+      items: [
+        { label: 'Feed', path: ROUTES.FEED, icon: Bell, page: 'feed', hint: 'Mural público' },
+        { label: 'Rede pública', path: ROUTES.PUBLIC, icon: Compass, page: 'public', hint: 'Explorar perfis' },
+        { label: 'Grupos', path: ROUTES.GROUPS, icon: UsersRound, page: 'groups', hint: 'Rede privada' },
+        { label: 'Duplicados', path: ROUTES.DUPLICATES, icon: CheckCircle, page: 'duplicates', hint: 'Mesclar com revisão' },
+      ],
+    },
+    {
+      title: 'Conta',
+      items: [
+        { label: 'Perfil', path: ROUTES.REGISTER, icon: UserRound, page: 'register', hint: 'Dados da conta' },
+        { label: 'Perfil público', path: ROUTES.PUBLIC_PROFILE, icon: UsersRound, page: 'publicProfile', hint: 'Visibilidade' },
+        { label: 'API docs', path: ROUTES.API_DOCS, icon: Route, page: 'apiDocs', hint: 'Swagger/OpenAPI' },
+        { label: 'Configurações', path: ROUTES.SETTINGS, icon: SlidersHorizontal, page: 'settings', hint: 'Preferências' },
+      ],
+    },
+    ...(isAdmin ? [{
+      title: 'Admin',
+      items: [
+        { label: 'Conexões', path: ROUTES.CONNECTIONS, icon: ShieldCheck, page: 'connections', hint: 'Admin global' },
+      ],
+    }] : []),
+  ]
+  const flatMenuTabs = menuSections.flatMap((section) => section.items)
   const desktopLinkClass = (page) => [
     'sidebar-link flex h-11 items-center gap-3 rounded-lg px-3 text-sm font-black',
     activePage === page || (page === 'settings' && menuActive) ? 'sidebar-link-active' : '',
@@ -1562,7 +1769,7 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
 
   return (
     <div className="app-shell">
-      <aside className="desktop-sidebar fixed bottom-4 left-4 top-4 z-40 hidden w-64 flex-col rounded-xl p-3 lg:flex">
+      <aside className="desktop-sidebar fixed bottom-4 left-4 top-4 z-40 hidden w-64 flex-col overflow-y-auto rounded-xl p-3 lg:flex">
         <button type="button" onClick={() => onNavigate(ROUTES.DASHBOARD)} className="flex min-w-0 items-center gap-3 rounded-lg px-2 py-2 text-left">
           <span className="brand-mark flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
             <Zap size={20} />
@@ -1627,7 +1834,7 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
 
       <div className="min-h-screen lg:pl-[18rem]">
         <header className="app-header sticky top-0 z-40 lg:hidden">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-3 px-4 sm:h-16 sm:px-6">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 px-3 sm:h-16 sm:gap-3 sm:px-6">
           <button type="button" onClick={() => onNavigate(ROUTES.DASHBOARD)} className="flex min-w-0 items-center gap-2">
             <span className="brand-mark flex h-9 w-9 shrink-0 items-center justify-center rounded-lg">
               <Zap size={19} />
@@ -1666,7 +1873,7 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
               </button>
               {menuOpen ? (
                 <div className="glass-panel absolute right-0 top-12 z-50 w-56 overflow-hidden rounded-lg p-1.5">
-                  {menuTabs.map((tab) => (
+                  {flatMenuTabs.map((tab) => (
                     <button
                       key={tab.path}
                       type="button"
@@ -1682,7 +1889,7 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
             </div>
           </nav>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2">
             <span className="glass-panel-soft hidden items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-400 sm:inline-flex">
               <Circle size={9} className={online ? 'fill-emerald-500 text-emerald-500' : 'fill-slate-300 text-slate-300'} />
               {online ? 'online' : 'offline'}
@@ -1700,13 +1907,14 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
             <button
               type="button"
               onClick={() => onNavigate(user ? ROUTES.SETTINGS : ROUTES.LOGIN)}
-              className="secondary-button hidden h-10 items-center gap-2 rounded-lg px-2.5 text-sm font-bold sm:inline-flex"
+              className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-2.5 text-sm font-bold"
+              aria-label={user ? 'Conta' : 'Entrar'}
             >
               <span className="flex h-7 w-7 items-center justify-center rounded-md bg-cyan-500/10 text-xs font-black text-cyan-200">{initials(user?.name ?? 'EU')}</span>
-              {user?.name ?? 'Entrar'}
+              <span className="hidden sm:inline">{user?.name ?? 'Entrar'}</span>
             </button>
             {user ? (
-              <button type="button" onClick={onLogout} className="secondary-button hidden rounded-lg p-2 text-slate-400 sm:inline-flex" aria-label="Sair">
+              <button type="button" onClick={onLogout} className="secondary-button inline-flex h-10 w-10 items-center justify-center rounded-lg p-2 text-slate-400" aria-label="Sair">
                 <LogOut size={18} />
               </button>
             ) : null}
@@ -1728,6 +1936,22 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
                   {pendingChanges} pendente{pendingChanges === 1 ? '' : 's'}
                 </button>
               ) : null}
+              {user ? (
+                <button type="button" onClick={() => onNavigate(ROUTES.PUBLIC_PROFILE)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+                  <UsersRound size={16} />
+                  Perfil público
+                </button>
+              ) : null}
+              <button type="button" onClick={() => onNavigate(user ? ROUTES.SETTINGS : ROUTES.LOGIN)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+                <UserRound size={16} />
+                {user ? 'Conta' : 'Entrar'}
+              </button>
+              {user ? (
+                <button type="button" onClick={onLogout} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black text-rose-200">
+                  <LogOut size={16} />
+                  Sair
+                </button>
+              ) : null}
               <button type="button" onClick={() => onNavigate(ROUTES.CHAT)} className="primary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
                 <Sparkles size={16} />
                 Copiloto
@@ -1741,24 +1965,98 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
       {!isAuthPage ? (
         <>
           {menuOpen ? (
-            <div className="glass-panel fixed inset-x-3 bottom-20 z-50 overflow-hidden rounded-lg p-2 md:hidden">
-              <div className="grid grid-cols-2 gap-2">
-                {menuTabs.map((tab) => (
+            <>
+              <button
+                type="button"
+                aria-label="Fechar menu"
+                onClick={() => setMenuOpen(false)}
+                className="fixed inset-0 z-40 bg-slate-950/70 backdrop-blur-[2px] md:hidden"
+              />
+              <div className="glass-panel fixed inset-x-3 bottom-20 z-50 max-h-[70vh] overflow-y-auto rounded-xl p-3 md:hidden">
+                <div className="mb-3 flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-black uppercase tracking-[0.26em] text-cyan-200">Menu</p>
+                    <p className="mt-1 truncate text-sm font-black text-slate-100">{user?.name ?? 'Conta local'}</p>
+                    <p className="truncate text-xs font-semibold text-slate-500">{user?.email ?? 'Acesse configurações e navegação rápida'}</p>
+                  </div>
                   <button
-                    key={tab.path}
                     type="button"
-                    onClick={() => go(tab.path)}
-                    className="action-card flex h-12 min-w-0 items-center gap-2 rounded-lg px-3 text-left text-xs font-black text-slate-300"
+                    onClick={() => setMenuOpen(false)}
+                    className="secondary-button inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-400"
+                    aria-label="Fechar menu"
                   >
-                    <tab.icon size={17} className="shrink-0 text-cyan-300" />
-                    <span className="truncate">{tab.label}</span>
+                    <X size={18} />
                   </button>
-                ))}
+                </div>
+
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <span className="glass-panel-soft inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-400">
+                    <Circle size={9} className={online ? 'fill-emerald-500 text-emerald-500' : 'fill-slate-300 text-slate-300'} />
+                    {online ? 'online' : 'offline'}
+                  </span>
+                  {pendingChanges > 0 ? (
+                    <button type="button" onClick={onSyncPending} className="inline-flex h-8 items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-2.5 text-xs font-black text-amber-200">
+                      <Cloud size={14} />
+                      {pendingChanges} pendente{pendingChanges === 1 ? '' : 's'}
+                    </button>
+                  ) : null}
+                </div>
+
+                <div className="grid gap-3">
+                  {menuSections.map((section) => (
+                    <section key={section.title} className="rounded-lg border border-slate-800/70 bg-slate-950/25 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <p className="text-[10px] font-black uppercase tracking-[0.22em] text-cyan-200">{section.title}</p>
+                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-600">{section.items.length}</span>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {section.items.map((tab) => (
+                          <button
+                            key={tab.path}
+                            type="button"
+                            onClick={() => go(tab.path)}
+                            className="action-card flex min-h-14 min-w-0 items-start gap-2 rounded-lg px-3 py-3 text-left text-xs font-black text-slate-300"
+                          >
+                            <tab.icon size={17} className="mt-0.5 shrink-0 text-cyan-300" />
+                            <span className="min-w-0">
+                              <span className="block truncate">{tab.label}</span>
+                              <span className="mt-0.5 block truncate text-[10px] font-semibold text-slate-500">{tab.hint}</span>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+
+                <div className={`mt-3 grid gap-2 ${user ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                  <button
+                    type="button"
+                    onClick={() => go(user ? ROUTES.SETTINGS : ROUTES.LOGIN)}
+                    className="secondary-button inline-flex h-11 items-center justify-center gap-2 rounded-lg px-3 text-sm font-black"
+                  >
+                    <UserRound size={16} />
+                    {user ? 'Conta' : 'Entrar'}
+                  </button>
+                  {user ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false)
+                        onLogout()
+                      }}
+                      className="secondary-button inline-flex h-11 items-center justify-center gap-2 rounded-lg px-3 text-sm font-black text-rose-200"
+                    >
+                      <LogOut size={16} />
+                      Sair
+                    </button>
+                  ) : null}
+                </div>
               </div>
-            </div>
+            </>
           ) : null}
           <nav className="glass-panel fixed inset-x-3 bottom-3 z-40 grid grid-cols-5 rounded-lg p-1.5 md:hidden">
-            {primaryTabs.map((tab) => (
+            {mobileTabs.map((tab) => (
               <button
                 key={tab.path}
                 type="button"
@@ -1779,10 +2077,10 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
                 'flex h-12 min-w-0 flex-col items-center justify-center gap-0.5 rounded-lg text-[11px] font-bold transition',
                 menuActive ? 'nav-pill-active' : 'text-slate-400',
               ].join(' ')}
-            >
-              <Menu size={18} />
-              Menu
-            </button>
+              >
+                <Menu size={18} />
+                Menu
+              </button>
           </nav>
         </>
       ) : null}
@@ -2490,6 +2788,8 @@ function DashboardPage({ contacts, duplicateCount, backendOnline, onNavigate, on
               <DashboardAction icon={CheckCircle} title="Revisar duplicados" description={`${duplicateCount} sugest${duplicateCount === 1 ? 'ão' : 'ões'} para aprovar ou ignorar.`} onClick={() => onNavigate(ROUTES.DUPLICATES)} />
               <DashboardAction icon={Upload} title="Importar contatos" description="Google, CSV ou cadastro manual." onClick={() => onNavigate(ROUTES.SETTINGS)} />
               <DashboardAction icon={MapPin} title="Ver mapa" description="Localização, DDD e proximidade." onClick={() => onNavigate(ROUTES.MAP)} />
+              <DashboardAction icon={Bell} title="Abrir feed" description="Mural público e interação por oferta e demanda." onClick={() => onNavigate(ROUTES.FEED)} />
+              <DashboardAction icon={UsersRound} title="Ver grupos" description="Chat, grafo e dados do grupo separados." onClick={() => onNavigate(ROUTES.GROUPS)} />
             </div>
           </div>
 
@@ -2721,7 +3021,7 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
   const ddd = contact.ddd || phones.find((item) => item.ddd)?.ddd || extractDdd(contact.phone)
   const fields = contact.custom_field_values?.length ? contact.custom_field_values : parseCustomFields(contact.custom_fields)
   const socialLinks = [
-    { label: 'WhatsApp', value: contact.whatsapp || contact.phone, icon: MessageCircle, href: formatPhoneForLink(contact.whatsapp || contact.phone) ? `https://wa.me/55${formatPhoneForLink(contact.whatsapp || contact.phone)}` : '' },
+    { label: 'WhatsApp', value: contact.whatsapp, icon: MessageCircle, href: formatPhoneForLink(contact.whatsapp) ? `https://wa.me/55${formatPhoneForLink(contact.whatsapp)}` : '' },
     { label: 'Instagram', value: contact.instagram, icon: ContactRound, href: contact.instagram ? `https://instagram.com/${String(contact.instagram).replace('@', '').replace(/^https?:\/\/(www\.)?instagram\.com\//, '')}` : '' },
     { label: 'LinkedIn', value: contact.linkedin, icon: Briefcase, href: contact.linkedin },
     { label: 'Site', value: contact.custom_url, icon: Compass, href: contact.custom_url },
@@ -2775,8 +3075,13 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
             <div className="mt-3 grid gap-2">
               {fields.length ? fields.filter((field) => field.label || field.value).map((field, index) => (
                 <div key={index} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
-                  <p className="text-xs font-black uppercase tracking-widest text-slate-500">{field.label || 'Campo'}</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-200">{field.value || '-'}</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-black uppercase tracking-widest text-slate-500">{field.label || field.name || 'Campo'}</p>
+                    <span className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                      {field.scope_type === 'group' ? `Grupo ${field.scope_id}` : 'Agenda'}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-sm font-semibold text-slate-200">{customFieldDisplayValue(field)}</p>
                 </div>
               )) : <p className="text-sm font-semibold text-slate-500">Nenhum campo personalizado.</p>}
             </div>
@@ -2902,6 +3207,7 @@ function GoogleRequiredPanel({ title, description, onNavigate }) {
 function PublicNetworkPage({ publicProfiles, contacts, user, onNavigate, onOpenGroup }) {
   const [query, setQuery] = useState('')
   const currentUserId = String(user?.id ?? '')
+  const publicGraphItems = useMemo(() => buildPublicGraphRecords({ publicProfiles, contacts }), [publicProfiles, contacts])
   const people = publicProfiles.filter((profile) => (profile.kind ?? 'group') === 'person')
   const groups = publicProfiles.filter((profile) => (profile.kind ?? 'group') !== 'person')
   const visiblePeople = people.filter((profile) => matchText(query, [profile.name, profile.service, profile.area, profile.description, profile.demand, profile.solves, profile.tags]))
@@ -2953,6 +3259,23 @@ function PublicNetworkPage({ publicProfiles, contacts, user, onNavigate, onOpenG
         </div>
       ) : null}
 
+      <GraphWorkspace
+        contextLabel="Grafo público"
+        title="Rede visível em grafo"
+        description="Cruze perfis públicos, serviços e vínculos com a sua agenda para encontrar oportunidades e complementaridades."
+        items={publicGraphItems}
+        emptyLabel="Nenhum perfil público encontrado para os filtros atuais."
+        onOpenItem={(item) => {
+          if (item.actionKind === 'contact' && item.contactId) {
+            onNavigate(`${ROUTES.CONTACT}/${item.contactId}`)
+            return
+          }
+          if (item.actionKind === 'service') {
+            onOpenGroup(item.raw)
+          }
+        }}
+      />
+
       <section>
         <div className="mb-3 flex items-center justify-between gap-3">
           <h2 className="text-base font-black text-slate-100">Pessoas</h2>
@@ -2989,6 +3312,80 @@ function PublicNetworkPage({ publicProfiles, contacts, user, onNavigate, onOpenG
   )
 }
 
+function FeedPage({ publicProfiles, user, onNavigate }) {
+  const visiblePeople = publicProfiles.filter((profile) => (profile.kind ?? 'group') === 'person')
+  const posts = (visiblePeople.length ? visiblePeople : publicProfiles).slice(0, 8).map((profile, index) => ({
+    id: `${profile.kind || 'profile'}-${profile.id}`,
+    author: profile.name,
+    role: profile.service || profile.category?.label || 'Perfil da rede',
+    text: profile.solves
+      ? `Disponível para ajudar com: ${profile.solves}`
+      : profile.demand
+        ? `Buscando conexão para: ${profile.demand}`
+        : `Perfil aberto para networking em ${profile.area || 'rede ampla'}.`,
+    tag: profile.tags || profile.category?.label || profile.area || 'networking',
+    response: profile.response || `${12 + index * 7} min`,
+  }))
+
+  return (
+    <div className="space-y-4">
+      <PageTitle
+        eyebrow="Feed"
+        title="Mural público de oportunidades"
+        description="Área separada dos grupos: publicações, comentários e interações ficam ligadas ao prestador e ao contratante, como um feed profissional."
+        action={<button type="button" onClick={() => onNavigate(ROUTES.PUBLIC)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black"><Compass size={17} />Explorar rede</button>}
+      />
+
+      <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="space-y-3">
+          {posts.length ? posts.map((post) => (
+            <article key={post.id} className="glass-panel rounded-xl p-4">
+              <div className="flex items-start gap-3">
+                <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-cyan-500 text-sm font-black text-slate-950">{initials(post.author)}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h2 className="text-base font-black text-slate-100">{post.author}</h2>
+                      <p className="text-xs font-semibold text-slate-500">{post.role}</p>
+                    </div>
+                    <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-cyan-200">mural</span>
+                  </div>
+                  <p className="mt-3 text-sm font-medium leading-6 text-slate-300">{post.text}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <span className="rounded-full bg-slate-950 px-2 py-1 text-xs font-bold text-slate-400">{post.tag}</span>
+                    <span className="rounded-full bg-slate-950 px-2 py-1 text-xs font-bold text-slate-400">resposta {post.response}</span>
+                  </div>
+                  <div className="mt-4 grid gap-2 sm:grid-cols-3">
+                    <button type="button" className="secondary-button h-10 rounded-lg text-sm font-black">Comentar</button>
+                    <button type="button" className="secondary-button h-10 rounded-lg text-sm font-black">Tenho demanda</button>
+                    <button type="button" className="primary-button h-10 rounded-lg text-sm font-black">Contratar / conversar</button>
+                  </div>
+                </div>
+              </div>
+            </article>
+          )) : (
+            <section className="glass-panel rounded-lg p-8 text-center">
+              <Bell className="mx-auto text-cyan-300" size={34} />
+              <h2 className="mt-3 text-lg font-black text-slate-100">Sem posts públicos ainda</h2>
+              <p className="mt-1 text-sm font-semibold text-slate-500">Ative seu perfil público para alimentar o feed com ofertas e demandas.</p>
+            </section>
+          )}
+        </div>
+        <aside className="glass-panel h-max rounded-xl p-4">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Regras do feed</p>
+          <h2 className="mt-1 text-base font-black text-slate-100">Interação por relação de serviço</h2>
+          <p className="mt-2 text-sm font-semibold leading-6 text-slate-500">
+            Comentários, posts e mural pertencem à camada pública. A conversa operacional deve ficar restrita a quem oferece o serviço e quem demonstrou contratação/demanda.
+          </p>
+          <button type="button" onClick={() => onNavigate(ROUTES.PUBLIC_PROFILE)} className="secondary-button mt-4 h-10 w-full rounded-lg text-sm font-black">
+            Configurar perfil público
+          </button>
+        </aside>
+      </section>
+    </div>
+  )
+}
+
 function PublicPersonCard({ profile, contacts, currentUserId }) {
   const category = profile.category ?? categoryDetails(null, profile.service)
   const tags = tagList(profile.tags)
@@ -2999,7 +3396,7 @@ function PublicPersonCard({ profile, contacts, currentUserId }) {
   })
   const isMe = String(profile.source_user_id ?? profile.id) === currentUserId
   const links = [
-    { label: 'WhatsApp', icon: MessageCircle, href: formatPhoneForLink(profile.whatsapp || profile.phone) ? `https://wa.me/55${formatPhoneForLink(profile.whatsapp || profile.phone)}` : '' },
+    { label: 'WhatsApp', icon: MessageCircle, href: formatPhoneForLink(profile.whatsapp) ? `https://wa.me/55${formatPhoneForLink(profile.whatsapp)}` : '' },
     { label: 'Instagram', icon: ContactRound, href: profile.instagram ? `https://instagram.com/${String(profile.instagram).replace('@', '').replace(/^https?:\/\/(www\.)?instagram\.com\//, '')}` : '' },
     { label: 'LinkedIn', icon: Briefcase, href: profile.linkedin },
     { label: 'Site', icon: Compass, href: profile.custom_url },
@@ -3063,6 +3460,483 @@ function PublicProfileText({ label, value }) {
       <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</p>
       <p className="mt-1 line-clamp-3 text-sm font-medium leading-5 text-slate-300">{value}</p>
     </div>
+  )
+}
+
+function contactMatchesProfile(contact, profile) {
+  const samePhone = formatPhoneForLink(contact?.phone || contact?.whatsapp) && formatPhoneForLink(contact?.phone || contact?.whatsapp) === formatPhoneForLink(profile?.phone || profile?.whatsapp)
+  const sameEmail = contact?.email && profile?.email && normalize(contact.email) === normalize(profile.email)
+  return samePhone || sameEmail
+}
+
+function contactMatchesUser(contact, profile) {
+  const samePhone = formatPhoneForLink(contact?.phone || contact?.whatsapp) && formatPhoneForLink(contact?.phone || contact?.whatsapp) === formatPhoneForLink(profile?.phone)
+  const sameEmail = contact?.email && profile?.email && normalize(contact.email) === normalize(profile.email)
+  return samePhone || sameEmail
+}
+
+function contactMatchesGroupArea(contact, group) {
+  const area = normalize(group?.area || '')
+  if (!area) return true
+  const areaTerms = String(group?.area || '').split(/[,;|/]+/).map((item) => normalize(item).trim()).filter(Boolean)
+  const contactText = normalize([
+    contact?.name,
+    contact?.service,
+    contact?.description,
+    contact?.demand,
+    contact?.solves,
+    contact?.tags,
+    contact?.note,
+    contact?.category?.label,
+    contact?.category?.group,
+    ...(Array.isArray(contact?.tag_items) ? contact.tag_items : []),
+  ].filter(Boolean).join(' '))
+  return contactText.includes(area) || areaTerms.some((term) => contactText.includes(term))
+}
+
+function uniqueTextOptions(values) {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'pt-BR'))
+}
+
+function graphRecordLabel(record) {
+  return [record.name, record.service, record.city].filter(Boolean).join(' · ')
+}
+
+function graphPositionFromCoords(coords, originCoords = null, scale = 8) {
+  if (!coords) return null
+  if (originCoords) {
+    return {
+      x: (coords.lng - originCoords.lng) * 450,
+      y: (originCoords.lat - coords.lat) * 450,
+    }
+  }
+  return {
+    x: coords.lng * scale,
+    y: -coords.lat * scale,
+  }
+}
+
+function graphLocationCoords(person, fallbackAddress = '') {
+  const location = resolveMapLocation(person, fallbackAddress)
+  const coords = location.coords || findFallbackCoordinate(location.query)
+  return {
+    ...location,
+    coords,
+  }
+}
+
+function buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser, groups, groupContactsById }) {
+  const currentEmail = normalize(currentUser?.email)
+  const currentPhone = formatPhoneForLink(currentUser?.phone)
+  const groupIndex = new globalThis.Map()
+
+  groups.forEach((group) => {
+    const groupContacts = groupContactsById[group.id] ?? []
+    groupContacts.forEach((contact) => {
+      const key = `${contact.owner_id}:${contact.id}`
+      const current = groupIndex.get(key) ?? []
+      current.push({ id: String(group.id), name: group.name })
+      groupIndex.set(key, current)
+    })
+  })
+
+  return contacts.map((contact) => {
+    const publicMatch = publicProfiles.find((profile) => (profile.kind ?? 'group') === 'person' && contactMatchesProfile(contact, profile))
+    const userMatch = users.find((profile) => normalize(profile.email) !== currentEmail && formatPhoneForLink(profile.phone) !== currentPhone && contactMatchesUser(contact, profile))
+    const groupsForContact = groupIndex.get(`${contact.owner_id}:${contact.id}`) ?? []
+    const location = graphLocationCoords(contact, contact.address || contact.city || '')
+    const graphPoint = graphPositionFromCoords(location.coords)
+    const scopes = ['interno', ...(groupsForContact.length ? ['grupo'] : []), ...(publicMatch ? ['publico'] : [])]
+    return {
+      id: `private-${contact.owner_id}-${contact.id}`,
+      raw: contact,
+      rawKind: 'contact',
+      name: contact.name,
+      service: contact.service,
+      city: contact.city || contact.address || 'Agenda privada',
+      source: contact.source || 'Manual',
+      ddd: contact.ddd || extractDdd(contact.phone),
+      tags: contactTags(contact),
+      demand: contact.demand || '',
+      solves: contact.solves || '',
+      description: contact.description || contact.note || '',
+      category: contact.category ?? classifyService(contact.service),
+      scopes,
+      groupIds: groupsForContact.map((item) => item.id),
+      groupNames: groupsForContact.map((item) => item.name),
+      linkedPlatform: Boolean(publicMatch || userMatch),
+      linkedLabel: publicMatch?.name || userMatch?.name || '',
+      linkedInternal: false,
+      contactId: contact.id,
+      ownerId: contact.owner_id,
+      locationQuery: location.query,
+      locationLabel: location.label,
+      locationSourceLabel: location.sourceLabel,
+      graphX: graphPoint?.x,
+      graphY: graphPoint?.y,
+      graphZ: graphPoint ? Math.min(80, Math.max(0, (contact.ddd ? Number(contact.ddd) : 0) % 20) * 2) : 0,
+      actionLabel: 'Abrir contato',
+      actionKind: 'contact',
+    }
+  })
+}
+
+function buildGroupGraphRecords({ group, members, users, currentUser }) {
+  const currentLocation = graphLocationCoords(currentUser, currentUser?.serviceAddress || currentUser?.address || currentUser?.city || group?.area || '')
+  const currentCoords = currentLocation.coords || null
+  return (members ?? []).map((member, index) => {
+    const memberUser = users.find((profile) => String(profile.id) === String(member.user_id) || normalize(profile.email) === normalize(member.email)) ?? null
+    const fallbackLocation = graphLocationCoords(memberUser || member, memberUser?.serviceAddress || memberUser?.address || memberUser?.city || group?.area || member.email || '')
+    const graphPoint = graphPositionFromCoords(fallbackLocation.coords, currentCoords)
+    const distanceKm = currentCoords && fallbackLocation.coords ? distanceBetweenCoordinates(currentCoords, fallbackLocation.coords) : null
+    const displayName = memberUser?.name || member.email || `Membro ${index + 1}`
+    const offeredServices = memberUser?.offeredServices || memberUser?.publicDescription || memberUser?.publicSolves || group?.area || 'Membro da rede'
+    const tags = tagList([memberUser?.publicTags, memberUser?.interests?.join(', '), offeredServices, group?.area].filter(Boolean).join(', '))
+    const roleLabel = member.role === 'owner' ? 'Owner' : member.role === 'admin' ? 'Admin' : 'Membro'
+    return {
+      id: `group-${group.id}-member-${member.id}`,
+      raw: memberUser || member,
+      rawKind: 'member',
+      memberId: member.id,
+      userId: member.user_id,
+      name: displayName,
+      service: offeredServices,
+      city: fallbackLocation.label || memberUser?.city || group.name,
+      address: fallbackLocation.query,
+      source: 'Membro do grupo',
+      ddd: memberUser?.ddd || extractDdd(memberUser?.phone || member.email),
+      tags,
+      demand: memberUser?.publicDemand || '',
+      solves: memberUser?.publicSolves || memberUser?.offeredServices || '',
+      description: memberUser?.publicDescription || memberUser?.description || '',
+      category: memberUser?.category ?? classifyService(offeredServices),
+      scopes: ['grupo'],
+      groupIds: [String(group.id)],
+      groupNames: [group.name],
+      linkedPlatform: Boolean(memberUser),
+      linkedLabel: memberUser?.name || member.email || '',
+      linkedInternal: Boolean(memberUser),
+      contactId: null,
+      ownerId: member.user_id || '',
+      trust: distanceKm === null ? roleLabel : distanceKm < 10 ? `Perto · ${roleLabel}` : distanceKm < 50 ? `Mesmo eixo · ${roleLabel}` : `Remoto · ${roleLabel}`,
+      role: member.role || 'member',
+      roleLabel,
+      kind: 'member',
+      locationQuery: fallbackLocation.query,
+      locationLabel: fallbackLocation.label,
+      locationSourceLabel: fallbackLocation.sourceLabel,
+      distanceKm,
+      distanceLabel: formatDistanceKm(distanceKm),
+      distanceSourceLabel: distanceKm === null ? 'sem localização' : fallbackLocation.source.startsWith('ddd') ? 'por DDD' : 'por endereço',
+      graphX: graphPoint?.x,
+      graphY: graphPoint?.y,
+      graphZ: distanceKm === null ? 0 : Math.max(0, 70 - Math.min(70, distanceKm / 2)),
+      actionLabel: memberUser ? 'Abrir perfil' : 'Ver membro',
+      actionKind: 'member',
+    }
+  })
+}
+
+function buildPublicGraphRecords({ publicProfiles, contacts }) {
+  return publicProfiles.map((profile) => {
+    const internalMatch = contacts.find((contact) => contactMatchesProfile(contact, profile))
+    const kind = (profile.kind ?? 'group') === 'person' ? 'person' : 'service'
+    const location = graphLocationCoords(profile, profile.area || profile.service || profile.name || '')
+    const graphPoint = graphPositionFromCoords(location.coords)
+    return {
+      id: `public-${kind}-${profile.source_user_id ?? profile.id}`,
+      raw: profile,
+      rawKind: kind,
+      name: profile.name,
+      service: profile.service,
+      city: profile.area || 'Rede pública',
+      source: kind === 'person' ? 'Perfil público' : 'Serviço público',
+      trust: profile.score ? `${profile.score} score` : profile.area || 'Visível',
+      ddd: extractDdd(profile.phone || profile.whatsapp),
+      tags: kind === 'person' ? tagList(profile.tags) : tagList(profile.tags || profile.service),
+      demand: profile.demand || '',
+      solves: profile.solves || '',
+      description: profile.description || '',
+      category: profile.category ?? classifyService(profile.service),
+      scopes: ['publico', ...(internalMatch ? ['interno'] : [])],
+      groupIds: [],
+      groupNames: [],
+      linkedPlatform: true,
+      linkedLabel: internalMatch?.name || '',
+      linkedInternal: Boolean(internalMatch),
+      internalMatch,
+      locationQuery: location.query,
+      locationLabel: location.label,
+      locationSourceLabel: location.sourceLabel,
+      graphX: graphPoint?.x,
+      graphY: graphPoint?.y,
+      graphZ: kind === 'person' ? 10 : 0,
+      actionLabel: internalMatch ? 'Abrir contato' : kind === 'service' ? 'Ver serviço' : '',
+      actionKind: internalMatch ? 'contact' : kind === 'service' ? 'service' : '',
+      contactId: internalMatch?.id,
+      ownerId: internalMatch?.owner_id,
+    }
+  })
+}
+
+function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, onOpenItem }) {
+  const [query, setQuery] = useState('')
+  const [scopeFilter, setScopeFilter] = useState('all')
+  const [tagFilter, setTagFilter] = useState('all')
+  const [sourceFilter, setSourceFilter] = useState('all')
+  const [dddFilter, setDddFilter] = useState('all')
+  const [groupFilter, setGroupFilter] = useState('all')
+  const [contactFilter, setContactFilter] = useState('all')
+  const [onlyDemand, setOnlyDemand] = useState(false)
+  const [onlySolves, setOnlySolves] = useState(false)
+  const [onlyLinked, setOnlyLinked] = useState(false)
+  const [selectedId, setSelectedId] = useState('')
+
+  const tagOptions = useMemo(() => uniqueTextOptions(items.flatMap((item) => item.tags ?? [])), [items])
+  const sourceOptions = useMemo(() => uniqueTextOptions(items.map((item) => item.source)), [items])
+  const dddOptions = useMemo(() => uniqueTextOptions(items.map((item) => item.ddd)), [items])
+  const groupOptions = useMemo(() => {
+    const all = []
+    items.forEach((item) => {
+      ;(item.groupNames ?? []).forEach((groupName, index) => {
+        all.push({ id: item.groupIds?.[index] ?? groupName, name: groupName })
+      })
+    })
+    const seen = new Set()
+    return all.filter((item) => {
+      const key = `${item.id}:${item.name}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }, [items])
+
+  const visibleItems = useMemo(() => {
+    return items.filter((item) => {
+      if (query.trim() && !matchText(query, [item.name, item.service, item.city, item.source, item.ddd, item.description, item.demand, item.solves, ...(item.tags ?? []), ...(item.groupNames ?? [])])) return false
+      if (scopeFilter !== 'all' && !(item.scopes ?? []).includes(scopeFilter)) return false
+      if (tagFilter !== 'all' && !(item.tags ?? []).some((tag) => normalize(tag) === normalize(tagFilter))) return false
+      if (sourceFilter !== 'all' && normalize(item.source) !== normalize(sourceFilter)) return false
+      if (dddFilter !== 'all' && String(item.ddd || '') !== String(dddFilter)) return false
+      if (groupFilter !== 'all' && !(item.groupIds ?? []).includes(groupFilter)) return false
+      if (contactFilter !== 'all' && item.id !== contactFilter) return false
+      if (onlyDemand && !item.demand?.trim()) return false
+      if (onlySolves && !item.solves?.trim()) return false
+      if (onlyLinked && !item.linkedPlatform) return false
+      return true
+    })
+  }, [items, query, scopeFilter, tagFilter, sourceFilter, dddFilter, groupFilter, contactFilter, onlyDemand, onlySolves, onlyLinked])
+
+  useEffect(() => {
+    if (!visibleItems.length) {
+      setSelectedId('')
+      return
+    }
+    if (!visibleItems.some((item) => item.id === selectedId)) {
+      setSelectedId(visibleItems[0].id)
+    }
+  }, [visibleItems, selectedId])
+
+  const selectedItem = visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0] ?? null
+  const graphItems = useMemo(
+    () =>
+      visibleItems.map((item) => ({
+        id: item.id,
+        originalId: item.id,
+        name: item.name,
+        svc: item.service,
+        city: item.city,
+        trust: item.linkedPlatform ? 'Conectado' : 'Novo',
+        src: item.source,
+        note: [item.demand, item.solves, (item.tags ?? []).slice(0, 3).join(', ')].filter(Boolean).join(' · '),
+        cat: item.category?.id ?? graphCatId(item),
+        tags: item.tags ?? [],
+        ddd: item.ddd ?? '',
+        demand: item.demand ?? '',
+        solves: item.solves ?? '',
+        scopes: item.scopes ?? [],
+      })),
+    [visibleItems],
+  )
+
+  const summary = {
+    nodes: visibleItems.length,
+    tags: new Set(visibleItems.flatMap((item) => item.tags ?? []).filter(Boolean)).size,
+    ddds: new Set(visibleItems.map((item) => item.ddd).filter(Boolean)).size,
+    linked: visibleItems.filter((item) => item.linkedPlatform).length,
+  }
+
+  return (
+    <section className="glass-panel rounded-lg p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">{contextLabel}</p>
+          <h2 className="mt-1 text-xl font-black text-slate-100">{title}</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">{description}</p>
+        </div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Metric value={summary.nodes} label="nós" />
+          <Metric value={summary.tags} label="tags" />
+          <Metric value={summary.ddds} label="DDDs" />
+          <Metric value={summary.linked} label="vínculos" />
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_320px]">
+        <div className="space-y-3">
+          <div className="glass-panel-soft rounded-lg p-3">
+            <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+              <Field label="Busca textual">
+                <div className="glass-panel-soft flex min-w-0 items-center gap-2 rounded-lg px-3">
+                  <Search size={17} className="shrink-0 text-slate-500" />
+                  <input value={query} onChange={(event) => setQuery(event.target.value)} className="h-10 min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-100 outline-none placeholder:text-slate-600" placeholder="nome, demanda, solução, tag, DDD..." />
+                </div>
+              </Field>
+              <Field label="Tipo">
+                <select value={scopeFilter} onChange={(event) => setScopeFilter(event.target.value)} className="field-input h-10">
+                  <option value="all">Todos</option>
+                  <option value="interno">Interno</option>
+                  <option value="grupo">Grupo</option>
+                  <option value="publico">Público</option>
+                </select>
+              </Field>
+              <Field label="Contato específico">
+                <select value={contactFilter} onChange={(event) => setContactFilter(event.target.value)} className="field-input h-10">
+                  <option value="all">Todos</option>
+                  {visibleItems.map((item) => <option key={item.id} value={item.id}>{graphRecordLabel(item)}</option>)}
+                </select>
+              </Field>
+              <Field label="Tag">
+                <select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)} className="field-input h-10">
+                  <option value="all">Todas</option>
+                  {tagOptions.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
+                </select>
+              </Field>
+              <Field label="Fonte">
+                <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)} className="field-input h-10">
+                  <option value="all">Todas</option>
+                  {sourceOptions.map((source) => <option key={source} value={source}>{source}</option>)}
+                </select>
+              </Field>
+              <Field label="DDD">
+                <select value={dddFilter} onChange={(event) => setDddFilter(event.target.value)} className="field-input h-10">
+                  <option value="all">Todos</option>
+                  {dddOptions.map((ddd) => <option key={ddd} value={ddd}>{ddd}</option>)}
+                </select>
+              </Field>
+              {groupOptions.length ? (
+                <Field label="Grupo">
+                  <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)} className="field-input h-10">
+                    <option value="all">Todos</option>
+                    {groupOptions.map((group) => <option key={`${group.id}-${group.name}`} value={group.id}>{group.name}</option>)}
+                  </select>
+                </Field>
+              ) : null}
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button type="button" onClick={() => setOnlyDemand((current) => !current)} className={['rounded-lg px-3 py-2 text-xs font-black', onlyDemand ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
+                Com demanda
+              </button>
+              <button type="button" onClick={() => setOnlySolves((current) => !current)} className={['rounded-lg px-3 py-2 text-xs font-black', onlySolves ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
+                Resolve problema
+              </button>
+              <button type="button" onClick={() => setOnlyLinked((current) => !current)} className={['rounded-lg px-3 py-2 text-xs font-black', onlyLinked ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
+                Vinculado à plataforma
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setQuery('')
+                  setScopeFilter('all')
+                  setTagFilter('all')
+                  setSourceFilter('all')
+                  setDddFilter('all')
+                  setGroupFilter('all')
+                  setContactFilter('all')
+                  setOnlyDemand(false)
+                  setOnlySolves(false)
+                  setOnlyLinked(false)
+                }}
+                className="rounded-lg border border-slate-800 px-3 py-2 text-xs font-black text-slate-300"
+              >
+                Limpar filtros
+              </button>
+            </div>
+          </div>
+
+          {visibleItems.length ? (
+            <NetworkGraph items={graphItems} selectedId={selectedItem?.id} onSelect={setSelectedId} showCategoryFilter={false} label="NETWORK · INTELLIGENCE GRAPH" />
+          ) : (
+            <div className="rounded-lg border border-dashed border-slate-800 p-6 text-sm font-semibold text-slate-500">{emptyLabel}</div>
+          )}
+        </div>
+
+        <aside className="space-y-3">
+          <div className="glass-panel-soft rounded-lg p-3">
+            <div className="flex items-center gap-2">
+              <SlidersHorizontal size={16} className="text-cyan-300" />
+              <p className="text-sm font-black text-slate-100">Leitura ativa</p>
+            </div>
+            {selectedItem ? (
+              <div className="mt-3">
+                <p className="text-base font-black text-slate-100">{selectedItem.name}</p>
+                <p className="mt-1 text-sm font-semibold text-slate-400">{selectedItem.service}</p>
+                <p className="mt-2 text-xs font-semibold text-slate-500">{selectedItem.city}</p>
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {(selectedItem.scopes ?? []).map((scope) => <span key={scope} className="rounded-md border border-cyan-400/10 bg-cyan-400/10 px-2 py-1 text-[11px] font-black text-cyan-100">{scope}</span>)}
+                </div>
+                {selectedItem.tags?.length ? (
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {selectedItem.tags.slice(0, 8).map((tag) => <span key={tag} className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1 text-[11px] font-black text-slate-300">{tag}</span>)}
+                  </div>
+                ) : null}
+                <div className="mt-3 grid gap-2 text-sm">
+                  <DetailRow label="Fonte" value={selectedItem.source || 'Não informada'} />
+                  <DetailRow label="DDD" value={selectedItem.ddd || 'Não identificado'} />
+                  <DetailRow label="Grupos" value={selectedItem.groupNames?.length ? selectedItem.groupNames.join(', ') : 'Nenhum'} />
+                  <DetailRow label="Vínculo com a plataforma" value={selectedItem.linkedPlatform ? selectedItem.linkedLabel || 'Sim' : 'Não'} />
+                </div>
+                {selectedItem.demand ? <PublicProfileText label="Demanda" value={selectedItem.demand} /> : null}
+                {selectedItem.solves ? <div className="mt-2"><PublicProfileText label="Resolve" value={selectedItem.solves} /></div> : null}
+                {selectedItem.actionLabel ? (
+                  <button type="button" onClick={() => onOpenItem(selectedItem)} className="secondary-button mt-3 inline-flex h-10 w-full items-center justify-center rounded-lg px-3 text-sm font-black">
+                    {selectedItem.actionLabel}
+                  </button>
+                ) : null}
+              </div>
+            ) : (
+              <p className="mt-2 text-sm font-semibold text-slate-500">Selecione um nó do grafo ou da lista para inspecionar a conexão.</p>
+            )}
+          </div>
+
+          <div className="glass-panel-soft rounded-lg">
+            <div className="border-b border-slate-800 px-3 py-3">
+              <p className="text-sm font-black text-slate-100">Nós filtrados</p>
+            </div>
+            <div className="max-h-[420px] overflow-y-auto">
+              {visibleItems.length ? visibleItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setSelectedId(item.id)}
+                  className={['flex w-full items-start gap-3 border-b border-slate-800 px-3 py-3 text-left last:border-b-0', selectedItem?.id === item.id ? 'bg-cyan-500/10' : 'hover:bg-slate-950/40'].join(' ')}
+                >
+                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-xs font-black text-white" style={{ backgroundColor: item.category?.color ?? generalCategory.color }}>
+                    {initials(item.name)}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-black text-slate-100">{item.name}</span>
+                    <span className="block truncate text-xs font-semibold text-slate-500">{item.service}</span>
+                    <span className="mt-1 block truncate text-[11px] font-bold text-cyan-300">{item.source} {item.ddd ? `· DDD ${item.ddd}` : ''}</span>
+                  </span>
+                </button>
+              )) : <p className="p-4 text-sm font-semibold text-slate-500">{emptyLabel}</p>}
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
   )
 }
 
@@ -3439,9 +4313,79 @@ function DuplicateContactPreview({ label, contact }) {
   )
 }
 
-function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onExportContacts, onClearRecents, onLogout }) {
+function ApiDocsPage({ onNavigate }) {
+  const swaggerUrl = `${API_BASE_URL}/docs`
+  const openApiUrl = `${API_BASE_URL}/openapi.json`
+  const endpointGroups = [
+    { title: 'Contatos', endpoints: ['GET /api/contacts', 'POST /api/contacts', 'PUT /api/contacts/{id}', 'DELETE /api/contacts/{id}'] },
+    { title: 'Networking', endpoints: ['GET /api/search', 'GET /api/public-profiles', 'POST /api/ai/chat'] },
+    { title: 'Grupos', endpoints: ['GET /api/groups', 'POST /api/groups', 'POST /api/groups/{id}/members', 'GET /api/groups/{id}/contacts', 'GET /api/groups/{id}/messages', 'POST /api/groups/{id}/messages'] },
+    { title: 'Plataforma', endpoints: ['POST /api/login', 'POST /api/google-login', 'POST /api/users', 'GET /api/custom-fields'] },
+  ]
+
+  function openExternal(url) {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
+
+  return (
+    <div className="space-y-4">
+      <PageTitle
+        eyebrow="OpenAPI"
+        title="Documentação da plataforma"
+        description="Base preparada para integrações futuras. O Swagger é gerado automaticamente pelo backend FastAPI."
+        action={<button type="button" onClick={() => onNavigate(ROUTES.SETTINGS)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black"><ArrowLeft size={17} />Configurações</button>}
+      />
+
+      <section className="glass-panel rounded-lg p-4">
+        <div className="grid gap-3 md:grid-cols-2">
+          <button type="button" onClick={() => openExternal(swaggerUrl)} className="action-card rounded-lg p-4 text-left">
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Swagger UI</p>
+            <h2 className="mt-2 text-lg font-black text-slate-100">Abrir documentação interativa</h2>
+            <p className="mt-1 text-sm font-semibold text-slate-500">Use para explorar contratos, modelos e respostas da API.</p>
+          </button>
+          <button type="button" onClick={() => openExternal(openApiUrl)} className="action-card rounded-lg p-4 text-left">
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">OpenAPI JSON</p>
+            <h2 className="mt-2 text-lg font-black text-slate-100">Abrir especificação bruta</h2>
+            <p className="mt-1 text-sm font-semibold text-slate-500">Fonte para automações, SDKs e integrações externas.</p>
+          </button>
+        </div>
+      </section>
+
+      <section className="grid gap-3 md:grid-cols-2">
+        {endpointGroups.map((group) => (
+          <article key={group.title} className="glass-panel rounded-lg p-4">
+            <h2 className="text-sm font-black text-slate-100">{group.title}</h2>
+            <div className="mt-3 grid gap-2">
+              {group.endpoints.map((endpoint) => (
+                <code key={endpoint} className="rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs font-black text-cyan-100">{endpoint}</code>
+              ))}
+            </div>
+          </article>
+        ))}
+      </section>
+    </div>
+  )
+}
+
+function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, customFieldDefinitions, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onExportContacts, onClearRecents, onSaveCustomField, onDeleteCustomField, onSaveUser, onLogout }) {
   const visibleName = user?.name || 'Perfil'
   const googleContactsImported = Boolean(user?.googleContactsImportedAt)
+  const [notificationPreference, setNotificationPreference] = useState(user?.notificationPreference || 'relevant')
+  const selectedNotification = NOTIFICATION_OPTIONS.find((option) => option.id === notificationPreference) ?? NOTIFICATION_OPTIONS[0]
+
+  useEffect(() => {
+    setNotificationPreference(user?.notificationPreference || 'relevant')
+  }, [user?.notificationPreference])
+
+  async function saveNotificationPreference() {
+    if (!user) return
+    await onSaveUser?.(
+      normalizeUserDraft({ ...user, notificationPreference }),
+      [],
+      { redirectTo: ROUTES.SETTINGS, successMessage: 'Preferência de notificações salva.' },
+    )
+  }
+
   return (
     <div className="space-y-4">
       <PageTitle eyebrow="Configurações" title="Menu da conta" description="Perfil, organização da agenda, dados locais e estado do app." />
@@ -3485,6 +4429,22 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMu
             <Pencil size={17} />
             Editar perfil
           </button>
+        </div>
+      </section>
+
+      <section className="glass-panel rounded-lg p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Notificações</p>
+            <h2 className="mt-1 text-base font-black text-slate-100">Relevância dos alertas</h2>
+            <p className="mt-1 text-sm font-semibold text-slate-500">{selectedNotification.description}</p>
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <select value={notificationPreference} onChange={(event) => setNotificationPreference(event.target.value)} className="field-input h-10 min-w-[220px]">
+              {NOTIFICATION_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+            </select>
+            <button type="button" onClick={saveNotificationPreference} className="primary-button h-10 rounded-lg px-3 text-sm font-black">Salvar</button>
+          </div>
         </div>
       </section>
 
@@ -3541,7 +4501,54 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMu
           actionLabel="Verificar duplicados"
           onAction={onRefreshDuplicates}
         />
+        <SettingsAction
+          icon={Route}
+          title="API e OpenAPI"
+          description="Documentação base para integrações futuras, Swagger e especificação OpenAPI."
+          actionLabel="Abrir docs"
+          onAction={() => onNavigate(ROUTES.API_DOCS)}
+        />
       </section>
+
+      <section className="glass-panel rounded-lg p-4">
+        <div className="mb-3">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Integrações futuras</p>
+          <h2 className="mt-1 text-base font-black text-slate-100">Importações em preparação</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">O MVP já cobre Google, CSV e manual. Estes conectores ficam sinalizados para evolução sem criar expectativa de uso imediato.</p>
+        </div>
+        <div className="grid gap-3 md:grid-cols-3">
+          <SettingsAction
+            icon={Lock}
+            title="Apple Contacts"
+            description="Importação direta do iCloud/Apple Contacts será adicionada em etapa posterior."
+            actionLabel="Em breve"
+            disabled
+          />
+          <SettingsAction
+            icon={Lock}
+            title="Outlook"
+            description="Conector Microsoft/Outlook está previsto para importar contatos corporativos."
+            actionLabel="Em breve"
+            disabled
+          />
+          <SettingsAction
+            icon={Lock}
+            title="LinkedIn export"
+            description="Fluxo para processar exportações do LinkedIn sem violar permissões da plataforma."
+            actionLabel="Em breve"
+            disabled
+          />
+        </div>
+      </section>
+
+      <CustomFieldDefinitionsManager
+        managerKey="user-fields"
+        title="Campos personalizados da agenda"
+        description="Esses campos aparecem no cadastro e edição dos seus contatos privados."
+        definitions={customFieldDefinitions}
+        onSave={(payload) => onSaveCustomField({ ...payload, scope_type: 'user', scope_id: '' }, payload.id)}
+        onDelete={onDeleteCustomField}
+      />
 
       <section className="glass-panel rounded-lg">
         <div className="border-b border-slate-800 px-4 py-3">
@@ -3799,7 +4806,7 @@ function PublicProfileSettingsPage({ user, onSaveUser, onNavigate }) {
   )
 }
 
-function SettingsAction({ icon: Icon, title, description, actionLabel, onAction }) {
+function SettingsAction({ icon: Icon, title, description, actionLabel, onAction, disabled = false }) {
   return (
     <article className="glass-panel rounded-lg p-4">
       <div className="flex items-start gap-3">
@@ -3811,7 +4818,7 @@ function SettingsAction({ icon: Icon, title, description, actionLabel, onAction 
           <p className="mt-1 text-sm font-medium text-slate-500">{description}</p>
         </div>
       </div>
-      <button type="button" onClick={() => onAction()} className="mt-4 h-10 w-full rounded-lg border border-slate-800 text-sm font-black text-slate-300">
+      <button type="button" disabled={disabled} onClick={() => onAction?.()} className="mt-4 h-10 w-full rounded-lg border border-slate-800 text-sm font-black text-slate-300 disabled:cursor-not-allowed disabled:border-slate-800/70 disabled:text-slate-600">
         {actionLabel}
       </button>
     </article>
@@ -3873,7 +4880,7 @@ function AddressOptionList({ options, onChoose }) {
   )
 }
 
-function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSuggestions, onNavigate }) {
+function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSuggestions, customFieldDefinitions, onNavigate }) {
   const [showAddress, setShowAddress] = useState(Boolean(form.address))
   const [addressStatus, setAddressStatus] = useState('')
   const [addressOptions, setAddressOptions] = useState([])
@@ -3959,6 +4966,18 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSug
               <TagSuggestionDatalist id="network-agenda-tag-suggestions" tags={tagSuggestions} />
             </Field>
           </div>
+        </div>
+
+        <div className="glass-panel-soft mt-4 rounded-lg p-3">
+          <CustomFieldValuesEditor
+            definitions={customFieldDefinitions}
+            value={form.custom_field_values}
+            onChange={(nextValue) => updateForm('custom_field_values', nextValue)}
+            scopeType="user"
+            scopeId=""
+            allowAdHoc
+            emptyLabel="Nenhum campo configurado ainda. Você pode criar campos em Configurações."
+          />
         </div>
 
         <div className="glass-panel-soft mt-4 rounded-lg p-3">
@@ -4050,6 +5069,7 @@ function contactToEditForm(contact) {
     linkedin: contact.linkedin ?? '',
     custom_url: contact.custom_url ?? '',
     custom_fields: contact.custom_fields ?? '[]',
+    custom_field_values: contact.custom_field_values?.length ? contact.custom_field_values.map((item) => normalizeCustomFieldValueItem(item)) : parseCustomFields(contact.custom_fields).map((item) => normalizeCustomFieldValueItem(item)),
     crm_status: contact.crm_status ?? 'Novo',
     crm_priority: contact.crm_priority ?? 'Média',
     last_contact_at: contact.last_contact_at ?? '',
@@ -4058,47 +5078,258 @@ function contactToEditForm(contact) {
   }
 }
 
-function CustomFieldsEditor({ value, onChange }) {
-  const fields = parseCustomFields(value)
+function CustomFieldValueControl({ definition, value, onChange }) {
+  const fieldType = definition.field_type || 'text_short'
+  const options = Array.isArray(definition.options) ? definition.options : []
 
-  function updateField(index, key, nextValue) {
-    const next = fields.map((field, currentIndex) => (currentIndex === index ? { ...field, [key]: nextValue } : field))
-    onChange(serializeCustomFields(next))
+  if (fieldType === 'text_long') {
+    return <textarea value={value ?? ''} onChange={(event) => onChange(event.target.value)} className="field-input min-h-24 resize-y" placeholder={definition.name} />
+  }
+  if (fieldType === 'number') {
+    return <input value={value ?? ''} onChange={(event) => onChange(event.target.value)} className="field-input h-10" inputMode="numeric" placeholder={definition.name} />
+  }
+  if (fieldType === 'date') {
+    return <input value={value ?? ''} onChange={(event) => onChange(event.target.value)} className="field-input h-10" type="date" />
+  }
+  if (fieldType === 'dropdown') {
+    return (
+      <select value={value ?? ''} onChange={(event) => onChange(event.target.value)} className="field-input h-10">
+        <option value="">Selecione</option>
+        {options.map((option) => <option key={option} value={option}>{option}</option>)}
+      </select>
+    )
+  }
+  if (fieldType === 'checkbox') {
+    return (
+      <label className="glass-panel-soft flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-bold text-slate-300">
+        <input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} />
+        <span>{definition.name}</span>
+      </label>
+    )
+  }
+  if (fieldType === 'multiselect') {
+    const selected = Array.isArray(value) ? value : []
+    return (
+      <div className="grid gap-2">
+        {options.length ? options.map((option) => {
+          const checked = selected.includes(option)
+          return (
+            <label key={option} className="glass-panel-soft flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-bold text-slate-300">
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={(event) => onChange(event.target.checked ? [...selected, option] : selected.filter((item) => item !== option))}
+              />
+              <span>{option}</span>
+            </label>
+          )
+        }) : <p className="text-xs font-semibold text-slate-500">Defina opções para este campo antes de usar.</p>}
+      </div>
+    )
+  }
+  return <input value={value ?? ''} onChange={(event) => onChange(event.target.value)} className="field-input h-10" placeholder={definition.name} />
+}
+
+function CustomFieldValuesEditor({ definitions = [], value = [], onChange, scopeType = 'user', scopeId = '', allowAdHoc = false, title = 'Campos personalizados', emptyLabel = 'Nenhum campo configurado.' }) {
+  const normalizedDefinitions = definitions
+    .map((item) => normalizeCustomFieldDefinition(item, { scope_type: scopeType, scope_id: scopeId }))
+    .filter((item) => item.name)
+  const scopedValues = filterCustomFieldValuesByScope(value, scopeType, scopeId)
+  const definitionKeys = new Set(normalizedDefinitions.map((item) => item.key))
+  const adHocFields = allowAdHoc ? scopedValues.filter((item) => !definitionKeys.has(item.key)) : []
+
+  function emit(nextScopedValues) {
+    onChange(mergeCustomFieldScopeValues(value, nextScopedValues, scopeType, scopeId))
   }
 
-  function addField() {
-    onChange(serializeCustomFields([...fields, { label: '', value: '' }]))
+  function upsertDefinedValue(definition, nextValue) {
+    const normalizedDefinition = normalizeCustomFieldDefinition(definition, { scope_type: scopeType, scope_id: scopeId })
+    const nextScopedValues = scopedValues.some((item) => item.key === normalizedDefinition.key)
+      ? scopedValues.map((item) => (item.key === normalizedDefinition.key ? { ...item, ...normalizedDefinition, value: nextValue } : item))
+      : [...scopedValues, { ...normalizedDefinition, value: nextValue }]
+    emit(nextScopedValues)
   }
 
-  function removeField(index) {
-    onChange(serializeCustomFields(fields.filter((_, currentIndex) => currentIndex !== index)))
+  function addAdHocField() {
+    emit([
+      ...scopedValues,
+      {
+        id: '',
+        owner_id: '',
+        name: '',
+        label: '',
+        key: '',
+        field_type: 'text_short',
+        scope_type: scopeType,
+        scope_id: scopeId,
+        options: [],
+        value: '',
+      },
+    ])
+  }
+
+  function updateAdHocField(index, key, nextValue) {
+    let adHocIndex = -1
+    const nextScopedValues = scopedValues.map((item) => {
+      if (definitionKeys.has(item.key)) return item
+      adHocIndex += 1
+      if (adHocIndex !== index) return item
+      const next = { ...item, [key]: nextValue }
+      if (key === 'name') {
+        next.label = nextValue
+        next.key = customFieldKey(nextValue)
+      }
+      return next
+    })
+    emit(nextScopedValues)
+  }
+
+  function removeAdHocField(index) {
+    let adHocIndex = -1
+    emit(
+      scopedValues.filter((item) => {
+        if (definitionKeys.has(item.key)) return true
+        adHocIndex += 1
+        return adHocIndex !== index
+      }),
+    )
   }
 
   return (
     <div>
       <div className="mb-2 flex items-center justify-between gap-2">
-        <p className="text-xs font-black uppercase tracking-widest text-slate-500">Campos personalizados</p>
-        <button type="button" onClick={addField} className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-800 px-2 text-xs font-black text-cyan-300">
-          <Plus size={14} />
-          Campo
-        </button>
+        <p className="text-xs font-black uppercase tracking-widest text-slate-500">{title}</p>
+        {allowAdHoc ? (
+          <button type="button" onClick={addAdHocField} className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-800 px-2 text-xs font-black text-cyan-300">
+            <Plus size={14} />
+            Campo livre
+          </button>
+        ) : null}
       </div>
-      <div className="grid gap-2">
-        {fields.length ? fields.map((field, index) => (
-          <div key={index} className="grid gap-2 rounded-lg border border-slate-800 bg-slate-950/35 p-2 sm:grid-cols-[minmax(0,160px)_minmax(0,1fr)_auto]">
-            <input value={field.label ?? ''} onChange={(event) => updateField(index, 'label', event.target.value)} className="field-input h-10" placeholder="Nome do campo" />
-            <input value={field.value ?? ''} onChange={(event) => updateField(index, 'value', event.target.value)} className="field-input h-10" placeholder="Valor" />
-            <button type="button" onClick={() => removeField(index)} className="h-10 rounded-lg border border-rose-500/25 px-3 text-rose-200">
-              <X size={15} />
-            </button>
+
+      <div className="grid gap-3">
+        {normalizedDefinitions.map((definition) => {
+          const currentValue = scopedValues.find((item) => item.key === definition.key)?.value
+          return (
+            <Field key={`${definition.key}-${definition.scope_type}-${definition.scope_id}`} label={definition.name}>
+              <CustomFieldValueControl definition={definition} value={currentValue} onChange={(nextValue) => upsertDefinedValue(definition, nextValue)} />
+              <span className="mt-1 block text-[11px] font-black uppercase tracking-widest text-slate-500">{customFieldTypeLabel(definition.field_type)}</span>
+            </Field>
+          )
+        })}
+
+        {allowAdHoc ? adHocFields.map((field, index) => (
+          <div key={`adhoc-${index}`} className="grid gap-2 rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,180px)_minmax(0,1fr)_auto]">
+              <input value={field.name ?? ''} onChange={(event) => updateAdHocField(index, 'name', event.target.value)} className="field-input h-10" placeholder="Nome do campo" />
+              <input value={field.value ?? ''} onChange={(event) => updateAdHocField(index, 'value', event.target.value)} className="field-input h-10" placeholder="Valor" />
+              <button type="button" onClick={() => removeAdHocField(index)} className="h-10 rounded-lg border border-rose-500/25 px-3 text-rose-200">
+                <X size={15} />
+              </button>
+            </div>
+            <p className="text-[11px] font-black uppercase tracking-widest text-slate-500">Campo legado livre</p>
           </div>
-        )) : <p className="rounded-lg border border-dashed border-slate-800 p-3 text-xs font-semibold text-slate-500">Nenhum campo personalizado ainda.</p>}
+        )) : null}
+
+        {!normalizedDefinitions.length && !adHocFields.length ? <p className="rounded-lg border border-dashed border-slate-800 p-3 text-xs font-semibold text-slate-500">{emptyLabel}</p> : null}
       </div>
     </div>
   )
 }
 
-function EditContactModal({ contact, tagSuggestions, onClose, onSave }) {
+function CustomFieldDefinitionsManager({ managerKey = 'default', title, description, definitions = [], onSave, onDelete, canManage = true }) {
+  const [draft, setDraft] = useState({ id: '', name: '', field_type: 'text_short', options_text: '' })
+
+  useEffect(() => {
+    setDraft({ id: '', name: '', field_type: 'text_short', options_text: '' })
+  }, [managerKey])
+
+  function resetDraft() {
+    setDraft({ id: '', name: '', field_type: 'text_short', options_text: '' })
+  }
+
+  async function submit(event) {
+    event.preventDefault()
+    if (!canManage || !draft.name.trim()) return
+    await onSave({
+      id: draft.id || undefined,
+      name: draft.name.trim(),
+      field_type: draft.field_type,
+      options: ['dropdown', 'multiselect'].includes(draft.field_type)
+        ? draft.options_text.split(',').map((item) => item.trim()).filter(Boolean)
+        : [],
+    })
+    resetDraft()
+  }
+
+  return (
+    <section className="glass-panel-soft rounded-lg p-3">
+      <div className="mb-3">
+        <h3 className="text-sm font-black text-slate-100">{title}</h3>
+        <p className="mt-1 text-xs font-semibold text-slate-500">{description}</p>
+      </div>
+
+      <form onSubmit={submit} className="grid gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Nome do campo">
+            <input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} className="field-input h-10" disabled={!canManage} placeholder="Ex: Empresa, Faixa, Origem" />
+          </Field>
+          <Field label="Tipo">
+            <select value={draft.field_type} onChange={(event) => setDraft((current) => ({ ...current, field_type: event.target.value }))} className="field-input h-10" disabled={!canManage}>
+              {CUSTOM_FIELD_TYPE_OPTIONS.map((type) => <option key={type.id} value={type.id}>{type.label}</option>)}
+            </select>
+          </Field>
+        </div>
+        {['dropdown', 'multiselect'].includes(draft.field_type) ? (
+          <Field label="Opções">
+            <input value={draft.options_text} onChange={(event) => setDraft((current) => ({ ...current, options_text: event.target.value }))} className="field-input h-10" disabled={!canManage} placeholder="Separe por vírgula" />
+          </Field>
+        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="submit" disabled={!canManage} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-50">
+            <Plus size={16} />
+            {draft.id ? 'Salvar campo' : 'Adicionar campo'}
+          </button>
+          {draft.id ? (
+            <button type="button" onClick={resetDraft} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-800 px-3 text-sm font-black text-slate-300">
+              Cancelar edição
+            </button>
+          ) : null}
+        </div>
+      </form>
+
+      <div className="mt-3 grid gap-2">
+        {definitions.length ? definitions.map((definition) => (
+          <div key={definition.id || definition.key} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="text-sm font-black text-slate-100">{definition.name}</p>
+                <p className="mt-1 text-[11px] font-black uppercase tracking-widest text-cyan-300">{customFieldTypeLabel(definition.field_type)}</p>
+                {definition.options?.length ? <p className="mt-1 text-xs font-semibold text-slate-500">{definition.options.join(', ')}</p> : null}
+              </div>
+              {canManage ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDraft({ id: definition.id, name: definition.name, field_type: definition.field_type, options_text: (definition.options ?? []).join(', ') })}
+                    className="inline-flex h-9 items-center rounded-lg border border-slate-800 px-3 text-xs font-black text-slate-300"
+                  >
+                    Editar
+                  </button>
+                  <button type="button" onClick={() => onDelete(definition)} className="inline-flex h-9 items-center rounded-lg border border-rose-500/25 px-3 text-xs font-black text-rose-200">
+                    Remover
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        )) : <p className="rounded-lg border border-dashed border-slate-800 p-3 text-xs font-semibold text-slate-500">Nenhum campo configurado neste escopo.</p>}
+      </div>
+    </section>
+  )
+}
+
+function EditContactModal({ contact, tagSuggestions, customFieldDefinitions, onClose, onSave }) {
   const [draft, setDraft] = useState(() => contactToEditForm(contact))
   const [showAddress, setShowAddress] = useState(Boolean(contact.address))
   const [addressStatus, setAddressStatus] = useState('')
@@ -4214,7 +5445,15 @@ function EditContactModal({ contact, tagSuggestions, onClose, onSave }) {
                 <input value={draft.custom_url} onChange={(event) => updateDraft('custom_url', event.target.value)} className="field-input" />
               </Field>
             </div>
-            <CustomFieldsEditor value={draft.custom_fields} onChange={(value) => updateDraft('custom_fields', value)} />
+            <CustomFieldValuesEditor
+              definitions={customFieldDefinitions}
+              value={draft.custom_field_values}
+              onChange={(nextValue) => updateDraft('custom_field_values', nextValue)}
+              scopeType="user"
+              scopeId=""
+              allowAdHoc
+              emptyLabel="Nenhum campo configurado ainda. Você pode criar campos em Configurações."
+            />
           </div>
         </div>
 
@@ -4331,15 +5570,19 @@ function GroupsPage({ publicProfiles, user, queryDraft, setQueryDraft, onSearch,
   )
 }
 
-function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateGroup, onUpdateGroup, onAddMember, onAddContact, onLoadContacts, onNavigate }) {
-  const [draft, setDraft] = useState({ name: '', description: '' })
-  const [editDraft, setEditDraft] = useState({ name: '', description: '' })
+function SharedGroupsPage({ user, groups, contacts, publicProfiles, users, groupContactsById, groupMessagesById, groupCustomFieldsById, onCreateGroup, onUpdateGroup, onAddMember, onRemoveMember, onAddContact, onRemoveContact, onLoadContacts, onLoadMessages, onSendMessage, onLoadCustomFields, onSaveCustomField, onDeleteCustomField, onUpdateContactCustomFields, onNavigate }) {
+  const [activeTab, setActiveTab] = useState('view')
+  const [draft, setDraft] = useState({ name: '', area: '', peopleGoal: '3', description: '' })
+  const [editDraft, setEditDraft] = useState({ name: '', area: '', peopleGoal: '3', description: '' })
+  const [createError, setCreateError] = useState('')
   const [memberEmail, setMemberEmail] = useState('')
   const [selectedGroupId, setSelectedGroupId] = useState(groups[0]?.id ?? '')
   const [selectedContactId, setSelectedContactId] = useState('')
+  const [groupMessageDraft, setGroupMessageDraft] = useState('')
+  const [editingGroupContact, setEditingGroupContact] = useState(null)
   const currentUserId = contactOwnerId(user)
-  const canCreateGroup = Boolean(user)
   const isAdmin = user?.role === 'admin'
+  const canCreateGroup = Boolean(user && isAdmin)
   const findGroupMembership = (group) => group?.members?.find((member) => String(member.user_id) === currentUserId || normalize(member.email) === normalize(user?.email))
   const groupRole = (group) => {
     if (!group) return ''
@@ -4356,19 +5599,28 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
   }[role] || { label: 'Leitura', tone: 'text-slate-300 border-slate-700 bg-slate-900/60' })
   const selectedGroup = groups.find((group) => String(group.id) === String(selectedGroupId)) || groups[0]
   const selectedContacts = selectedGroup ? (groupContactsById[selectedGroup.id] ?? []) : []
+  const selectedMessages = selectedGroup ? (groupMessagesById[selectedGroup.id] ?? []) : []
+  const selectedGroupFields = selectedGroup ? (groupCustomFieldsById[selectedGroup.id] ?? []) : []
+  const selectedGraphItems = useMemo(
+    () => selectedGroup ? buildGroupGraphRecords({ group: selectedGroup, contacts: selectedContacts, publicProfiles, users, currentUser: user }) : [],
+    [selectedGroup, selectedContacts, publicProfiles, users, user],
+  )
   const selectedGroupRole = groupRole(selectedGroup)
   const canManageSelectedGroup = Boolean(selectedGroup && ['owner', 'admin', 'admin_global'].includes(selectedGroupRole))
   const ownedGroups = groups.filter((group) => String(group.owner_id) === currentUserId)
   const participatingGroups = groups.filter((group) => String(group.owner_id) !== currentUserId && ['owner', 'admin', 'member'].includes(groupRole(group)))
   const visibleAdminGroups = isAdmin ? groups.filter((group) => String(group.owner_id) !== currentUserId && !findGroupMembership(group)) : []
   const privateAvailable = selectedGroup
-    ? contacts.filter((contact) => !selectedContacts.some((item) => String(item.id) === String(contact.id)))
+    ? contacts.filter((contact) => !selectedContacts.some((item) => String(item.id) === String(contact.id)) && contactMatchesGroupArea(contact, selectedGroup))
     : contacts
 
   useEffect(() => {
     if (!selectedGroup?.id) return
     setSelectedGroupId(selectedGroup.id)
+    setGroupPanelTab('chat')
     onLoadContacts(selectedGroup.id)
+    onLoadMessages(selectedGroup.id)
+    onLoadCustomFields(selectedGroup.id)
   }, [selectedGroup?.id])
 
   useEffect(() => {
@@ -4378,16 +5630,34 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
     }
     setEditDraft({
       name: selectedGroup.name || '',
+      area: selectedGroup.area || '',
+      peopleGoal: String(selectedGroup.people_goal || 3),
       description: selectedGroup.description || '',
     })
-  }, [selectedGroup?.id, selectedGroup?.name, selectedGroup?.description])
+  }, [selectedGroup?.id, selectedGroup?.name, selectedGroup?.area, selectedGroup?.people_goal, selectedGroup?.description])
 
   async function submitGroup(event) {
     event.preventDefault()
-    if (!draft.name.trim()) return
-    const created = await onCreateGroup({ name: draft.name.trim(), description: draft.description.trim() })
+    if (!canCreateGroup) return
+    const peopleGoal = Number(draft.peopleGoal)
+    const nextError = !draft.name.trim()
+      ? 'Informe o nome do grupo.'
+      : !draft.area.trim()
+        ? 'Informe qual área o grupo atende.'
+        : !Number.isFinite(peopleGoal) || peopleGoal < 3
+          ? 'O grupo precisa ter 3 ou mais pessoas.'
+          : ''
+    setCreateError(nextError)
+    if (nextError) return
+    const created = await onCreateGroup({
+      name: draft.name.trim(),
+      area: draft.area.trim(),
+      people_goal: peopleGoal,
+      description: draft.description.trim(),
+    })
     if (created?.id) setSelectedGroupId(created.id)
-    setDraft({ name: '', description: '' })
+    if (created?.id) setActiveTab('view')
+    setDraft({ name: '', area: '', peopleGoal: '3', description: '' })
   }
 
   function submitMember(event) {
@@ -4404,11 +5674,22 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
     setSelectedContactId('')
   }
 
+  async function submitGroupMessage(event) {
+    event.preventDefault()
+    if (!selectedGroup || !groupMessageDraft.trim()) return
+    const created = await onSendMessage(selectedGroup.id, groupMessageDraft)
+    if (created) setGroupMessageDraft('')
+  }
+
   function submitGroupUpdate(event) {
     event.preventDefault()
     if (!selectedGroup || !canManageSelectedGroup || !editDraft.name.trim()) return
+    const peopleGoal = Number(editDraft.peopleGoal)
+    if (!editDraft.area.trim() || !Number.isFinite(peopleGoal) || peopleGoal < 3) return
     onUpdateGroup(selectedGroup.id, {
       name: editDraft.name.trim(),
+      area: editDraft.area.trim(),
+      people_goal: peopleGoal,
       description: editDraft.description.trim(),
     })
   }
@@ -4431,9 +5712,10 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
                   <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${meta.tone}`}>{meta.label}</span>
                 </div>
                 <p className="mt-1 line-clamp-2 text-xs font-semibold text-slate-500">{group.description || 'Sem descrição.'}</p>
+                <p className="mt-1 text-[11px] font-bold text-slate-500">{group.area || 'Área não informada'} · {group.people_goal || 3}+ pessoas</p>
                 <div className="mt-2 flex gap-2 text-[11px] font-black text-cyan-200">
                   <span>{group.member_count} membros</span>
-                  <span>{group.contact_count} contatos</span>
+                  <span>{group.people_goal || 3} meta</span>
                 </div>
               </button>
             )
@@ -4448,33 +5730,65 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
       <PageTitle
         eyebrow="Grupos compartilhados"
         title="Bases de networking por contexto"
-        description="Crie grupos para eventos, comunidades e hubs. A agenda privada continua separada, mas contatos podem ser compartilhados por vínculo."
+        description="Admins criam grupos para eventos, comunidades e hubs. A agenda privada continua separada, mas contatos podem ser compartilhados por vínculo."
         action={<button type="button" onClick={() => onNavigate(ROUTES.PUBLIC)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black"><Compass size={17} />Rede pública</button>}
       />
 
-      <section className="grid gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
-        <div className="space-y-4">
-          <section className="glass-panel rounded-lg p-4">
-            <div className="flex items-start gap-3">
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-200"><ShieldCheck size={20} /></span>
-              <div>
-                <h2 className="text-base font-black text-slate-100">Criar grupo</h2>
-                <p className="mt-1 text-sm font-semibold text-slate-500">Qualquer conta autenticada pode criar um grupo e convidar membros depois.</p>
-              </div>
+      <div className="glass-panel-soft flex rounded-lg p-1.5">
+        {[
+          { id: 'view', label: 'Visualizar grupo' },
+          { id: 'create', label: 'Criar grupo' },
+        ].map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveTab(tab.id)}
+            className={['h-10 flex-1 rounded-md text-sm font-black transition', activeTab === tab.id ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 hover:bg-slate-900/70 hover:text-cyan-100'].join(' ')}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'create' ? (
+        <section className="glass-panel rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-200"><ShieldCheck size={20} /></span>
+            <div>
+              <h2 className="text-base font-black text-slate-100">Criar grupo</h2>
+              <p className="mt-1 text-sm font-semibold text-slate-500">Disponível para contas admin. Todo grupo precisa declarar área atendida e ter previsão mínima de 3 pessoas.</p>
             </div>
-            <form onSubmit={submitGroup} className="mt-4 grid gap-3">
-              <Field label="Nome">
+          </div>
+          {!canCreateGroup ? (
+            <div className="mt-4 rounded-lg border border-amber-400/20 bg-amber-400/10 p-3 text-sm font-bold text-amber-100">
+              Seu plano atual permite participar de grupos compartilhados, mas a criação é reservada para administradores.
+            </div>
+          ) : null}
+          <form onSubmit={submitGroup} className="mt-4 grid gap-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <Field label="Nome" required>
                 <input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} className="field-input" disabled={!canCreateGroup} placeholder="Ex: Hub de fundadores" />
               </Field>
-              <Field label="Descrição">
-                <textarea value={draft.description} onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))} className="field-input min-h-20 resize-y" disabled={!canCreateGroup} placeholder="Contexto, objetivo e tipo de rede." />
+              <Field label="Área atendida" required>
+                <input value={draft.area} onChange={(event) => setDraft((current) => ({ ...current, area: event.target.value }))} className="field-input" disabled={!canCreateGroup} placeholder="Ex: Empresários, tecnologia, eventos" />
               </Field>
-              <button type="submit" disabled={!canCreateGroup} className="primary-button inline-flex h-10 items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-50">
-                <Plus size={17} />
-                Criar grupo
-              </button>
-            </form>
-          </section>
+              <Field label="Número de pessoas" required>
+                <input value={draft.peopleGoal} onChange={(event) => setDraft((current) => ({ ...current, peopleGoal: event.target.value }))} className="field-input" type="number" min="3" disabled={!canCreateGroup} placeholder="Mínimo 3" />
+              </Field>
+            </div>
+            <Field label="Descrição">
+              <textarea value={draft.description} onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))} className="field-input min-h-20 resize-y" disabled={!canCreateGroup} placeholder="Contexto, objetivo e tipo de rede." />
+            </Field>
+            {createError ? <p className="rounded-lg border border-rose-400/25 bg-rose-400/10 p-3 text-sm font-bold text-rose-100">{createError}</p> : null}
+            <button type="submit" disabled={!canCreateGroup} className="primary-button inline-flex h-10 items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-50">
+              <Plus size={17} />
+              Criar grupo
+            </button>
+          </form>
+        </section>
+      ) : (
+      <section className="grid gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
+        <div className="space-y-4">
 
           <GroupList title="Meus grupos" items={ownedGroups} emptyText="Você ainda não criou grupos." />
           <GroupList title="Participando" items={participatingGroups} emptyText="Você ainda não participa de grupos criados por outras pessoas." />
@@ -4488,6 +5802,7 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
                 <div>
                   <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Grupo selecionado</p>
                   <h2 className="mt-1 text-xl font-black text-slate-100">{selectedGroup.name}</h2>
+                  <p className="mt-1 text-sm font-black text-cyan-200">{selectedGroup.area || 'Área não informada'} · {selectedGroup.people_goal || 3}+ pessoas</p>
                   <p className="mt-1 text-sm font-semibold text-slate-500">{selectedGroup.description || 'Sem descrição.'}</p>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${roleMeta(selectedGroupRole).tone}`}>{roleMeta(selectedGroupRole).label}</span>
@@ -4502,6 +5817,60 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
                 </div>
               </div>
 
+              <div className="grid gap-3 xl:grid-cols-[0.9fr_1.1fr]">
+                <section className="glass-panel-soft rounded-lg p-3">
+                  <div className="flex items-start gap-3">
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-200">
+                      <UsersRound size={18} />
+                    </span>
+                    <div>
+                      <h3 className="text-sm font-black text-slate-100">Ficha do grupo</h3>
+                      <p className="mt-1 text-xs font-semibold leading-5 text-slate-500">
+                        Rede privada criada para busca e conversa entre membros. Contatos adicionados precisam estar na agenda do admin/gestor e corresponder à área do grupo.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                    <PublicProfileText label="Área" value={selectedGroup.area || 'Não informada'} />
+                    <PublicProfileText label="Meta" value={`${selectedGroup.people_goal || 3}+ pessoas`} />
+                    <PublicProfileText label="Contexto" value={selectedGroup.description || 'Sem descrição.'} />
+                  </div>
+                </section>
+
+                <section className="glass-panel-soft rounded-lg p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-black text-slate-100">Sala privada do grupo</h3>
+                      <p className="mt-1 text-xs font-semibold text-slate-500">Chat interno para membros alinharem buscas, indicações e oportunidades.</p>
+                    </div>
+                    <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-cyan-200">membros</span>
+                  </div>
+                  <div className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1">
+                    {selectedMessages.length ? selectedMessages.map((message) => {
+                      const mine = String(message.sender_id) === currentUserId
+                      return (
+                        <div key={message.id} className={['rounded-lg border p-3', mine ? 'ml-8 border-cyan-400/20 bg-cyan-400/10' : 'mr-8 border-slate-800 bg-slate-950/35'].join(' ')}>
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="truncate text-xs font-black text-slate-200">{message.sender_name || message.sender_email || 'Membro'}</p>
+                            <span className="shrink-0 text-[10px] font-bold text-slate-600">{formatDateTime(message.created_at)}</span>
+                          </div>
+                          <p className="mt-1 whitespace-pre-wrap text-sm font-medium leading-5 text-slate-300">{message.message}</p>
+                        </div>
+                      )
+                    }) : <p className="rounded-lg border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">Nenhuma mensagem ainda. Use este espaço como mural interno do grupo.</p>}
+                  </div>
+                  <form onSubmit={submitGroupMessage} className="mt-3 flex gap-2">
+                    <input
+                      value={groupMessageDraft}
+                      onChange={(event) => setGroupMessageDraft(event.target.value)}
+                      className="field-input h-10"
+                      placeholder="Escreva para os membros..."
+                    />
+                    <button type="submit" className="primary-button h-10 rounded-lg px-3 text-sm font-black">Enviar</button>
+                  </form>
+                </section>
+              </div>
+
               <form onSubmit={submitGroupUpdate} className="glass-panel-soft rounded-lg p-3">
                 <div className="flex items-start gap-3">
                   <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-950 text-cyan-300">
@@ -4509,10 +5878,10 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
                   </span>
                   <div className="min-w-0 flex-1">
                     <h3 className="text-sm font-black text-slate-100">Editar grupo</h3>
-                    {!canManageSelectedGroup ? <p className="mt-1 text-xs font-semibold text-slate-500">Só quem gerencia o grupo pode alterar nome e descrição.</p> : null}
+                    {!canManageSelectedGroup ? <p className="mt-1 text-xs font-semibold text-slate-500">Só quem gerencia o grupo pode alterar nome, área, número de pessoas e descrição.</p> : null}
                   </div>
                 </div>
-                <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_160px_auto]">
                   <Field label="Nome">
                     <input
                       value={editDraft.name}
@@ -4520,6 +5889,26 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
                       className="field-input h-10"
                       disabled={!canManageSelectedGroup}
                       placeholder="Nome do grupo"
+                    />
+                  </Field>
+                  <Field label="Área atendida">
+                    <input
+                      value={editDraft.area}
+                      onChange={(event) => setEditDraft((current) => ({ ...current, area: event.target.value }))}
+                      className="field-input h-10"
+                      disabled={!canManageSelectedGroup}
+                      placeholder="Área do grupo"
+                    />
+                  </Field>
+                  <Field label="Pessoas">
+                    <input
+                      value={editDraft.peopleGoal}
+                      onChange={(event) => setEditDraft((current) => ({ ...current, peopleGoal: event.target.value }))}
+                      className="field-input h-10"
+                      type="number"
+                      min="3"
+                      disabled={!canManageSelectedGroup}
+                      placeholder="Mínimo 3"
                     />
                   </Field>
                   <Field label="Descrição">
@@ -4550,7 +5939,7 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
                 </form>
                 <form onSubmit={submitContact} className="glass-panel-soft rounded-lg p-3">
                   <h3 className="text-sm font-black text-slate-100">Adicionar contato privado</h3>
-                  {!canManageSelectedGroup ? <p className="mt-1 text-xs font-semibold text-slate-500">Somente quem gerencia o grupo pode compartilhar contatos privados.</p> : null}
+                  <p className="mt-1 text-xs font-semibold text-slate-500">{canManageSelectedGroup ? 'A lista mostra apenas contatos da sua agenda compatíveis com a área do grupo.' : 'Somente quem gerencia o grupo pode compartilhar contatos privados.'}</p>
                   <div className="mt-3 flex gap-2">
                     <select value={selectedContactId} onChange={(event) => setSelectedContactId(event.target.value)} className="field-input h-10" disabled={!canManageSelectedGroup}>
                       <option value="">Escolha</option>
@@ -4561,26 +5950,104 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
                 </form>
               </div>
 
+              <CustomFieldDefinitionsManager
+                managerKey={`group-fields-${selectedGroup.id}`}
+                title="Campos personalizados do grupo"
+                description={canManageSelectedGroup ? 'Crie campos específicos para contatos compartilhados neste contexto.' : 'Campos disponíveis para este grupo.'}
+                definitions={selectedGroupFields}
+                onSave={(payload) => onSaveCustomField({ ...payload, scope_type: 'group', scope_id: String(selectedGroup.id) }, payload.id)}
+                onDelete={onDeleteCustomField}
+                canManage={canManageSelectedGroup}
+              />
+
+              <GraphWorkspace
+                contextLabel="Grafo do grupo"
+                title={`Rede compartilhada: ${selectedGroup.name}`}
+                description="Leia este contexto como uma rede própria, separada da sua base privada, mas com indicação de vínculos públicos e internos."
+                items={selectedGraphItems}
+                emptyLabel="Nenhum contato compartilhado neste grupo para montar o grafo."
+                onOpenItem={(item) => {
+                  if (item.actionKind === 'contact' && item.contactId) {
+                    onNavigate(`${ROUTES.CONTACT}/${item.contactId}`)
+                  }
+                }}
+              />
+
               <div className="grid gap-3 lg:grid-cols-2">
                 <div>
                   <h3 className="mb-2 text-sm font-black text-slate-100">Membros</h3>
                   <div className="grid gap-2">
-                    {selectedGroup.members.map((member) => (
-                      <div key={member.id} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
-                        <p className="text-sm font-black text-slate-200">{member.email}</p>
-                        <p className="mt-1 text-xs font-black uppercase tracking-widest text-slate-500">{member.role}</p>
-                      </div>
-                    ))}
+                    {(selectedGroup.members ?? []).length ? (selectedGroup.members ?? []).map((member) => {
+                      const removable = canManageSelectedGroup && member.role !== 'owner'
+                      const memberUser = users.find((profile) => String(profile.id) === String(member.user_id) || normalize(profile.email) === normalize(member.email))
+                      return (
+                        <div key={member.id} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-black text-slate-200">{member.email}</p>
+                              <p className="mt-1 text-xs font-black uppercase tracking-widest text-slate-500">{member.role}</p>
+                              {memberUser?.publicVisible ? (
+                                <button type="button" onClick={() => onNavigate(ROUTES.PUBLIC)} className="mt-2 text-xs font-black text-cyan-300">
+                                  Mostrar perfil público
+                                </button>
+                              ) : null}
+                            </div>
+                            {removable ? (
+                              <button
+                                type="button"
+                                onClick={() => onRemoveMember(selectedGroup.id, member)}
+                                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-rose-400/20 bg-rose-400/10 text-rose-200 transition hover:border-rose-300/40 hover:bg-rose-400/15"
+                                aria-label={`Remover ${member.email}`}
+                              >
+                                <X size={16} />
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      )
+                    }) : <p className="rounded-lg border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">Nenhum membro além do owner por enquanto.</p>}
                   </div>
                 </div>
                 <div>
                   <h3 className="mb-2 text-sm font-black text-slate-100">Contatos compartilhados</h3>
                   <div className="grid gap-2">
                     {selectedContacts.length ? selectedContacts.map((contact) => (
-                      <button key={contact.id} type="button" onClick={() => onNavigate(`${ROUTES.CONTACT}/${contact.id}`)} className="action-card rounded-lg p-3 text-left">
-                        <p className="text-sm font-black text-slate-100">{contact.name}</p>
-                        <p className="mt-1 text-xs font-semibold text-slate-500">{contact.service} - {contact.city || 'Sem cidade'}</p>
-                      </button>
+                      <div key={contact.id} className="action-card rounded-lg p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <button type="button" onClick={() => onNavigate(`${ROUTES.CONTACT}/${contact.id}`)} className="min-w-0 flex-1 text-left">
+                            <p className="truncate text-sm font-black text-slate-100">{contact.name}</p>
+                            <p className="mt-1 text-xs font-semibold text-slate-500">{contact.service} - {contact.city || 'Sem cidade'}</p>
+                          </button>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => onNavigate(`${ROUTES.CONTACT}/${contact.id}`)}
+                              className="secondary-button inline-flex h-9 items-center rounded-lg px-3 text-xs font-black"
+                            >
+                              Abrir
+                            </button>
+                            {selectedGroupFields.length ? (
+                              <button
+                                type="button"
+                                onClick={() => setEditingGroupContact(contact)}
+                                className="secondary-button inline-flex h-9 items-center rounded-lg px-3 text-xs font-black"
+                              >
+                                Campos
+                              </button>
+                            ) : null}
+                            {canManageSelectedGroup ? (
+                              <button
+                                type="button"
+                                onClick={() => onRemoveContact(selectedGroup.id, contact)}
+                                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-rose-400/20 bg-rose-400/10 text-rose-200 transition hover:border-rose-300/40 hover:bg-rose-400/15"
+                                aria-label={`Remover ${contact.name} do grupo`}
+                              >
+                                <X size={16} />
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
                     )) : <p className="rounded-lg border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">Nenhum contato compartilhado neste grupo.</p>}
                   </div>
                 </div>
@@ -4595,6 +6062,1375 @@ function SharedGroupsPage({ user, groups, contacts, groupContactsById, onCreateG
           )}
         </section>
       </section>
+      )}
+      {selectedGroup && editingGroupContact ? (
+        <GroupContactCustomFieldsModal
+          group={selectedGroup}
+          contact={editingGroupContact}
+          definitions={selectedGroupFields}
+          canManage={canManageSelectedGroup}
+          onClose={() => setEditingGroupContact(null)}
+          onSave={async (nextValues) => {
+            const updated = await onUpdateContactCustomFields(selectedGroup.id, editingGroupContact, nextValues)
+            if (updated) setEditingGroupContact(updated)
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function GroupContactCustomFieldsModal({ group, contact, definitions, canManage, onClose, onSave }) {
+  const [values, setValues] = useState(() => filterCustomFieldValuesByScope(contact.custom_field_values, 'group', String(group.id)))
+
+  useEffect(() => {
+    setValues(filterCustomFieldValuesByScope(contact.custom_field_values, 'group', String(group.id)))
+  }, [group.id, contact.id, contact.custom_field_values])
+
+  async function submit(event) {
+    event.preventDefault()
+    if (!canManage) return
+    await onSave(values)
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/70 p-3 sm:items-center">
+      <form onSubmit={submit} className="glass-panel max-h-[92vh] w-full max-w-2xl overflow-auto rounded-lg p-4 shadow-2xl sm:p-5">
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Campos do grupo</p>
+            <h2 className="mt-1 text-xl font-black text-slate-100">{contact.name}</h2>
+            <p className="mt-1 text-sm font-semibold text-slate-500">{group.name}</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg bg-slate-900 p-2 text-slate-400" aria-label="Fechar">
+            <X size={18} />
+          </button>
+        </div>
+
+        <CustomFieldValuesEditor
+          definitions={definitions}
+          value={values}
+          onChange={setValues}
+          scopeType="group"
+          scopeId={String(group.id)}
+          emptyLabel="Nenhum campo configurado para este grupo."
+        />
+
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
+          <button type="button" onClick={onClose} className="inline-flex h-10 items-center justify-center rounded-lg border border-slate-800 px-3 text-sm font-black text-slate-300">
+            Fechar
+          </button>
+          {canManage ? (
+            <button type="submit" className="secondary-button inline-flex h-10 items-center justify-center rounded-lg px-3 text-sm font-black">
+              Salvar campos
+            </button>
+          ) : null}
+        </div>
+      </form>
+    </div>
+  )
+}
+
+function SharedGroupsPageModern({
+  user,
+  groups,
+  contacts,
+  users,
+  groupContactsById,
+  groupMessagesById,
+  groupCustomFieldsById,
+  onCreateGroup,
+  onUpdateGroup,
+  onAddMember,
+  onRemoveMember,
+  onAddContact,
+  onRemoveContact,
+  onLoadContacts,
+  onLoadMessages,
+  onSendMessage,
+  onLoadCustomFields,
+  onSaveCustomField,
+  onDeleteCustomField,
+  onUpdateContactCustomFields,
+  onClearMessages,
+  onNavigate,
+}) {
+  const [activeTab, setActiveTab] = useState('view')
+  const [draft, setDraft] = useState({ name: '', area: '', peopleGoal: '3', description: '' })
+  const [createError, setCreateError] = useState('')
+  const [selectedGroupId, setSelectedGroupId] = useState(groups[0]?.id ?? '')
+  const [groupPanelTab, setGroupPanelTab] = useState('chat')
+  const [groupMessageDraft, setGroupMessageDraft] = useState('')
+  const [groupInviteDraft, setGroupInviteDraft] = useState('')
+  const [groupDataOpen, setGroupDataOpen] = useState(false)
+  const [editingGroupContact, setEditingGroupContact] = useState(null)
+  const chatSectionRef = useRef(null)
+  const graphSectionRef = useRef(null)
+  const locationSectionRef = useRef(null)
+  const currentUserId = contactOwnerId(user)
+  const isAdmin = user?.role === 'admin'
+  const canCreateGroup = Boolean(user && isAdmin)
+
+  const findGroupMembership = (group) => group?.members?.find((member) => String(member.user_id) === currentUserId || normalize(member.email) === normalize(user?.email))
+  const groupRole = (group) => {
+    if (!group) return ''
+    if (String(group.owner_id) === currentUserId) return 'owner'
+    const membership = findGroupMembership(group)
+    if (membership?.role) return membership.role
+    return isAdmin ? 'admin_global' : ''
+  }
+  const roleMeta = (role) => ({
+    owner: { label: 'Owner', tone: 'text-emerald-200 border-emerald-400/20 bg-emerald-400/10' },
+    admin: { label: 'Admin', tone: 'text-cyan-200 border-cyan-400/20 bg-cyan-400/10' },
+    admin_global: { label: 'Admin global', tone: 'text-cyan-200 border-cyan-400/20 bg-cyan-400/10' },
+    member: { label: 'Member', tone: 'text-amber-200 border-amber-400/20 bg-amber-400/10' },
+  }[role] || { label: 'Leitura', tone: 'text-slate-300 border-slate-700 bg-slate-900/60' })
+
+  const selectedGroup = groups.find((group) => String(group.id) === String(selectedGroupId)) || groups[0] || null
+  const selectedMembers = selectedGroup ? (selectedGroup.members ?? []) : []
+  const selectedContacts = selectedGroup ? (groupContactsById[selectedGroup.id] ?? []) : []
+  const selectedMessages = selectedGroup ? (groupMessagesById[selectedGroup.id] ?? []) : []
+  const selectedGroupFields = selectedGroup ? (groupCustomFieldsById[selectedGroup.id] ?? []) : []
+  const selectedGroupRole = groupRole(selectedGroup)
+  const canManageSelectedGroup = Boolean(selectedGroup && ['owner', 'admin', 'admin_global'].includes(selectedGroupRole))
+  const ownedGroups = groups.filter((group) => String(group.owner_id) === currentUserId)
+  const participatingGroups = groups.filter((group) => String(group.owner_id) !== currentUserId && ['owner', 'admin', 'member'].includes(groupRole(group)))
+  const visibleAdminGroups = isAdmin ? groups.filter((group) => String(group.owner_id) !== currentUserId && !findGroupMembership(group)) : []
+  const privateAvailable = selectedGroup
+    ? contacts.filter((contact) => !selectedContacts.some((item) => String(item.id) === String(contact.id)) && contactMatchesGroupArea(contact, selectedGroup))
+    : contacts
+
+  const sectionRefs = {
+    chat: chatSectionRef,
+    graph: graphSectionRef,
+    location: locationSectionRef,
+  }
+
+  const selectedGraphItems = useMemo(
+    () => (selectedGroup ? buildGroupGraphRecords({ group: selectedGroup, members: selectedMembers, users, currentUser: user }) : []),
+    [selectedGroup, selectedMembers, users, user],
+  )
+
+  useEffect(() => {
+    if (!selectedGroup?.id) return
+    setSelectedGroupId(selectedGroup.id)
+    onLoadContacts(selectedGroup.id)
+    onLoadMessages(selectedGroup.id)
+    onLoadCustomFields(selectedGroup.id)
+  }, [selectedGroup?.id])
+
+  useEffect(() => {
+    setGroupInviteDraft('')
+  }, [selectedGroup?.id])
+
+  function jumpToGroupSection(sectionId) {
+    setGroupPanelTab(sectionId)
+    sectionRefs[sectionId]?.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  async function submitGroup(event) {
+    event.preventDefault()
+    if (!canCreateGroup) return
+    const peopleGoal = Number(draft.peopleGoal)
+    const nextError = !draft.name.trim()
+      ? 'Informe o nome do grupo.'
+      : !draft.area.trim()
+        ? 'Informe qual área o grupo atende.'
+        : !Number.isFinite(peopleGoal) || peopleGoal < 3
+          ? 'O grupo precisa ter 3 ou mais pessoas.'
+          : ''
+    setCreateError(nextError)
+    if (nextError) return
+    const created = await onCreateGroup({
+      name: draft.name.trim(),
+      area: draft.area.trim(),
+      people_goal: peopleGoal,
+      description: draft.description.trim(),
+    })
+    if (created?.id) {
+      setSelectedGroupId(created.id)
+      setGroupPanelTab('chat')
+    }
+    setDraft({ name: '', area: '', peopleGoal: '3', description: '' })
+  }
+
+  async function submitGroupMessage(event) {
+    event.preventDefault()
+    if (!selectedGroup || !groupMessageDraft.trim()) return
+    const created = await onSendMessage(selectedGroup.id, groupMessageDraft)
+    if (created) setGroupMessageDraft('')
+  }
+
+  async function submitGroupInvite(event) {
+    event.preventDefault()
+    if (!selectedGroup || !groupInviteDraft.trim()) return
+    if (canManageSelectedGroup) {
+      await onAddMember(selectedGroup.id, groupInviteDraft.trim())
+    } else {
+      await onSendMessage(selectedGroup.id, `Pedido de convite para ${groupInviteDraft.trim()} enviado ao grupo.`)
+    }
+    setGroupInviteDraft('')
+  }
+
+  function GroupList({ title, items, emptyText }) {
+    return (
+      <section className="glass-panel rounded-lg p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-sm font-black text-slate-100">{title}</h2>
+          <span className="text-xs font-black text-slate-500">{items.length}</span>
+        </div>
+        <div className="grid gap-2">
+          {items.length ? items.map((group) => {
+            const meta = roleMeta(groupRole(group))
+            const isSelected = String(selectedGroup?.id) === String(group.id)
+            return (
+              <button
+                key={group.id}
+                type="button"
+                onClick={() => setSelectedGroupId(group.id)}
+                className={['action-card rounded-lg p-3 text-left', isSelected ? 'border-cyan-400/60' : ''].join(' ')}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-sm font-black text-slate-100">{group.name}</p>
+                  <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${meta.tone}`}>{meta.label}</span>
+                </div>
+                <p className="mt-1 line-clamp-2 text-xs font-semibold text-slate-500">{group.description || 'Sem descrição.'}</p>
+                <p className="mt-1 text-[11px] font-bold text-slate-500">{group.area || 'Área não informada'} · {group.people_goal || 3}+ pessoas</p>
+                <div className="mt-2 flex gap-2 text-[11px] font-black text-cyan-200">
+                  <span>{group.member_count} membros</span>
+                  <span>{group.people_goal || 3} meta</span>
+                </div>
+              </button>
+            )
+          }) : <p className="rounded-lg border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">{emptyText}</p>}
+        </div>
+      </section>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <PageTitle
+        eyebrow="Grupos compartilhados"
+        title="Chat primeiro, dados separados"
+        description="A conversa é a vista principal do grupo. Grafo, localização e ficha aparecem em blocos separados para a mesma experiência em mobile e desktop."
+        action={<button type="button" onClick={() => onNavigate(ROUTES.PUBLIC)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black"><Compass size={17} />Rede pública</button>}
+      />
+
+      <div className="glass-panel-soft flex flex-wrap rounded-lg p-1.5">
+        {[
+          { id: 'view', label: 'Visualizar grupo' },
+          { id: 'create', label: 'Criar grupo' },
+        ].map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveTab(tab.id)}
+            className={['h-10 flex-1 rounded-md text-sm font-black transition', activeTab === tab.id ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 hover:bg-slate-900/70 hover:text-cyan-100'].join(' ')}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'create' ? (
+        <section className="glass-panel rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-200"><ShieldCheck size={20} /></span>
+            <div>
+              <h2 className="text-base font-black text-slate-100">Criar grupo</h2>
+              <p className="mt-1 text-sm font-semibold text-slate-500">Disponível para contas admin. Todo grupo precisa declarar área atendida e ter previsão mínima de 3 pessoas.</p>
+            </div>
+          </div>
+          {!canCreateGroup ? (
+            <div className="mt-4 rounded-lg border border-amber-400/20 bg-amber-400/10 p-3 text-sm font-bold text-amber-100">
+              Seu plano atual permite participar de grupos compartilhados, mas a criação é reservada para administradores.
+            </div>
+          ) : null}
+          <form onSubmit={submitGroup} className="mt-4 grid gap-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <Field label="Nome" required>
+                <input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} className="field-input" disabled={!canCreateGroup} placeholder="Ex: Hub de fundadores" />
+              </Field>
+              <Field label="Área atendida" required>
+                <input value={draft.area} onChange={(event) => setDraft((current) => ({ ...current, area: event.target.value }))} className="field-input" disabled={!canCreateGroup} placeholder="Ex: Empresários, tecnologia, eventos" />
+              </Field>
+              <Field label="Número de pessoas" required>
+                <input value={draft.peopleGoal} onChange={(event) => setDraft((current) => ({ ...current, peopleGoal: event.target.value }))} className="field-input" type="number" min="3" disabled={!canCreateGroup} placeholder="Mínimo 3" />
+              </Field>
+            </div>
+            <Field label="Descrição">
+              <textarea value={draft.description} onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))} className="field-input min-h-20 resize-y" disabled={!canCreateGroup} placeholder="Contexto, objetivo e tipo de rede." />
+            </Field>
+            {createError ? <p className="rounded-lg border border-rose-400/25 bg-rose-400/10 p-3 text-sm font-bold text-rose-100">{createError}</p> : null}
+            <button type="submit" disabled={!canCreateGroup} className="primary-button inline-flex h-10 items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-50">
+              <Plus size={17} />
+              Criar grupo
+            </button>
+          </form>
+        </section>
+      ) : (
+        <section className="space-y-4">
+          <div className="space-y-4">
+            <GroupList title="Meus grupos" items={ownedGroups} emptyText="Você ainda não criou grupos." />
+            <GroupList title="Participando" items={participatingGroups} emptyText="Você ainda não participa de grupos criados por outras pessoas." />
+            {visibleAdminGroups.length ? <GroupList title="Outros grupos visíveis" items={visibleAdminGroups} emptyText="" /> : null}
+          </div>
+
+          <section className="glass-panel rounded-lg p-4">
+            {selectedGroup ? (
+              <div className="space-y-4">
+                <div className="rounded-2xl border border-cyan-400/10 bg-gradient-to-br from-cyan-500/12 via-slate-950/60 to-emerald-500/8 p-4 shadow-[0_24px_80px_rgba(2,132,199,0.12)]">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="min-w-0">
+                      <p className="text-xs font-black uppercase tracking-[0.28em] text-cyan-300">Sala ativa</p>
+                      <h2 className="mt-1 text-2xl font-black text-slate-100">{selectedGroup.name}</h2>
+                      <p className="mt-1 text-sm font-black text-cyan-100">{selectedGroup.area || 'Área não informada'} · {selectedGroup.people_goal || 3}+ pessoas</p>
+                      <p className="mt-1 max-w-2xl text-sm font-semibold leading-6 text-slate-500">{selectedGroup.description || 'Sem descrição.'}</p>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${roleMeta(selectedGroupRole).tone}`}>{roleMeta(selectedGroupRole).label}</span>
+                        <span className="rounded-md border border-slate-800 bg-slate-950/55 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-300">{selectedMembers.length} membros</span>
+                        <span className="rounded-md border border-slate-800 bg-slate-950/55 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-300">{selectedMessages.length} mensagens</span>
+                        <span className="text-xs font-semibold text-slate-400">{canManageSelectedGroup ? 'Você pode gerenciar este grupo.' : 'Você participa deste grupo com acesso de leitura.'}</span>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button type="button" onClick={() => setGroupDataOpen(true)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+                        <UsersRound size={16} />
+                        Acessar dados do grupo
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {selectedMembers.slice(0, 5).map((member) => {
+                      const memberUser = users.find((profile) => String(profile.id) === String(member.user_id) || normalize(profile.email) === normalize(member.email))
+                      const label = memberUser?.name || member.email
+                      return (
+                        <span key={member.id} className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/55 px-2.5 py-1 text-[11px] font-black text-slate-200">
+                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-500/15 text-[10px] text-cyan-100">{initials(label)}</span>
+                          <span className="max-w-[140px] truncate">{label}</span>
+                        </span>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                <div className="glass-panel-soft flex flex-wrap gap-2 rounded-lg p-1.5">
+                  {[
+                    { id: 'chat', label: 'Chat', icon: MessageCircle },
+                    { id: 'graph', label: 'Grafo', icon: Route },
+                    { id: 'location', label: 'Localização', icon: Map },
+                  ].map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => jumpToGroupSection(tab.id)}
+                      className={['inline-flex h-10 flex-1 items-center justify-center gap-2 rounded-md text-sm font-black transition', groupPanelTab === tab.id ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 hover:bg-slate-900/70 hover:text-cyan-100'].join(' ')}
+                    >
+                      <tab.icon size={16} />
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="space-y-4">
+                  <section ref={chatSectionRef} className="scroll-mt-24">
+                    <GroupChatPanel
+                      group={selectedGroup}
+                      messages={selectedMessages}
+                      currentUserId={currentUserId}
+                      members={selectedMembers}
+                      users={users}
+                      currentUser={user}
+                      canManage={canManageSelectedGroup}
+                      draft={groupMessageDraft}
+                      onDraftChange={setGroupMessageDraft}
+                      onSubmit={submitGroupMessage}
+                      memberCount={selectedMembers.length}
+                      onOpenData={() => setGroupDataOpen(true)}
+                      onClearConversation={() => onClearMessages?.(selectedGroup.id)}
+                      inviteDraft={groupInviteDraft}
+                      onInviteDraftChange={setGroupInviteDraft}
+                      onInviteSubmit={submitGroupInvite}
+                    />
+                  </section>
+
+                  <section ref={graphSectionRef} className="scroll-mt-24">
+                    <GroupGraphPanel
+                      group={selectedGroup}
+                      members={selectedMembers}
+                      users={users}
+                      currentUser={user}
+                      graphItems={selectedGraphItems}
+                    />
+                  </section>
+
+                  <section ref={locationSectionRef} className="scroll-mt-24">
+                    <GroupLocationPanel
+                      group={selectedGroup}
+                      members={selectedMembers}
+                      users={users}
+                      currentUser={user}
+                      graphItems={selectedGraphItems}
+                    />
+                  </section>
+                </div>
+              </div>
+            ) : (
+              <div className="py-10 text-center">
+                <UsersRound className="mx-auto text-cyan-300" size={36} />
+                <h2 className="mt-3 text-lg font-black text-slate-100">Selecione ou crie um grupo</h2>
+                <p className="mt-1 text-sm font-semibold text-slate-500">A conversa, o grafo e a localização aparecem aqui quando houver um grupo ativo.</p>
+              </div>
+            )}
+          </section>
+        </section>
+      )}
+
+      {selectedGroup && groupDataOpen ? (
+        <GroupDetailsModal
+          group={selectedGroup}
+          currentUser={user}
+          roleLabel={roleMeta(selectedGroupRole).label}
+          canManage={canManageSelectedGroup}
+          members={selectedMembers}
+          contacts={selectedContacts}
+          availableContacts={privateAvailable}
+          selectedGroupFields={selectedGroupFields}
+          users={users}
+          onClose={() => setGroupDataOpen(false)}
+          onUpdateGroup={onUpdateGroup}
+          onAddMember={onAddMember}
+          onRemoveMember={onRemoveMember}
+          onAddContact={onAddContact}
+          onRemoveContact={onRemoveContact}
+          onSendMessage={onSendMessage}
+          onSaveCustomField={onSaveCustomField}
+          onDeleteCustomField={onDeleteCustomField}
+          onUpdateContactCustomFields={onUpdateContactCustomFields}
+          onEditContact={setEditingGroupContact}
+          onNavigate={onNavigate}
+        />
+      ) : null}
+
+      {selectedGroup && editingGroupContact ? (
+        <GroupContactCustomFieldsModal
+          group={selectedGroup}
+          contact={editingGroupContact}
+          definitions={selectedGroupFields}
+          canManage={canManageSelectedGroup}
+          onClose={() => setEditingGroupContact(null)}
+          onSave={async (nextValues) => {
+            const updated = await onUpdateContactCustomFields(selectedGroup.id, editingGroupContact, nextValues)
+            if (updated) setEditingGroupContact(updated)
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function GroupChatPanel({
+  group,
+  messages,
+  currentUserId,
+  members,
+  users,
+  currentUser,
+  canManage,
+  draft,
+  onDraftChange,
+  onSubmit,
+  memberCount,
+  onOpenData,
+  onClearConversation,
+  inviteDraft,
+  onInviteDraftChange,
+  onInviteSubmit,
+}) {
+  const [toolsOpen, setToolsOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [actionStatus, setActionStatus] = useState('')
+
+  useEffect(() => {
+    setToolsOpen(false)
+    setSearchQuery('')
+    setActionStatus('')
+  }, [group?.id])
+
+  useEffect(() => {
+    if (!toolsOpen) return undefined
+    function onKeyDown(event) {
+      if (event.key === 'Escape') setToolsOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [toolsOpen])
+
+  const memberItems = useMemo(() => {
+    const q = normalize(searchQuery)
+    return (members ?? [])
+      .map((member) => {
+        const memberUser = users.find((profile) => String(profile.id) === String(member.user_id) || normalize(profile.email) === normalize(member.email))
+        const label = memberUser?.name || member.email || 'Membro'
+        return {
+          id: member.id,
+          name: label,
+          email: member.email || memberUser?.email || '',
+          role: member.role || 'member',
+          user: memberUser,
+          mine: String(member.user_id) === String(currentUserId) || normalize(member.email) === normalize(currentUser?.email),
+        }
+      })
+      .filter((member) => !q || matchText(q, [member.name, member.email, member.role, member.user?.city, member.user?.service, member.user?.note]))
+  }, [members, users, searchQuery, currentUserId, currentUser?.email])
+
+  const messageItems = useMemo(() => {
+    const q = normalize(searchQuery)
+    return (messages ?? []).filter((message) => !q || matchText(q, [message.message, message.sender_name, message.sender_email, formatDateTime(message.created_at)]))
+  }, [messages, searchQuery])
+
+  async function handleClearConversation() {
+    if (!canManage) {
+      setActionStatus('Somente admin ou owner pode limpar a conversa.')
+      return
+    }
+    if (!messages.length) {
+      setActionStatus('Não há conversa para limpar.')
+      return
+    }
+    const confirmed = window.confirm(`Limpar toda a conversa de ${group.name}?`)
+    if (!confirmed) return
+    setActionStatus('Limpando conversa...')
+    try {
+      const result = await onClearConversation?.()
+      if (result === false) {
+        setActionStatus('Não foi possível limpar a conversa.')
+        return
+      }
+      setSearchQuery('')
+      setActionStatus('Conversa limpa.')
+      setToolsOpen(true)
+    } catch {
+      setActionStatus('Não foi possível limpar a conversa.')
+    }
+  }
+
+  return (
+    <section className="glass-panel relative overflow-hidden rounded-xl">
+      <div className="flex flex-col gap-3 border-b border-slate-800 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Sala do grupo</p>
+          <h3 className="mt-1 truncate text-sm font-black text-slate-100">{group.name}</h3>
+          <p className="mt-1 text-xs font-semibold text-slate-500">{memberCount} membros conversando em tempo real.</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setToolsOpen((current) => !current)}
+          className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-800 bg-slate-950/55 text-slate-200 transition hover:border-cyan-400/30 hover:text-cyan-100"
+          aria-expanded={toolsOpen}
+          aria-label="Abrir painel do grupo"
+        >
+          <MoreVertical size={15} />
+        </button>
+      </div>
+
+      <div className="max-h-[58vh] space-y-2 overflow-y-auto p-3 sm:p-4">
+        {messages.length ? messages.map((message) => {
+          const mine = String(message.sender_id) === currentUserId
+          return (
+            <div key={message.id} className={['flex', mine ? 'justify-end' : 'justify-start'].join(' ')}>
+              <div className={['max-w-[86%] rounded-2xl px-3 py-2.5 text-sm leading-6 shadow-lg', mine ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 bg-slate-950/60 text-slate-200'].join(' ')}>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="truncate text-[11px] font-black uppercase tracking-widest opacity-80">{message.sender_name || message.sender_email || 'Membro'}</p>
+                  <span className="shrink-0 text-[10px] font-bold opacity-60">{formatDateTime(message.created_at)}</span>
+                </div>
+                <p className="mt-1 whitespace-pre-wrap">{message.message}</p>
+              </div>
+            </div>
+          )
+        }) : (
+          <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-950/35 p-5 text-sm font-semibold text-slate-500">
+            Nenhuma mensagem ainda. O chat funciona como a sala principal do grupo.
+          </div>
+        )}
+      </div>
+
+      <form onSubmit={onSubmit} className="border-t border-slate-800 bg-slate-950/35 p-3 backdrop-blur">
+        <div className="flex gap-2">
+          <textarea
+            value={draft}
+            onChange={(event) => onDraftChange(event.target.value)}
+            rows={1}
+            className="field-input min-h-11 flex-1 resize-none py-3"
+            placeholder={`Escreva para ${group.name}...`}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                event.currentTarget.form?.requestSubmit()
+              }
+            }}
+          />
+          <button type="submit" className="primary-button h-11 rounded-lg px-4 text-sm font-black">
+            Enviar
+          </button>
+        </div>
+      </form>
+
+      <div className={['absolute inset-0 z-20 transition-opacity duration-300', toolsOpen ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'].join(' ')}>
+        <div className="absolute inset-0 bg-slate-950/65 backdrop-blur-sm" aria-hidden="true" />
+        <aside className={['absolute right-0 top-0 flex h-full w-[min(92vw,420px)] flex-col border-l border-slate-800 bg-[#07111d]/96 shadow-[0_28px_120px_rgba(2,8,23,0.6)] transition-transform duration-300 ease-out', toolsOpen ? 'translate-x-0' : 'translate-x-full'].join(' ')}>
+          <div className="flex items-start justify-between gap-3 border-b border-slate-800 px-4 py-3">
+            <div className="min-w-0">
+              <p className="text-[11px] font-black uppercase tracking-widest text-cyan-400">Painel do grupo</p>
+              <h4 className="mt-1 truncate text-base font-black text-slate-100">{group.name}</h4>
+              <p className="mt-1 text-xs font-semibold text-slate-500">Pesquise membros e mensagens, limpe a conversa ou abra os dados completos.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setToolsOpen(false)}
+              className="rounded-lg border border-slate-800 bg-slate-950/55 p-2 text-slate-400 transition hover:border-cyan-400/30 hover:text-cyan-100"
+              aria-label="Fechar painel"
+            >
+              <X size={16} />
+            </button>
+          </div>
+
+          <div className="flex-1 space-y-4 overflow-y-auto p-4">
+            <section className="rounded-2xl border border-cyan-400/10 bg-cyan-500/5 p-3">
+              <div className="grid grid-cols-2 gap-2">
+                <Metric value={memberCount} label="membros" />
+                <Metric value={messages.length} label="mensagens" />
+                <Metric value={group.area || 'sem área'} label="área" />
+                <Metric value={canManage ? 'admin' : 'membro'} label="acesso" />
+              </div>
+              <div className="mt-3 grid gap-2 text-sm">
+                <DetailRow label="Área atendida" value={group.area || 'Não informada'} />
+                <DetailRow label="Meta mínima" value={`${group.people_goal || 3}+ pessoas`} />
+                <DetailRow label="Seu perfil" value={currentUser?.name || 'Você'} />
+              </div>
+            </section>
+
+            <div className="glass-panel-soft flex items-center gap-2 rounded-lg px-3">
+              <Search size={16} className="text-slate-500" />
+              <input
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                className="h-11 min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-100 outline-none placeholder:text-slate-600"
+                placeholder="Pesquisar membros e mensagens"
+              />
+            </div>
+
+            <section className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[11px] font-black uppercase tracking-widest text-slate-500">Membros encontrados</p>
+                <span className="text-[11px] font-black text-slate-500">{memberItems.length}</span>
+              </div>
+              <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
+                {memberItems.length ? memberItems.map((member) => (
+                  <div key={member.id} className="rounded-2xl border border-slate-800 bg-slate-950/40 px-3 py-2.5 transition hover:border-cyan-400/20">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-black text-slate-100">{member.name}</p>
+                        <p className="mt-1 truncate text-xs font-semibold text-slate-500">{member.email || 'Sem email'}</p>
+                      </div>
+                      <span className={['rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-widest', member.mine ? 'border-cyan-400/20 bg-cyan-400/10 text-cyan-100' : 'border-slate-700 bg-slate-900/60 text-slate-300'].join(' ')}>
+                        {member.mine ? 'você' : member.role}
+                      </span>
+                    </div>
+                  </div>
+                )) : (
+                  <p className="rounded-2xl border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">Nenhum membro corresponde à busca.</p>
+                )}
+              </div>
+            </section>
+
+            <section className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[11px] font-black uppercase tracking-widest text-slate-500">Mensagens encontradas</p>
+                <span className="text-[11px] font-black text-slate-500">{messageItems.length}</span>
+              </div>
+              <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+                {messageItems.length ? messageItems.map((message) => {
+                  const mine = String(message.sender_id) === currentUserId
+                  return (
+                    <div key={message.id} className={['rounded-2xl border px-3 py-2.5', mine ? 'border-cyan-400/20 bg-cyan-400/10' : 'border-slate-800 bg-slate-950/40'].join(' ')}>
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="truncate text-[11px] font-black uppercase tracking-widest text-slate-300">{message.sender_name || message.sender_email || 'Membro'}</p>
+                        <span className="shrink-0 text-[10px] font-bold text-slate-600">{formatDateTime(message.created_at)}</span>
+                      </div>
+                      <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-sm font-medium leading-5 text-slate-300">{message.message}</p>
+                    </div>
+                  )
+                }) : (
+                  <p className="rounded-2xl border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">Nenhuma mensagem corresponde à busca.</p>
+                )}
+              </div>
+            </section>
+
+            <section className="space-y-2 rounded-2xl border border-slate-800 bg-slate-950/35 p-3">
+              <p className="text-[11px] font-black uppercase tracking-widest text-slate-500">Convite rápido</p>
+              <form onSubmit={onInviteSubmit} className="mt-2 grid gap-2">
+                <input
+                  type="email"
+                  value={inviteDraft}
+                  onChange={(event) => onInviteDraftChange(event.target.value)}
+                  className="field-input h-10"
+                  placeholder="email@exemplo.com"
+                />
+                <button type="submit" className="primary-button inline-flex h-10 items-center justify-center rounded-lg px-3 text-sm font-black">
+                  {canManage ? 'Convidar' : 'Solicitar'}
+                </button>
+              </form>
+              <p className="text-xs font-semibold leading-5 text-slate-500">
+                Se você não for admin, a ação vira uma solicitação no chat do grupo.
+              </p>
+            </section>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={handleClearConversation}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-rose-400/20 bg-rose-400/10 text-sm font-black text-rose-100 transition hover:border-rose-300/40 hover:bg-rose-400/15 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!canManage || !messages.length}
+              >
+                Limpar conversa
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setToolsOpen(false)
+                  onOpenData()
+                }}
+                className="secondary-button inline-flex h-11 items-center justify-center gap-2 rounded-lg px-3 text-sm font-black"
+              >
+                Dados do grupo
+              </button>
+            </div>
+
+            {actionStatus ? (
+              <p className="rounded-lg border border-slate-800 bg-slate-950/55 px-3 py-2 text-xs font-semibold text-slate-400" aria-live="polite">
+                {actionStatus}
+              </p>
+            ) : null}
+          </div>
+        </aside>
+      </div>
+    </section>
+  )
+}
+
+function GroupContextRail({ group, members, users, currentUser, canManage, graphCount, inviteDraft, onInviteDraftChange, onInviteSubmit, onOpenData }) {
+  const memberPreview = members.slice(0, 6)
+  const memberLabels = memberPreview.map((member) => {
+    const memberUser = users.find((profile) => String(profile.id) === String(member.user_id) || normalize(profile.email) === normalize(member.email))
+    return {
+      id: member.id,
+      name: memberUser?.name || member.email,
+      role: member.role || 'member',
+    }
+  })
+
+  return (
+    <aside className="space-y-4">
+      <section className="glass-panel rounded-xl p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Contexto do grupo</p>
+            <h3 className="mt-1 text-lg font-black text-slate-100">{group.name}</h3>
+            <p className="mt-1 text-sm font-semibold text-slate-500">Sala privada, membros visíveis e grafo restrito ao grupo.</p>
+          </div>
+          <span className="rounded-md border border-slate-800 bg-slate-950/60 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-300">{members.length} membros</span>
+        </div>
+
+        <div className="mt-4 grid gap-2 sm:grid-cols-2">
+          <Metric value={members.length} label="membros" />
+          <Metric value={group.people_goal || 3} label="meta" />
+          <Metric value={graphCount} label="nós" />
+          <Metric value={canManage ? 'admin' : 'membro'} label="acesso" />
+        </div>
+
+        <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/35 p-3">
+          <p className="text-[11px] font-black uppercase tracking-widest text-slate-500">Convite rápido</p>
+          <form onSubmit={onInviteSubmit} className="mt-2 grid gap-2">
+            <input
+              type="email"
+              value={inviteDraft}
+              onChange={(event) => onInviteDraftChange(event.target.value)}
+              className="field-input h-10"
+              placeholder="email@exemplo.com"
+            />
+            <button type="submit" className="primary-button inline-flex h-10 items-center justify-center rounded-lg px-3 text-sm font-black">
+              {canManage ? 'Convidar' : 'Solicitar'}
+            </button>
+          </form>
+          <p className="mt-2 text-xs font-semibold leading-5 text-slate-500">
+            Se você não for admin, a ação vira uma solicitação no chat do grupo.
+          </p>
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          {memberLabels.map((member) => (
+            <span key={member.id} className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/55 px-2.5 py-1 text-[11px] font-black text-slate-200">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-500/15 text-[10px] text-cyan-100">{initials(member.name)}</span>
+              <span className="max-w-[120px] truncate">{member.name}</span>
+              <span className="rounded-full border border-slate-800 bg-slate-900/70 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest text-slate-400">{member.role}</span>
+            </span>
+          ))}
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button type="button" onClick={onOpenData} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+            <UsersRound size={16} />
+            Acessar dados do grupo
+          </button>
+        </div>
+
+        <p className="mt-3 text-xs font-semibold leading-5 text-slate-500">
+          Chat, grafo e localização aparecem como blocos separados em qualquer tela. Os botões acima apenas pulam para cada seção.
+        </p>
+      </section>
+
+      <section className="glass-panel-soft rounded-xl p-4">
+        <div className="flex items-center gap-2">
+          <MapPin size={16} className="text-cyan-300" />
+          <p className="text-sm font-black text-slate-100">Localização relativa</p>
+        </div>
+        <p className="mt-2 text-sm font-semibold leading-6 text-slate-500">
+          Veja a proximidade entre os membros e o seu ponto de referência dentro da mesma experiência.
+        </p>
+        <div className="mt-3 grid gap-2">
+          <DetailRow label="Seu perfil" value={currentUser?.name || 'Você'} />
+          <DetailRow label="Área" value={group.area || 'Não informada'} />
+          <DetailRow label="Rede" value="Somente membros" />
+        </div>
+      </section>
+    </aside>
+  )
+}
+
+function GroupGraphPanel({ group, members, users, currentUser, graphItems }) {
+  const [query, setQuery] = useState('')
+  const [selectedId, setSelectedId] = useState('')
+  const visibleItems = useMemo(() => {
+    return (graphItems ?? []).filter((item) => matchText(query, [item.name, item.service, item.city, item.locationLabel, item.roleLabel, item.ddd, item.demand, item.solves, ...(item.tags ?? [])]))
+  }, [graphItems, query])
+
+  useEffect(() => {
+    if (!visibleItems.length) {
+      setSelectedId('')
+      return
+    }
+    if (!visibleItems.some((item) => item.id === selectedId)) setSelectedId(visibleItems[0].id)
+  }, [visibleItems, selectedId])
+
+  const selectedItem = visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0] ?? null
+  const summary = {
+    nodes: visibleItems.length,
+    located: visibleItems.filter((item) => item.distanceKm !== null).length,
+    ddds: new Set(visibleItems.map((item) => item.ddd).filter(Boolean)).size,
+    cities: new Set(visibleItems.map((item) => item.locationLabel).filter(Boolean)).size,
+  }
+
+  return (
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.82fr)]">
+      <section className="glass-panel rounded-xl p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Grafo dos membros</p>
+            <h3 className="mt-1 text-xl font-black text-slate-100">{group.name}</h3>
+            <p className="mt-1 text-sm font-semibold text-slate-500">Somente membros, com posição aproximada baseada em localidade e DDD quando houver.</p>
+          </div>
+          <div className="grid grid-cols-4 gap-2">
+            <Metric value={summary.nodes} label="membros" />
+            <Metric value={summary.located} label="localizados" />
+            <Metric value={summary.ddds} label="DDDs" />
+            <Metric value={summary.cities} label="cidades" />
+          </div>
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          {members.slice(0, 5).map((member) => {
+            const memberUser = users.find((profile) => String(profile.id) === String(member.user_id) || normalize(profile.email) === normalize(member.email))
+            const label = memberUser?.name || member.email
+            return (
+              <span key={member.id} className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/55 px-2.5 py-1 text-[11px] font-black text-slate-200">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-500/15 text-[10px] text-cyan-100">{initials(label)}</span>
+                <span className="max-w-[140px] truncate">{label}</span>
+              </span>
+            )
+          })}
+        </div>
+
+        <div className="mt-4 glass-panel-soft flex items-center gap-2 rounded-lg px-3">
+          <Search size={16} className="text-slate-500" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            className="h-11 min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-100 outline-none placeholder:text-slate-600"
+            placeholder="Buscar membro, cidade, DDD, área ou tag"
+          />
+        </div>
+
+        {visibleItems.length ? (
+          <div className="mt-4">
+            <NetworkGraph items={visibleItems} selectedId={selectedItem?.id} onSelect={setSelectedId} showCategoryFilter={false} label="NETWORK · GRUPO · MEMBROS" />
+          </div>
+        ) : (
+          <div className="mt-4 rounded-lg border border-dashed border-slate-800 p-6 text-sm font-semibold text-slate-500">
+            Nenhum membro encontrado para os filtros atuais.
+          </div>
+        )}
+      </section>
+
+      <aside className="space-y-4">
+        <div className="glass-panel rounded-xl p-4">
+          {selectedItem ? (
+            <div>
+              <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Leitura ativa</p>
+              <h4 className="mt-1 text-lg font-black text-slate-100">{selectedItem.name}</h4>
+              <p className="mt-1 text-sm font-semibold text-slate-400">{selectedItem.service}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[11px] font-black text-cyan-100">{selectedItem.roleLabel}</span>
+                <span className="rounded-md border border-slate-800 bg-slate-950/60 px-2 py-1 text-[11px] font-black text-slate-300">{selectedItem.distanceLabel || 'sem distância'}</span>
+                <span className="rounded-md border border-slate-800 bg-slate-950/60 px-2 py-1 text-[11px] font-black text-slate-300">{selectedItem.locationSourceLabel || 'localização'}</span>
+              </div>
+              <div className="mt-3 grid gap-2 text-sm">
+                <DetailRow label="Cidade" value={selectedItem.city || 'Não informada'} />
+                <DetailRow label="DDD" value={selectedItem.ddd || 'Não identificado'} />
+                <DetailRow label="Grupo" value={selectedItem.groupNames?.join(', ') || group.name} />
+                <DetailRow label="Vínculo" value={selectedItem.linkedPlatform ? selectedItem.linkedLabel || 'Usuário da plataforma' : 'Sem vínculo'} />
+              </div>
+              {selectedItem.tags?.length ? (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {selectedItem.tags.slice(0, 8).map((tag) => <span key={tag} className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1 text-[11px] font-black text-slate-300">{tag}</span>)}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <p className="text-sm font-semibold text-slate-500">Selecione um membro no grafo para ver a leitura de proximidade.</p>
+          )}
+        </div>
+
+        <div className="glass-panel rounded-xl p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-sm font-black text-slate-100">Membros por proximidade</p>
+            <span className="text-xs font-black text-slate-500">{visibleItems.length}</span>
+          </div>
+          <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
+            {visibleItems.slice().sort((a, b) => (a.distanceKm ?? 99999) - (b.distanceKm ?? 99999)).map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setSelectedId(item.id)}
+                className={['flex w-full items-start gap-3 rounded-lg border px-3 py-3 text-left transition', selectedId === item.id ? 'border-cyan-400/40 bg-cyan-500/10' : 'border-slate-800 bg-slate-950/35 hover:border-cyan-400/20'].join(' ')}
+              >
+                <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-xs font-black text-white" style={{ backgroundColor: item.category?.color ?? '#0f172a' }}>
+                  {initials(item.name)}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-black text-slate-100">{item.name}</span>
+                  <span className="block truncate text-xs font-semibold text-slate-500">{item.roleLabel} · {item.locationLabel || item.city}</span>
+                  <span className="mt-1 block text-xs font-black text-cyan-300">{item.distanceLabel || 'sem distância'}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </aside>
+    </div>
+  )
+}
+
+function GroupLocationPanel({ group, members, users, currentUser, graphItems }) {
+  const [query, setQuery] = useState('')
+  const [selectedId, setSelectedId] = useState('')
+  const currentLocation = useMemo(
+    () => graphLocationCoords(currentUser, currentUser?.serviceAddress || currentUser?.address || currentUser?.city || group.area || ''),
+    [currentUser, group.area],
+  )
+
+  const visibleItems = useMemo(() => {
+    return (graphItems ?? []).filter((item) => matchText(query, [item.name, item.service, item.city, item.locationLabel, item.ddd, item.roleLabel, ...(item.tags ?? [])]))
+  }, [graphItems, query])
+
+  useEffect(() => {
+    if (!visibleItems.length) {
+      setSelectedId('')
+      return
+    }
+    if (!visibleItems.some((item) => item.id === selectedId)) setSelectedId(visibleItems[0].id)
+  }, [visibleItems, selectedId])
+
+  const selectedItem = visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0] ?? null
+  const summary = {
+    nodes: visibleItems.length,
+    located: visibleItems.filter((item) => item.distanceKm !== null).length,
+    ddds: new Set(visibleItems.map((item) => item.ddd).filter(Boolean)).size,
+    cities: new Set(visibleItems.map((item) => item.locationLabel).filter(Boolean)).size,
+  }
+
+  return (
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(320px,0.9fr)]">
+      <section className="space-y-4">
+        <div className="glass-panel rounded-xl p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Mapa e proximidade</p>
+              <h3 className="mt-1 text-xl font-black text-slate-100">{group.name}</h3>
+              <p className="mt-1 text-sm font-semibold text-slate-500">Veja a proximidade de cada membro em relação a você e ao grupo.</p>
+            </div>
+            <div className="grid grid-cols-4 gap-2">
+              <Metric value={summary.nodes} label="membros" />
+              <Metric value={summary.located} label="localizados" />
+              <Metric value={summary.ddds} label="DDDs" />
+              <Metric value={summary.cities} label="cidades" />
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {members.slice(0, 5).map((member) => {
+              const memberUser = users.find((profile) => String(profile.id) === String(member.user_id) || normalize(profile.email) === normalize(member.email))
+              const label = memberUser?.name || member.email
+              return (
+                <span key={member.id} className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-950/55 px-2.5 py-1 text-[11px] font-black text-slate-200">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-500/15 text-[10px] text-cyan-100">{initials(label)}</span>
+                  <span className="max-w-[140px] truncate">{label}</span>
+                </span>
+              )
+            })}
+          </div>
+          <div className="mt-4 glass-panel-soft flex items-center gap-2 rounded-lg px-3">
+            <Search size={16} className="text-slate-500" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              className="h-11 min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-100 outline-none placeholder:text-slate-600"
+              placeholder="Buscar por cidade, DDD, nome ou área"
+            />
+          </div>
+        </div>
+
+        <GoogleLocationMap
+          user={currentUser}
+          centerAddress={currentLocation.query}
+          contacts={visibleItems}
+          selectedContact={selectedItem}
+          onSelect={setSelectedId}
+        />
+      </section>
+
+      <aside className="space-y-4">
+        <div className="glass-panel rounded-xl p-4">
+          {selectedItem ? (
+            <div>
+              <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Mais próximo selecionado</p>
+              <h4 className="mt-1 text-lg font-black text-slate-100">{selectedItem.name}</h4>
+              <p className="mt-1 text-sm font-semibold text-slate-400">{selectedItem.service}</p>
+              <div className="mt-3 grid gap-2 text-sm">
+                <DetailRow label="Distância" value={selectedItem.distanceLabel || 'sem distância'} />
+                <DetailRow label="Localidade" value={selectedItem.locationLabel || 'Não informada'} />
+                <DetailRow label="Origem" value={selectedItem.locationSourceLabel || 'Sem origem'} />
+                <DetailRow label="Vínculo" value={selectedItem.linkedPlatform ? selectedItem.linkedLabel || 'Usuário da plataforma' : 'Sem vínculo'} />
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm font-semibold text-slate-500">Selecione um membro para ver a proximidade.</p>
+          )}
+        </div>
+
+        <div className="glass-panel rounded-xl p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-sm font-black text-slate-100">Ranking de proximidade</p>
+            <span className="text-xs font-black text-slate-500">{visibleItems.length}</span>
+          </div>
+          <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
+            {visibleItems.slice().sort((a, b) => (a.distanceKm ?? 99999) - (b.distanceKm ?? 99999)).map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setSelectedId(item.id)}
+                className={['flex w-full items-start gap-3 rounded-lg border px-3 py-3 text-left transition', selectedId === item.id ? 'border-cyan-400/40 bg-cyan-500/10' : 'border-slate-800 bg-slate-950/35 hover:border-cyan-400/20'].join(' ')}
+              >
+                <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-xs font-black text-white" style={{ backgroundColor: item.category?.color ?? '#0f172a' }}>
+                  {initials(item.name)}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-black text-slate-100">{item.name}</span>
+                  <span className="block truncate text-xs font-semibold text-slate-500">{item.locationLabel || item.city}</span>
+                  <span className="mt-1 block text-xs font-black text-cyan-300">{item.distanceLabel || 'sem distância'}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </aside>
+    </div>
+  )
+}
+
+function GroupDetailsModal({
+  group,
+  currentUser,
+  roleLabel,
+  canManage,
+  members,
+  contacts,
+  availableContacts,
+  selectedGroupFields,
+  users,
+  onClose,
+  onUpdateGroup,
+  onAddMember,
+  onRemoveMember,
+  onAddContact,
+  onRemoveContact,
+  onSendMessage,
+  onSaveCustomField,
+  onDeleteCustomField,
+  onUpdateContactCustomFields,
+  onEditContact,
+  onNavigate,
+}) {
+  const [editDraft, setEditDraft] = useState({
+    name: group.name || '',
+    area: group.area || '',
+    peopleGoal: String(group.people_goal || 3),
+    description: group.description || '',
+  })
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [selectedContactId, setSelectedContactId] = useState('')
+
+  useEffect(() => {
+    setEditDraft({
+      name: group.name || '',
+      area: group.area || '',
+      peopleGoal: String(group.people_goal || 3),
+      description: group.description || '',
+    })
+    setInviteEmail('')
+    setSelectedContactId('')
+  }, [group.id, group.name, group.area, group.people_goal, group.description])
+
+  async function submitUpdate(event) {
+    event.preventDefault()
+    if (!canManage) return
+    const peopleGoal = Number(editDraft.peopleGoal)
+    if (!editDraft.name.trim() || !editDraft.area.trim() || !Number.isFinite(peopleGoal) || peopleGoal < 3) return
+    await onUpdateGroup(group.id, {
+      name: editDraft.name.trim(),
+      area: editDraft.area.trim(),
+      people_goal: peopleGoal,
+      description: editDraft.description.trim(),
+    })
+  }
+
+  async function submitInvite(event) {
+    event.preventDefault()
+    if (!inviteEmail.trim()) return
+    if (canManage) {
+      await onAddMember(group.id, inviteEmail.trim())
+    } else {
+      await onSendMessage(group.id, `Pedido de convite para ${inviteEmail.trim()} enviado ao grupo.`)
+    }
+    setInviteEmail('')
+  }
+
+  async function submitContact(event) {
+    event.preventDefault()
+    if (!canManage || !selectedContactId) return
+    await onAddContact(group.id, selectedContactId)
+    setSelectedContactId('')
+  }
+
+  const groupRoleTone = canManage ? 'text-cyan-200 border-cyan-400/20 bg-cyan-400/10' : 'text-slate-300 border-slate-700 bg-slate-900/60'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/70 p-3 sm:items-center">
+      <div className="glass-panel max-h-[92vh] w-full max-w-4xl overflow-auto rounded-2xl p-4 shadow-2xl sm:p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Acessar dados do grupo</p>
+            <h2 className="mt-1 text-2xl font-black text-slate-100">{group.name}</h2>
+            <p className="mt-1 text-sm font-semibold text-slate-500">{group.area || 'Área não informada'} · {group.people_goal || 3}+ pessoas</p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${groupRoleTone}`}>{roleLabel}</span>
+              <span className="text-xs font-semibold text-slate-400">{currentUser?.name || 'Você'}</span>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg bg-slate-900 p-2 text-slate-400" aria-label="Fechar">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+          <div className="space-y-4">
+            <section className="glass-panel-soft rounded-xl p-4">
+              <div className="flex items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-200">
+                  <UsersRound size={18} />
+                </span>
+                <div>
+                  <h3 className="text-sm font-black text-slate-100">Ficha do grupo</h3>
+                  <p className="mt-1 text-xs font-semibold leading-5 text-slate-500">Essa área concentra a gestão do grupo. O chat principal fica fora daqui para não misturar conversa com ficha.</p>
+                </div>
+              </div>
+              <form onSubmit={submitUpdate} className="mt-4 grid gap-3">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Field label="Nome" required>
+                    <input value={editDraft.name} onChange={(event) => setEditDraft((current) => ({ ...current, name: event.target.value }))} className="field-input" disabled={!canManage} />
+                  </Field>
+                  <Field label="Área atendida" required>
+                    <input value={editDraft.area} onChange={(event) => setEditDraft((current) => ({ ...current, area: event.target.value }))} className="field-input" disabled={!canManage} />
+                  </Field>
+                  <Field label="Número de pessoas" required>
+                    <input value={editDraft.peopleGoal} onChange={(event) => setEditDraft((current) => ({ ...current, peopleGoal: event.target.value }))} className="field-input" type="number" min="3" disabled={!canManage} />
+                  </Field>
+                </div>
+                <Field label="Descrição">
+                  <textarea value={editDraft.description} onChange={(event) => setEditDraft((current) => ({ ...current, description: event.target.value }))} className="field-input min-h-20 resize-y" disabled={!canManage} />
+                </Field>
+                <div className="flex justify-end">
+                  <button type="submit" disabled={!canManage} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-50">
+                    <Pencil size={16} />
+                    Salvar dados
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <section className="glass-panel-soft rounded-xl p-4">
+              <div className="flex items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-200">
+                  <UsersRound size={18} />
+                </span>
+                <div>
+                  <h3 className="text-sm font-black text-slate-100">Membros</h3>
+                  <p className="mt-1 text-xs font-semibold text-slate-500">O convite é direto para gestores e vira pedido no chat quando o usuário não é admin.</p>
+                </div>
+              </div>
+              <form onSubmit={submitInvite} className="mt-4 flex gap-2">
+                <input value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} className="field-input h-10 flex-1" type="email" placeholder="email@exemplo.com" />
+                <button type="submit" className="primary-button h-10 rounded-lg px-3 text-sm font-black">
+                  {canManage ? 'Convidar' : 'Solicitar'}
+                </button>
+              </form>
+              <div className="mt-3 grid gap-2">
+                {members.length ? members.map((member) => {
+                  const removable = canManage && member.role !== 'owner'
+                  const memberUser = users.find((profile) => String(profile.id) === String(member.user_id) || normalize(profile.email) === normalize(member.email))
+                  return (
+                    <div key={member.id} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-black text-slate-100">{memberUser?.name || member.email}</p>
+                          <p className="mt-1 text-xs font-black uppercase tracking-widest text-slate-500">{member.role}</p>
+                          {memberUser?.publicVisible ? <span className="mt-2 inline-flex rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-cyan-200">Perfil visível</span> : null}
+                        </div>
+                        {removable ? (
+                          <button type="button" onClick={() => onRemoveMember(group.id, member)} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-rose-400/20 bg-rose-400/10 text-rose-200">
+                            <X size={16} />
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  )
+                }) : <p className="rounded-lg border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">Nenhum membro além do owner por enquanto.</p>}
+              </div>
+            </section>
+
+            <details className="glass-panel-soft rounded-xl p-4">
+              <summary className="flex cursor-pointer list-none items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-200">
+                  <UsersRound size={18} />
+                </span>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-black text-slate-100">Contatos vinculados, avançado</h3>
+                  <p className="mt-1 text-xs font-semibold text-slate-500">O grafo do grupo continua restrito aos membros. Esta área fica recolhida para gestão administrativa.</p>
+                </div>
+              </summary>
+              <div className="mt-4">
+                <form onSubmit={submitContact} className="flex gap-2">
+                  <select value={selectedContactId} onChange={(event) => setSelectedContactId(event.target.value)} className="field-input h-10 flex-1" disabled={!canManage}>
+                    <option value="">Escolha um contato</option>
+                    {availableContacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name} · {contact.service}</option>)}
+                  </select>
+                  <button type="submit" disabled={!canManage} className="secondary-button h-10 rounded-lg px-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-50">
+                    Adicionar
+                  </button>
+                </form>
+                <div className="mt-3 grid gap-2">
+                  {contacts.length ? contacts.map((contact) => (
+                    <div key={contact.id} className="action-card rounded-lg p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <button type="button" onClick={() => onNavigate(`${ROUTES.CONTACT}/${contact.id}`)} className="min-w-0 flex-1 text-left">
+                          <p className="truncate text-sm font-black text-slate-100">{contact.name}</p>
+                          <p className="mt-1 text-xs font-semibold text-slate-500">{contact.service} · {contact.city || 'Sem cidade'}</p>
+                        </button>
+                        <div className="flex shrink-0 items-center gap-2">
+                          {selectedGroupFields.length ? (
+                            <button type="button" onClick={() => onEditContact(contact)} className="secondary-button inline-flex h-9 items-center rounded-lg px-3 text-xs font-black">
+                              Campos
+                            </button>
+                          ) : null}
+                          {canManage ? (
+                            <button type="button" onClick={() => onRemoveContact(group.id, contact)} className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-rose-400/20 bg-rose-400/10 text-rose-200">
+                              <X size={16} />
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  )) : <p className="rounded-lg border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">Nenhum contato compartilhado neste grupo.</p>}
+                </div>
+              </div>
+            </details>
+          </div>
+
+          <div className="space-y-4">
+            <section className="glass-panel-soft rounded-xl p-4">
+              <div className="flex items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-200">
+                  <MessageCircle size={18} />
+                </span>
+                <div>
+                  <h3 className="text-sm font-black text-slate-100">Campos personalizados</h3>
+                  <p className="mt-1 text-xs font-semibold text-slate-500">Defina campos específicos do contexto do grupo.</p>
+                </div>
+              </div>
+              <div className="mt-4">
+                <CustomFieldDefinitionsManager
+                  managerKey={`group-fields-${group.id}`}
+                  title="Campos do grupo"
+                  description={canManage ? 'Crie campos específicos para contatos compartilhados neste contexto.' : 'Campos disponíveis para este grupo.'}
+                  definitions={selectedGroupFields}
+                  onSave={(payload) => onSaveCustomField({ ...payload, scope_type: 'group', scope_id: String(group.id) }, payload.id)}
+                  onDelete={onDeleteCustomField}
+                  canManage={canManage}
+                />
+              </div>
+            </section>
+
+            <section className="glass-panel-soft rounded-xl p-4">
+              <div className="flex items-start gap-3">
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-200">
+                  <Route size={18} />
+                </span>
+                <div>
+                  <h3 className="text-sm font-black text-slate-100">Resumo do grupo</h3>
+                  <p className="mt-1 text-xs font-semibold text-slate-500">Leitura rápida da rede compartilhada.</p>
+                </div>
+              </div>
+              <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                <PublicProfileText label="Área" value={group.area || 'Não informada'} />
+                <PublicProfileText label="Meta" value={`${group.people_goal || 3}+ pessoas`} />
+                <PublicProfileText label="Membros" value={members.length || group.member_count || 0} />
+                <PublicProfileText label="Contatos" value={contacts.length || group.contact_count || 0} />
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -4642,7 +7478,7 @@ function Metric({ value, label }) {
   )
 }
 
-function MapPage({ contacts, users, user, onNavigate }) {
+function MapPage({ contacts, users, publicProfiles, groups, groupContactsById, user, onNavigate, onOpenGroup }) {
   const profilePoints = useMemo(() => {
     const currentPhone = onlyDigits(user?.phone)
     const currentEmail = normalize(user?.email)
@@ -4672,29 +7508,44 @@ function MapPage({ contacts, users, user, onNavigate }) {
     ],
     [contacts, profilePoints],
   )
-
-  if (!hasGoogleConnection(user)) {
-    return (
-      <GoogleRequiredPanel
-        title="Mapa bloqueado"
-        description="O mapa depende da conta Google para manter origem, localização e dados conectados consistentes."
-        onNavigate={onNavigate}
-      />
-    )
-  }
+  const privateGraphItems = useMemo(
+    () => buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser: user, groups, groupContactsById }),
+    [contacts, publicProfiles, users, user, groups, groupContactsById],
+  )
 
   return (
     <div className="space-y-4">
       <PageTitle
         eyebrow="Network.map"
-        title="Grafo de proximidade"
-        description="Encontre contatos próximos por serviço, veja conexões da rede e abra a localização da pessoa selecionada no Google Maps."
+        title="Grafo interno e proximidade"
+        description="Leia sua base privada como rede, aplique filtros ricos e depois aprofunde por proximidade e endereço."
         action={
           <button type="button" onClick={() => onNavigate(ROUTES.REGISTER)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
             <MapPin size={17} />
             Endereço
           </button>
         }
+      />
+      {!hasGoogleConnection(user) ? (
+        <GoogleRequiredPanel
+          title="Google ausente"
+          description="A conta Google libera origem, geolocalização e mapas. O grafo 3D continua disponível para navegação e análise da rede."
+          onNavigate={onNavigate}
+        />
+      ) : null}
+      <GraphWorkspace
+        contextLabel="Grafo interno"
+        title="Sua agenda como inteligência de rede"
+        description="Filtre por tag, fonte, DDD, demanda, solução, grupo e vínculos com perfis públicos da plataforma."
+        items={privateGraphItems}
+        emptyLabel="Nenhum contato corresponde aos filtros atuais."
+        onOpenItem={(item) => {
+          if (item.actionKind === 'contact' && item.contactId) {
+            onNavigate(`${ROUTES.CONTACT}/${item.contactId}`)
+            return
+          }
+          if (item.actionKind === 'service') onOpenGroup(item.raw)
+        }}
       />
       <NetworkGraphMap user={user} contacts={mapItems} />
     </div>
@@ -4754,6 +7605,7 @@ function NetworkGraphMap({ user, contacts }) {
           const rawAddress = contact.address || contact.city || ''
           const location = withGeocodedLocation(resolveMapLocation(contact, rawAddress), geocodedLocations)
           const distanceKm = originLocation.coords && location.coords ? distanceBetweenCoordinates(originLocation.coords, location.coords) : null
+          const graphPoint = graphPositionFromCoords(location.coords, originLocation.coords)
           const usesDdd = originLocation.source.includes('ddd') || location.source.includes('ddd')
           return {
             ...contact,
@@ -4767,6 +7619,9 @@ function NetworkGraphMap({ user, contacts }) {
             distanceKm,
             distanceLabel: formatDistanceKm(distanceKm),
             distanceSourceLabel: distanceKm === null ? 'sem DDD/localização' : usesDdd ? 'por DDD' : location.source.startsWith('address') ? 'por endereço' : 'estimada',
+            graphX: graphPoint?.x,
+            graphY: graphPoint?.y,
+            graphZ: distanceKm === null ? 0 : Math.max(0, 75 - Math.min(75, distanceKm / 2)),
           }
         })
         .filter((contact) => contact?.name && contact.locationQuery),
@@ -5011,7 +7866,7 @@ function MapGraphPreview({ summary, categories, selectedContact, onLoad }) {
   )
 }
 
-function NetworkGraph({ items, contacts = CONTACTS_SEED, query = '', selectedId, onSelect }) {
+function NetworkGraph({ contacts, items, query = '', selectedId, onSelect, showCategoryFilter = true, filterOptions = ['all', 'home', 'legal', 'business', 'tech', 'groups'], label = 'NETWORK · GRAFO 3D' }) {
   const cvRef = useRef(null)
   const rafRef = useRef(null)
   const nodesRef = useRef([])
@@ -5024,19 +7879,49 @@ function NetworkGraph({ items, contacts = CONTACTS_SEED, query = '', selectedId,
   const [filter, setFilter] = useState('all')
 
   const graphContacts = useMemo(() => {
-    const source = Array.isArray(items) && items.length ? items : contacts
-    return (source?.length ? source : CONTACTS_SEED).map((contact, index) => {
+    const source = Array.isArray(contacts) ? contacts : Array.isArray(items) ? items : CONTACTS_SEED
+    return source.map((contact, index) => {
       const categoryId = graphCatId(contact)
+      const tags = Array.isArray(contact?.tags)
+        ? contact.tags
+        : Array.isArray(contact?.tag_items)
+          ? contact.tag_items.map((item) => String(item?.name ?? item ?? '').trim()).filter(Boolean)
+          : []
       return {
         id: String(contact.id ?? `c${index + 1}`),
+        originalId: contact.originalId ?? contact.id,
         name: contact.name ?? 'Contato',
         svc: contact.svc ?? contact.service ?? contact.category?.label ?? 'serviço',
-        city: contact.city ?? contact.locationLabel ?? 'Rede',
-        trust: contact.trust ?? (index % 3 === 0 ? 'Recomendado' : index % 3 === 1 ? 'Favorito' : 'Confiavel'),
+        city: contact.city ?? contact.locationLabel ?? contact.area ?? 'Rede',
+        trust: contact.trust ?? contact.roleLabel ?? (index % 3 === 0 ? 'Recomendado' : index % 3 === 1 ? 'Favorito' : 'Confiavel'),
+        roleLabel: contact.roleLabel ?? '',
         src: contact.src ?? contact.source ?? 'Agenda',
         note: contact.note ?? contact.crm_note ?? contact.distanceLabel ?? '',
         cat: categoryId,
-        originalId: contact.id,
+        tags,
+        phone: contact.phone ?? contact.whatsapp ?? '',
+        email: contact.email ?? '',
+        ddd: contact.ddd ?? extractDdd(contact.phone || contact.whatsapp || ''),
+        demand: contact.demand ?? contact.publicDemand ?? '',
+        solves: contact.solves ?? contact.publicSolves ?? contact.publicDescription ?? contact.offeredServices ?? '',
+        organization: contact.organization ?? contact.company ?? contact.org ?? '',
+        scopes: contact.scopes ?? [],
+        groupIds: contact.groupIds ?? [],
+        groupNames: contact.groupNames ?? [],
+        distanceLabel: contact.distanceLabel ?? '',
+        distanceSourceLabel: contact.distanceSourceLabel ?? '',
+        locationLabel: contact.locationLabel ?? contact.city ?? '',
+        locationQuery: contact.locationQuery ?? contact.address ?? contact.city ?? '',
+        locationSourceLabel: contact.locationSourceLabel ?? contact.source ?? '',
+        linkedPlatform: Boolean(contact.linkedPlatform),
+        linkedLabel: contact.linkedLabel ?? '',
+        graphX: contact.graphX,
+        graphY: contact.graphY,
+        graphZ: contact.graphZ,
+        kind: contact.kind || 'contact',
+        people: contact.people ?? 0,
+        resp: contact.resp ?? '',
+        score: contact.score ?? 0,
       }
     })
   }, [contacts, items])
@@ -5046,13 +7931,16 @@ function NetworkGraph({ items, contacts = CONTACTS_SEED, query = '', selectedId,
     if (!canvas) return undefined
 
     let { W, H, DPR } = resizeGraphCanvas(canvas)
-    let graph = buildCanvasGraph(graphContacts, query, W, H)
-    let nodes = graph.nodes
-    let edges = graph.edges
+    let nodes = []
+    let edges = []
     const ctx = canvas.getContext('2d')
 
+    function buildNodes(width, height) {
+      return buildCanvasGraph(graphContacts, query, width, height)
+    }
+
     function rebuild() {
-      ;({ nodes, edges } = buildCanvasGraph(graphContacts, query, W, H))
+      ;({ nodes, edges } = buildNodes(W, H))
       applyGraphFilter(stateRef.current.filter, nodes)
     }
     rebuild()
@@ -5102,7 +7990,7 @@ function NetworkGraph({ items, contacts = CONTACTS_SEED, query = '', selectedId,
       stateRef.current.dragging = false
       canvas.style.cursor = 'grab'
       const hit = hitCanvasGraph(point.x, point.y, nodesRef.current)
-      if (hit?.kind === 'contact' && onSelect) onSelect(hit.originalId ?? hit.id)
+      if (hit && ['contact', 'group', 'member'].includes(hit.kind) && onSelect) onSelect(hit.originalId ?? hit.id)
     }
 
     function onMouseLeave() {
@@ -5181,6 +8069,7 @@ function NetworkGraph({ items, contacts = CONTACTS_SEED, query = '', selectedId,
     canvas.addEventListener('touchstart', onTouchStart, { passive: false })
     canvas.addEventListener('touchmove', onTouchMove, { passive: false })
     canvas.addEventListener('touchend', onTouchEnd)
+    canvas.addEventListener('touchcancel', onTouchEnd)
     window.addEventListener('resize', onResize)
     rafRef.current = requestAnimationFrame(loop)
 
@@ -5195,6 +8084,7 @@ function NetworkGraph({ items, contacts = CONTACTS_SEED, query = '', selectedId,
       canvas.removeEventListener('touchstart', onTouchStart)
       canvas.removeEventListener('touchmove', onTouchMove)
       canvas.removeEventListener('touchend', onTouchEnd)
+      canvas.removeEventListener('touchcancel', onTouchEnd)
     }
   }, [graphContacts, onSelect, query])
 
@@ -5217,9 +8107,9 @@ function NetworkGraph({ items, contacts = CONTACTS_SEED, query = '', selectedId,
     <div className="relative overflow-hidden rounded-xl border border-cyan-900/40 bg-[#030810]">
       <div className="flex items-center gap-2 border-b border-cyan-900/30 px-4 py-2.5">
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" />
-        <span className="font-mono text-[10px] font-bold tracking-widest text-cyan-400">NETWORK · GRAFO 3D</span>
+        <span className="font-mono text-[10px] font-bold tracking-widest text-cyan-400">{label}</span>
         <div className="ml-auto flex gap-2">
-          <button type="button" onClick={toggleAutoRot} className={`rounded border px-2 py-1 font-mono text-[9px] font-bold ${autoRot ? 'border-cyan-400/50 bg-cyan-400/10 text-cyan-200' : 'border-slate-700 text-slate-500'}`}>? rotacionar</button>
+          <button type="button" onClick={toggleAutoRot} className={`rounded border px-2 py-1 font-mono text-[9px] font-bold ${autoRot ? 'border-cyan-400/50 bg-cyan-400/10 text-cyan-200' : 'border-slate-700 text-slate-500'}`}>↻ rotacionar</button>
           <button type="button" onClick={resetCam} className="rounded border border-slate-700 px-2 py-1 font-mono text-[9px] font-bold text-slate-400 hover:border-cyan-400/50 hover:text-cyan-200">reset view</button>
         </div>
       </div>
@@ -5234,18 +8124,20 @@ function NetworkGraph({ items, contacts = CONTACTS_SEED, query = '', selectedId,
         </div>
       ) : null}
 
-      <div className="flex flex-wrap gap-1.5 border-t border-cyan-900/30 bg-[#040c18] px-4 py-2">
-        {['all', 'home', 'legal', 'business', 'tech', 'groups'].map((nextFilter) => (
-          <button
-            key={nextFilter}
-            type="button"
-            onClick={() => changeFilter(nextFilter)}
-            className={`rounded-full border px-2.5 py-0.5 font-mono text-[9px] font-bold ${filter === nextFilter ? 'border-cyan-400 bg-cyan-400/15 text-cyan-100' : 'border-cyan-900/40 text-slate-500 hover:border-cyan-400/40 hover:text-cyan-200'}`}
-          >
-            {nextFilter}
-          </button>
-        ))}
-      </div>
+      {showCategoryFilter ? (
+        <div className="flex flex-wrap gap-1.5 border-t border-cyan-900/30 bg-[#040c18] px-4 py-2">
+          {filterOptions.map((nextFilter) => (
+            <button
+              key={nextFilter}
+              type="button"
+              onClick={() => changeFilter(nextFilter)}
+              className={`rounded-full border px-2.5 py-0.5 font-mono text-[9px] font-bold ${filter === nextFilter ? 'border-cyan-400 bg-cyan-400/15 text-cyan-100' : 'border-cyan-900/40 text-slate-500 hover:border-cyan-400/40 hover:text-cyan-200'}`}
+            >
+              {nextFilter}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <div className="border-t border-cyan-900/30 bg-[#040c18] px-4 py-2 font-mono text-[10px] text-slate-600">{infoText}</div>
     </div>
@@ -5313,18 +8205,189 @@ function drawGraphLabel(ctx, text, x, y, fontSize, color, bgAlpha) {
   ctx.fillText(text, x, y)
 }
 
+function graphSlug(value) {
+  return normalize(value).replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'item'
+}
+
+function truncateGraphText(value, max = 24) {
+  const text = String(value ?? '').trim()
+  if (text.length <= max) return text
+  return `${text.slice(0, Math.max(0, max - 1)).trimEnd()}…`
+}
+
 function buildCanvasGraph(contacts, query, W, H) {
   const q = normalize(query)
-  const filteredContacts = contacts
-    .filter((contact) => !q || matchText(q, [contact.name, contact.svc, contact.city, contact.trust, contact.src, contact.note, contact.cat]))
-    .slice(0, 48)
-  const nodes = [{ id: 'you', name: 'YOU', label: 'YOU', x: 0, y: 0, z: 0, r: 22, col: '#06b6d4', kind: 'hub', catId: 'hub', alpha: 1 }]
+  const filteredContacts = (contacts ?? [])
+    .filter((contact) => !q || matchText(q, [
+      contact.name,
+      contact.svc,
+      contact.city,
+      contact.trust,
+      contact.src,
+      contact.note,
+      contact.cat,
+      contact.ddd,
+      contact.demand,
+      contact.solves,
+      contact.roleLabel,
+      contact.locationLabel,
+      contact.phone,
+      contact.email,
+      contact.linkedLabel,
+      contact.organization,
+      contact.company,
+      contact.org,
+      ...(contact.tags ?? []),
+      ...(contact.groupNames ?? []),
+    ]))
+    .slice(0, 72)
+
+  const nodes = [
+    { id: 'you', name: 'YOU', label: 'YOU', x: 0, y: 0, z: 0, r: 22, col: '#06b6d4', kind: 'hub', catId: 'hub', alpha: 1 },
+  ]
   const edges = []
+  const catNodeIds = new globalThis.Map()
+  const groupNodeIds = new globalThis.Map()
+  const semanticBuckets = new globalThis.Map()
+  const semanticNodeIds = new globalThis.Map()
+  const semanticSpecs = [
+    {
+      key: 'tag',
+      label: 'tag',
+      ring: 204,
+      z: -18,
+      color: '#a78bfa',
+      limit: 12,
+      size: 10,
+      phase: 0.18,
+      extract: (contact) => tagList(contact.tags),
+      keyOf: (value) => normalize(value),
+      fullOf: (value) => String(value ?? '').trim(),
+      displayOf: (value) => String(value ?? '').trim(),
+    },
+    {
+      key: 'source',
+      label: 'fonte',
+      ring: 286,
+      z: 18,
+      color: '#60a5fa',
+      limit: 8,
+      size: 10,
+      phase: 0.44,
+      extract: (contact) => [contact.src ?? contact.source].filter(Boolean),
+      keyOf: (value) => normalize(value),
+      fullOf: (value) => String(value ?? '').trim(),
+      displayOf: (value) => String(value ?? '').trim(),
+    },
+    {
+      key: 'ddd',
+      label: 'ddd',
+      ring: 326,
+      z: -10,
+      color: '#fbbf24',
+      limit: 8,
+      size: 10,
+      phase: 0.73,
+      extract: (contact) => (contact.ddd ? [String(contact.ddd).replace(/\D/g, '')] : []),
+      keyOf: (value) => normalize(String(value ?? '').replace(/\D/g, '')),
+      fullOf: (value) => {
+        const digits = String(value ?? '').replace(/\D/g, '')
+        return digits ? `DDD ${digits}` : ''
+      },
+      displayOf: (value) => {
+        const digits = String(value ?? '').replace(/\D/g, '')
+        return digits ? `DDD ${digits}` : ''
+      },
+    },
+    {
+      key: 'demand',
+      label: 'demanda',
+      ring: 244,
+      z: 24,
+      color: '#fb7185',
+      limit: 8,
+      size: 10,
+      phase: -0.24,
+      extract: (contact) => [contact.demand].filter(Boolean),
+      keyOf: (value) => normalize(value),
+      fullOf: (value) => String(value ?? '').trim(),
+      displayOf: (value) => truncateGraphText(value, 26),
+    },
+    {
+      key: 'solve',
+      label: 'resolve',
+      ring: 364,
+      z: -22,
+      color: '#34d399',
+      limit: 8,
+      size: 10,
+      phase: -0.5,
+      extract: (contact) => [contact.solves].filter(Boolean),
+      keyOf: (value) => normalize(value),
+      fullOf: (value) => String(value ?? '').trim(),
+      displayOf: (value) => truncateGraphText(value, 26),
+    },
+    {
+      key: 'link',
+      label: 'usuário',
+      ring: 266,
+      z: 14,
+      color: '#67e8f9',
+      limit: 12,
+      size: 11,
+      phase: 0.82,
+      extract: (contact) => (contact.linkedPlatform && contact.linkedLabel ? [contact.linkedLabel] : []),
+      keyOf: (value) => normalize(value),
+      fullOf: (value) => String(value ?? '').trim(),
+      displayOf: (value) => String(value ?? '').trim(),
+    },
+    {
+      key: 'org',
+      label: 'empresa',
+      ring: 410,
+      z: 30,
+      color: '#e2e8f0',
+      limit: 8,
+      size: 10,
+      phase: 1.1,
+      extract: (contact) => [contact.organization, contact.company, contact.org].filter(Boolean),
+      keyOf: (value) => normalize(value),
+      fullOf: (value) => String(value ?? '').trim(),
+      displayOf: (value) => truncateGraphText(value, 28),
+    },
+  ]
+
+  function addSemanticBucket(spec, value, contactId, catId) {
+    const fullLabel = spec.fullOf(value)
+    const bucketKeyValue = spec.keyOf(value)
+    if (!fullLabel || !bucketKeyValue) return
+    const key = `${spec.key}:${bucketKeyValue}`
+    const current = semanticBuckets.get(key) ?? {
+      key,
+      specKey: spec.key,
+      semanticLabel: spec.label,
+      label: fullLabel,
+      displayLabel: spec.displayOf(value) || fullLabel,
+      count: 0,
+      contactIds: new Set(),
+      catIds: new Set(),
+      color: spec.color,
+    }
+    current.count += 1
+    current.contactIds.add(contactId)
+    current.catIds.add(catId)
+    if (fullLabel.length > current.label.length) current.label = fullLabel
+    const displayLabel = spec.displayOf(value) || fullLabel
+    if (displayLabel.length > current.displayLabel.length) current.displayLabel = displayLabel
+    semanticBuckets.set(key, current)
+  }
 
   CATS.forEach((cat, index) => {
     const angle = (Math.PI * 2 * index) / CATS.length
+    const id = `cat-${cat.id}`
+    catNodeIds.set(cat.id, id)
     nodes.push({
-      id: `cat-${cat.id}`,
+      id,
       name: cat.label,
       label: cat.label,
       x: Math.cos(angle) * 150,
@@ -5336,63 +8399,152 @@ function buildCanvasGraph(contacts, query, W, H) {
       catId: cat.id,
       alpha: 1,
     })
-    edges.push({ a: 'you', b: `cat-${cat.id}`, k: 'hub', catId: cat.id })
+    edges.push({ a: 'you', b: id, k: 'hub', catId: cat.id })
   })
 
-  filteredContacts.forEach((contact, index) => {
-    const ci = Math.max(0, CATS.findIndex((cat) => cat.id === contact.cat))
-    const base = (Math.PI * 2 * ci) / CATS.length
-    const spread = 0.35 * (index % 2 === 0 ? 1 : -1) + Math.floor(index / CATS.length) * 0.09
-    const angle = base + spread
-    const id = `contact-${contact.id}`
-    nodes.push({
-      ...contact,
-      id,
-      originalId: contact.originalId ?? contact.id,
-      x: Math.cos(angle) * 265,
-      y: Math.sin(angle) * 265,
-      z: ((index % 3) - 1) * 45,
-      r: 13,
-      col: catCol(contact.cat),
-      kind: 'contact',
-      catId: contact.cat,
-      alpha: 1,
+  const contactsByCat = new globalThis.Map()
+  const contactNodeIdsByCity = new globalThis.Map()
+  filteredContacts.forEach((contact) => {
+    const catId = CATS.some((cat) => cat.id === contact.cat) ? contact.cat : 'home'
+    if (!contactsByCat.has(catId)) contactsByCat.set(catId, [])
+    contactsByCat.get(catId).push(contact)
+
+    semanticSpecs.forEach((spec) => {
+      const extracted = spec.extract(contact) ?? []
+      const seen = new Set()
+      extracted.forEach((value) => {
+        const normalized = spec.keyOf(value)
+        if (!normalized || seen.has(normalized)) return
+        seen.add(normalized)
+        addSemanticBucket(spec, value, `contact-${contact.id}`, catId)
+      })
     })
-    edges.push({ a: `cat-${contact.cat}`, b: id, k: 'contact', catId: contact.cat })
+
+    const cityKey = normalize(contact.city)
+    if (cityKey) {
+      if (!contactNodeIdsByCity.has(cityKey)) contactNodeIdsByCity.set(cityKey, [])
+      contactNodeIdsByCity.get(cityKey).push(`contact-${contact.id}`)
+    }
   })
 
-  filteredContacts.forEach((contact, index) => {
-    filteredContacts.slice(index + 1).forEach((other) => {
-      if (normalize(contact.city) && normalize(contact.city) === normalize(other.city)) {
-        edges.push({ a: `contact-${contact.id}`, b: `contact-${other.id}`, k: 'city' })
-      }
+  contactsByCat.forEach((bucket, catId) => {
+    const catIndex = Math.max(0, CATS.findIndex((cat) => cat.id === catId))
+    const base = (Math.PI * 2 * catIndex) / CATS.length
+    bucket.forEach((contact, index) => {
+      const angle = base + 0.35 * (index % 2 === 0 ? 1 : -1)
+      const id = `contact-${contact.id}`
+      nodes.push({
+        ...contact,
+        id,
+        originalId: contact.originalId ?? contact.id,
+        x: Math.cos(angle) * 265,
+        y: Math.sin(angle) * 265,
+        z: (index % 3 - 1) * 45,
+        r: 13,
+        col: catCol(catId),
+        kind: contact.kind || 'contact',
+        catId,
+        alpha: 1,
+      })
+      edges.push({ a: catNodeIds.get(catId), b: id, k: 'contact', catId })
     })
   })
 
-  GROUPS_SEED.forEach((group, index) => {
-    const ci = Math.max(0, CATS.findIndex((cat) => cat.id === group.cat))
-    const base = (Math.PI * 2 * ci) / CATS.length
-    const angle = base + (index % 2 === 0 ? 0.5 : -0.5)
-    const id = `group-${group.id}`
-    nodes.push({
-      ...group,
-      id,
-      originalId: group.id,
-      x: Math.cos(angle) * 370,
-      y: Math.sin(angle) * 370,
-      z: (index % 2 === 0 ? 1 : -1) * 30,
-      r: 11,
-      col: catCol(group.cat),
-      kind: 'group',
-      catId: group.cat,
-      dashed: true,
-      alpha: 1,
+  semanticSpecs.forEach((spec) => {
+    const bucketValues = [...semanticBuckets.values()]
+      .filter((item) => item.specKey === spec.key)
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
+      .slice(0, spec.limit)
+
+    const total = Math.max(bucketValues.length, 1)
+    bucketValues.forEach((bucket, index) => {
+      const angle = (Math.PI * 2 * index) / total + spec.phase
+      const id = `semantic-${spec.key}-${graphSlug(bucket.label)}`
+      semanticNodeIds.set(bucket.key, id)
+      nodes.push({
+        id,
+        name: bucket.label,
+        label: bucket.displayLabel,
+        svc: spec.label,
+        city: `${bucket.count} contato${bucket.count === 1 ? '' : 's'}`,
+        x: Math.cos(angle) * spec.ring,
+        y: Math.sin(angle) * spec.ring,
+        z: spec.z + (index % 2 === 0 ? 14 : -14),
+        r: spec.size,
+        col: spec.color,
+        kind: 'semantic',
+        semanticKind: spec.label,
+        semanticType: spec.key,
+        catId: spec.key === 'source' || spec.key === 'link' || spec.key === 'org' ? 'business' : spec.key === 'ddd' ? 'home' : 'tech',
+        alpha: 1,
+        count: bucket.count,
+        contactIds: [...bucket.contactIds],
+      })
     })
-    edges.push({ a: `cat-${group.cat}`, b: id, k: 'group', catId: group.cat })
+  })
+
+  contactNodeIdsByCity.forEach((ids) => {
+    ids.forEach((id, index) => {
+      ids.slice(index + 1).forEach((otherId) => {
+        edges.push({ a: id, b: otherId, k: 'city' })
+      })
+    })
+  })
+
+  const shouldShowGroups = filteredContacts.some((contact) => contact.kind !== 'member')
+  if (shouldShowGroups) {
+    GROUPS_SEED.filter((group) => !q || matchText(q, [group.name, group.svc, group.resp, group.score, group.cat, String(group.people)]))
+      .forEach((group, index) => {
+        const catIndex = Math.max(0, CATS.findIndex((cat) => cat.id === group.cat))
+        const base = (Math.PI * 2 * catIndex) / CATS.length
+        const angle = base + (index % 2 === 0 ? 0.5 : -0.5)
+        const id = `group-${group.id}`
+        nodes.push({
+          id,
+          name: group.name,
+          label: group.name,
+          x: Math.cos(angle) * 370,
+          y: Math.sin(angle) * 370,
+          z: index % 2 === 0 ? 30 : -30,
+          r: 11,
+          col: catCol(group.cat),
+          kind: 'group',
+          catId: group.cat,
+          dashed: true,
+          people: group.people,
+          resp: group.resp,
+          score: group.score,
+          svc: group.svc,
+          alpha: 1,
+        })
+        edges.push({ a: catNodeIds.get(group.cat), b: id, k: 'group', catId: group.cat })
+        groupNodeIds.set(normalize(group.name), id)
+      })
+  }
+
+  filteredContacts.forEach((contact) => {
+    const contactId = `contact-${contact.id}`
+
+    semanticSpecs.forEach((spec) => {
+      const extracted = spec.extract(contact) ?? []
+      const seen = new Set()
+      extracted.forEach((value) => {
+        const normalized = spec.keyOf(value)
+        if (!normalized || seen.has(normalized)) return
+        seen.add(normalized)
+        const nodeId = semanticNodeIds.get(`${spec.key}:${normalized}`)
+        if (nodeId) edges.push({ a: contactId, b: nodeId, k: 'semantic', catId: contact.cat, col: spec.color })
+      })
+    })
+
+    ;(contact.groupNames ?? []).forEach((groupName) => {
+      const groupId = groupNodeIds.get(normalize(groupName))
+      if (groupId) edges.push({ a: contactId, b: groupId, k: 'group', catId: contact.cat })
+    })
   })
 
   applyGraphFilter('all', nodes)
-  return { nodes, edges, W, H }
+  return { nodes, edges }
 }
 
 function applyGraphFilter(filter, nodes) {
@@ -5403,6 +8555,10 @@ function applyGraphFilter(filter, nodes) {
     }
     if (filter === 'all') {
       node.alpha = 1
+      return
+    }
+    if (node.kind === 'semantic') {
+      node.alpha = 0.18
       return
     }
     if (filter === 'groups') {
@@ -5470,9 +8626,9 @@ function renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef) {
     const al = Math.min(a.alpha ?? 1, b.alpha ?? 1)
     if (al <= 0.04) return
     const sc = Math.max(0.45, (a.sc + b.sc) / 2)
-    const color = edge.k === 'contact' ? catCol(edge.catId) : edge.k === 'city' ? '#fbbf24' : edge.k === 'group' ? '#94a3b8' : '#06b6d4'
-    const opacity = edge.k === 'hub' ? 0.3 * al : edge.k === 'contact' ? 0.2 * al : edge.k === 'city' ? 0.25 * al : 0.12 * al
-    ctx.setLineDash(edge.k === 'group' ? [6, 9] : edge.k === 'city' ? [2, 5] : [])
+    const color = edge.col ?? (edge.k === 'contact' ? catCol(edge.catId) : edge.k === 'city' ? '#fbbf24' : edge.k === 'group' ? '#94a3b8' : edge.k === 'semantic' ? '#a78bfa' : '#06b6d4')
+    const opacity = edge.k === 'hub' ? 0.3 * al : edge.k === 'contact' ? 0.2 * al : edge.k === 'city' ? 0.25 * al : edge.k === 'semantic' ? 0.18 * al : 0.12 * al
+    ctx.setLineDash(edge.k === 'group' ? [6, 9] : edge.k === 'city' || edge.k === 'semantic' ? [2, 5] : [])
     ctx.strokeStyle = hexA(color, opacity)
     ctx.lineWidth = (edge.k === 'hub' ? 1.2 : edge.k === 'contact' ? 0.9 : edge.k === 'city' ? 0.8 : 0.7) * sc
     ctx.beginPath()
@@ -5481,7 +8637,7 @@ function renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef) {
     ctx.stroke()
     ctx.setLineDash([])
 
-    if (edge.k === 'hub' || edge.k === 'contact') {
+    if (edge.k === 'hub' || edge.k === 'contact' || edge.k === 'semantic') {
       const t = (state.tick / 90 + edgeIndex * 0.17) % 1
       const x = a.sx + (b.sx - a.sx) * t
       const y = a.sy + (b.sy - a.sy) * t
@@ -5539,6 +8695,10 @@ function renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef) {
       const fs = Math.max(7, Math.round(8.5 * node.sc))
       drawGraphLabel(ctx, node.name, node.sx, node.sy - r - fs, fs, hexA('#cbd5e1', al * 0.9), 0.7 * al)
       if (node.sc > 0.42) drawGraphLabel(ctx, `${node.people} mbr`, node.sx, node.sy + r + fs + 2, Math.max(6, Math.round(7 * node.sc)), hexA(node.col, al * 0.7), 0.65 * al)
+    } else if (node.kind === 'semantic') {
+      const fs = Math.max(6, Math.round(7.5 * node.sc))
+      drawGraphLabel(ctx, node.label, node.sx, node.sy - r - fs, fs, hexA(node.col, al * 0.9), 0.7 * al)
+      if (node.sc > 0.5) drawGraphLabel(ctx, node.semanticKind, node.sx, node.sy + r + fs + 1, Math.max(5, Math.round(6 * node.sc)), hexA('#94a3b8', al * 0.72), 0.58 * al)
     }
   })
 
@@ -6323,6 +9483,9 @@ export default function App() {
   const [networkUsers, setNetworkUsers] = useState(() => initialOfflineData?.networkUsers ?? [])
   const [sharedGroups, setSharedGroups] = useState(() => Array.isArray(initialOfflineData?.sharedGroups) ? initialOfflineData.sharedGroups : [])
   const [groupContactsById, setGroupContactsById] = useState(() => initialOfflineData?.groupContactsById ?? {})
+  const [groupMessagesById, setGroupMessagesById] = useState(() => initialOfflineData?.groupMessagesById ?? {})
+  const [customFieldDefinitions, setCustomFieldDefinitions] = useState(() => Array.isArray(initialOfflineData?.customFieldDefinitions) ? initialOfflineData.customFieldDefinitions : [])
+  const [groupCustomFieldsById, setGroupCustomFieldsById] = useState(() => initialOfflineData?.groupCustomFieldsById ?? {})
   const [backendOnline, setBackendOnline] = useState(false)
   const [browserOnline, setBrowserOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine)
   const [syncNonce, setSyncNonce] = useState(0)
@@ -6347,6 +9510,7 @@ export default function App() {
     linkedin: '',
     custom_url: '',
     custom_fields: '[]',
+    custom_field_values: [],
     cep: '',
     addressLine: '',
     addressNumber: '',
@@ -6399,6 +9563,9 @@ export default function App() {
     setDuplicateSuggestions(snapshot.duplicateSuggestions ?? [])
     setSharedGroups(Array.isArray(snapshot.sharedGroups) ? snapshot.sharedGroups : [])
     setGroupContactsById(snapshot.groupContactsById ?? {})
+    setGroupMessagesById(snapshot.groupMessagesById ?? {})
+    setCustomFieldDefinitions(Array.isArray(snapshot.customFieldDefinitions) ? snapshot.customFieldDefinitions : [])
+    setGroupCustomFieldsById(snapshot.groupCustomFieldsById ?? {})
     return true
   }
 
@@ -6458,11 +9625,21 @@ export default function App() {
           method: 'POST',
           body: JSON.stringify(mutation.payload),
         })
+      } else if (mutation.type === 'group:member:remove') {
+        const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
+        await apiRequest(`/api/groups/${groupId}/members/${mutation.memberId}?requester_id=${encodeURIComponent(contactOwnerId(owner))}`, {
+          method: 'DELETE',
+        })
       } else if (mutation.type === 'group:contact:add') {
         const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
         await apiRequest(`/api/groups/${groupId}/contacts`, {
           method: 'POST',
           body: JSON.stringify(mutation.payload),
+        })
+      } else if (mutation.type === 'group:contact:remove') {
+        const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
+        await apiRequest(`/api/groups/${groupId}/contacts/${mutation.contactId}?requester_id=${encodeURIComponent(contactOwnerId(owner))}`, {
+          method: 'DELETE',
         })
       }
       syncedIds.push(mutation.id)
@@ -6599,12 +9776,14 @@ export default function App() {
         const contactsPath = user ? `/api/contacts?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
         const duplicatesPath = user ? `/api/merge-suggestions?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
         const groupsPath = user ? `/api/groups?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
-        const [remoteContacts, remoteProfiles, remoteUsers, remoteDuplicates, remoteGroups] = await Promise.all([
+        const customFieldsPath = user ? `/api/custom-fields?user_id=${encodeURIComponent(contactOwnerId(user))}&scope_type=user&scope_id=` : null
+        const [remoteContacts, remoteProfiles, remoteUsers, remoteDuplicates, remoteGroups, remoteCustomFields] = await Promise.all([
           contactsPath ? apiRequest(contactsPath) : Promise.resolve([]),
           apiRequest('/api/public-profiles'),
           apiRequest('/api/users'),
           duplicatesPath ? apiRequest(duplicatesPath) : Promise.resolve([]),
           groupsPath ? apiRequest(groupsPath) : Promise.resolve([]),
+          customFieldsPath ? apiRequest(customFieldsPath) : Promise.resolve([]),
         ])
         if (cancelled) return
         const localUsers = remoteUsers.map(apiUserToLocal).filter(Boolean)
@@ -6613,6 +9792,7 @@ export default function App() {
         setNetworkUsers(localUsers)
         setDuplicateSuggestions(remoteDuplicates)
         setSharedGroups(remoteGroups)
+        setCustomFieldDefinitions(remoteCustomFields)
         saveOfflineSnapshot(user, {
           contacts: remoteContacts,
           publicProfiles: remoteProfiles,
@@ -6620,6 +9800,9 @@ export default function App() {
           duplicateSuggestions: remoteDuplicates,
           sharedGroups: remoteGroups,
           groupContactsById,
+          groupMessagesById,
+          customFieldDefinitions: remoteCustomFields,
+          groupCustomFieldsById,
         })
         setBackendOnline(true)
         if (syncedCount > 0) showToast(`${syncedCount} alteração${syncedCount === 1 ? '' : 'es'} offline sincronizada${syncedCount === 1 ? '' : 's'}.`)
@@ -6649,8 +9832,94 @@ export default function App() {
       duplicateSuggestions,
       sharedGroups,
       groupContactsById,
+      groupMessagesById,
+      customFieldDefinitions,
+      groupCustomFieldsById,
     })
-  }, [user?.id, user?.email, contacts, publicProfiles, networkUsers, duplicateSuggestions, sharedGroups, groupContactsById, backendOnline])
+  }, [user?.id, user?.email, contacts, publicProfiles, networkUsers, duplicateSuggestions, sharedGroups, groupContactsById, groupMessagesById, customFieldDefinitions, groupCustomFieldsById, backendOnline])
+
+  useEffect(() => {
+    if (!user || !sharedGroups.length || !backendOnline) return undefined
+    const numericGroupIds = sharedGroups.map((group) => String(group.id)).filter((id) => /^\d+$/.test(id))
+    const missingContacts = numericGroupIds.filter((id) => !(id in groupContactsById)).slice(0, 6)
+    const missingFields = numericGroupIds.filter((id) => !(id in groupCustomFieldsById)).slice(0, 6)
+    const missingMessages = numericGroupIds.filter((id) => !(id in groupMessagesById)).slice(0, 6)
+    if (!missingContacts.length && !missingFields.length && !missingMessages.length) return undefined
+    let cancelled = false
+
+    async function hydrateGroupGraphData() {
+      if (missingContacts.length) {
+        const contactEntries = await Promise.all(
+          missingContacts.map(async (id) => {
+            try {
+              const response = await apiRequest(`/api/groups/${id}/contacts?user_id=${encodeURIComponent(contactOwnerId(user))}`)
+              return [id, response]
+            } catch {
+              return [id, null]
+            }
+          }),
+        )
+        if (!cancelled) {
+          setGroupContactsById((current) => {
+            const next = { ...current }
+            contactEntries.forEach(([id, response]) => {
+              if (response) next[id] = response
+            })
+            return next
+          })
+        }
+      }
+
+      if (missingFields.length) {
+        const fieldEntries = await Promise.all(
+          missingFields.map(async (id) => {
+            try {
+              const response = await apiRequest(`/api/custom-fields?user_id=${encodeURIComponent(contactOwnerId(user))}&scope_type=group&scope_id=${encodeURIComponent(id)}`)
+              return [id, response]
+            } catch {
+              return [id, null]
+            }
+          }),
+        )
+        if (!cancelled) {
+          setGroupCustomFieldsById((current) => {
+            const next = { ...current }
+            fieldEntries.forEach(([id, response]) => {
+              if (response) next[id] = response
+            })
+            return next
+          })
+        }
+      }
+
+      if (missingMessages.length) {
+        const messageEntries = await Promise.all(
+          missingMessages.map(async (id) => {
+            try {
+              const response = await apiRequest(`/api/groups/${id}/messages?user_id=${encodeURIComponent(contactOwnerId(user))}`)
+              return [id, response]
+            } catch {
+              return [id, null]
+            }
+          }),
+        )
+        if (!cancelled) {
+          setGroupMessagesById((current) => {
+            const next = { ...current }
+            messageEntries.forEach(([id, response]) => {
+              if (response) next[id] = response
+            })
+            return next
+          })
+        }
+      }
+    }
+
+    hydrateGroupGraphData()
+    return () => {
+      cancelled = true
+    }
+  }, [user?.id, user?.email, sharedGroups, groupContactsById, groupCustomFieldsById, groupMessagesById, backendOnline])
 
   useEffect(() => {
     if (!toast) return undefined
@@ -6896,6 +10165,184 @@ export default function App() {
     }
   }
 
+  async function loadGroupMessages(groupId, owner = user) {
+    if (!owner || !groupId) return []
+    try {
+      const messages = await apiRequest(`/api/groups/${groupId}/messages?user_id=${encodeURIComponent(contactOwnerId(owner))}`)
+      setGroupMessagesById((current) => ({ ...current, [groupId]: messages }))
+      setBackendOnline(true)
+      return messages
+    } catch (error) {
+      setBackendOnline(false)
+      showToast(error.message || 'Não foi possível carregar a conversa do grupo.')
+      return []
+    }
+  }
+
+  async function sendGroupMessage(groupId, message) {
+    if (!user || !groupId || !message.trim()) return null
+    const requestPayload = { requester_id: contactOwnerId(user), message: message.trim() }
+    try {
+      const created = await apiRequest(`/api/groups/${groupId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify(requestPayload),
+      })
+      setGroupMessagesById((current) => ({
+        ...current,
+        [groupId]: [...(current[groupId] ?? []), created],
+      }))
+      setBackendOnline(true)
+      return created
+    } catch (error) {
+      setBackendOnline(false)
+      showToast(error.message || 'Não foi possível enviar mensagem no grupo.')
+      return null
+    }
+  }
+
+  async function clearGroupMessages(groupId) {
+    if (!user || !groupId) return false
+    try {
+      await apiRequest(`/api/groups/${groupId}/messages?requester_id=${encodeURIComponent(contactOwnerId(user))}`, {
+        method: 'DELETE',
+      })
+      setGroupMessagesById((current) => ({ ...current, [groupId]: [] }))
+      setBackendOnline(true)
+      showToast('Conversa do grupo limpa.')
+      return true
+    } catch (error) {
+      setBackendOnline(false)
+      showToast(error.message || 'Não foi possível limpar a conversa do grupo.')
+      return false
+    }
+  }
+
+  async function loadCustomFieldDefinitions(scopeType = 'user', scopeId = '', owner = user) {
+    if (!owner) return []
+    if (scopeType === 'group' && !/^\d+$/.test(String(scopeId))) {
+      setGroupCustomFieldsById((current) => ({ ...current, [scopeId]: current[scopeId] ?? [] }))
+      return []
+    }
+    try {
+      const fields = await apiRequest(`/api/custom-fields?user_id=${encodeURIComponent(contactOwnerId(owner))}&scope_type=${encodeURIComponent(scopeType)}&scope_id=${encodeURIComponent(scopeId)}`)
+      if (scopeType === 'group') {
+        setGroupCustomFieldsById((current) => ({ ...current, [scopeId]: fields }))
+      } else {
+        setCustomFieldDefinitions(fields)
+      }
+      setBackendOnline(true)
+      return fields
+    } catch (error) {
+      setBackendOnline(false)
+      if (scopeType === 'group') {
+        showToast(error.message || 'Não foi possível carregar os campos do grupo.')
+      } else {
+        showToast(error.message || 'Não foi possível carregar os campos personalizados.')
+      }
+      return []
+    }
+  }
+
+  async function saveCustomFieldDefinition(payload, fieldId = null) {
+    if (!user) return null
+    const scopeType = payload.scope_type || 'user'
+    const scopeId = payload.scope_id || ''
+    if (scopeType === 'group' && !/^\d+$/.test(String(scopeId))) {
+      showToast('Salve o grupo online antes de criar campos personalizados para ele.')
+      return null
+    }
+    const requestPayload = {
+      owner_id: contactOwnerId(user),
+      scope_type: scopeType,
+      scope_id: scopeId,
+      name: payload.name,
+      field_type: payload.field_type || 'text_short',
+      options: payload.options || [],
+      field_key: payload.field_key || customFieldKey(payload.name),
+    }
+    try {
+      const field = await apiRequest(fieldId ? `/api/custom-fields/${fieldId}` : '/api/custom-fields', {
+        method: fieldId ? 'PUT' : 'POST',
+        body: JSON.stringify(requestPayload),
+      })
+      if (scopeType === 'group') {
+        setGroupCustomFieldsById((current) => {
+          const existing = current[scopeId] ?? []
+          const next = fieldId
+            ? existing.map((item) => (String(item.id) === String(field.id) ? field : item))
+            : [...existing.filter((item) => String(item.id) !== String(field.id)), field]
+          return { ...current, [scopeId]: next }
+        })
+      } else {
+        setCustomFieldDefinitions((current) => (
+          fieldId
+            ? current.map((item) => (String(item.id) === String(field.id) ? field : item))
+            : [...current.filter((item) => String(item.id) !== String(field.id)), field]
+        ))
+      }
+      setBackendOnline(true)
+      showToast(fieldId ? 'Campo personalizado atualizado.' : 'Campo personalizado criado.')
+      return field
+    } catch (error) {
+      setBackendOnline(false)
+      showToast(error.message || 'Não foi possível salvar o campo personalizado.')
+      return null
+    }
+  }
+
+  async function deleteCustomFieldDefinition(field) {
+    if (!user || !field?.id) return
+    try {
+      await apiRequest(`/api/custom-fields/${field.id}?requester_id=${encodeURIComponent(contactOwnerId(user))}`, {
+        method: 'DELETE',
+      })
+      if (field.scope_type === 'group') {
+        setGroupCustomFieldsById((current) => ({
+          ...current,
+          [field.scope_id]: (current[field.scope_id] ?? []).filter((item) => String(item.id) !== String(field.id)),
+        }))
+      } else {
+        setCustomFieldDefinitions((current) => current.filter((item) => String(item.id) !== String(field.id)))
+      }
+      setBackendOnline(true)
+      showToast('Campo personalizado removido.')
+    } catch (error) {
+      setBackendOnline(false)
+      showToast(error.message || 'Não foi possível remover o campo personalizado.')
+    }
+  }
+
+  async function updateGroupContactCustomFields(groupId, contact, values) {
+    if (!user || !groupId || !contact?.id) return null
+    if (!/^\d+$/.test(String(groupId))) {
+      showToast('Salve o grupo online antes de editar campos personalizados.')
+      return null
+    }
+    const payload = {
+      requester_id: contactOwnerId(user),
+      owner_id: contact.owner_id,
+      custom_field_values: prepareCustomFieldPayload(values).map((item) => ({ ...item, scope_type: 'group', scope_id: String(groupId) })),
+    }
+    try {
+      const updated = await apiRequest(`/api/groups/${groupId}/contacts/${contact.id}/custom-fields`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      })
+      setGroupContactsById((current) => ({
+        ...current,
+        [groupId]: (current[groupId] ?? []).map((item) => (String(item.id) === String(updated.id) ? updated : item)),
+      }))
+      setContacts((current) => current.map((item) => (String(item.id) === String(updated.id) && String(item.owner_id) === String(updated.owner_id) ? updated : item)))
+      setBackendOnline(true)
+      showToast('Campos do grupo atualizados.')
+      return updated
+    } catch (error) {
+      setBackendOnline(false)
+      showToast(error.message || 'Não foi possível atualizar os campos do grupo.')
+      return null
+    }
+  }
+
   async function createSharedGroup(payload) {
     if (!user) return
     const requestPayload = { ...payload, owner_id: contactOwnerId(user) }
@@ -6917,6 +10364,8 @@ export default function App() {
           id: tempId,
           owner_id: contactOwnerId(user),
           name: payload.name?.trim() || 'Novo grupo',
+          area: payload.area?.trim() || '',
+          people_goal: Number(payload.people_goal || 3),
           description: payload.description?.trim() || '',
           created_by_email: user.email || '',
           member_count: 1,
@@ -6962,7 +10411,17 @@ export default function App() {
       if (isOfflineRequestError(error)) {
         queueLocalMutation({ type: 'group:update', groupId, payload: requestPayload })
         setSharedGroups((current) =>
-          current.map((item) => (String(item.id) === String(groupId) ? { ...item, name: payload.name?.trim() || item.name, description: payload.description?.trim() || '' } : item)),
+          current.map((item) => (
+            String(item.id) === String(groupId)
+              ? {
+                  ...item,
+                  name: payload.name?.trim() || item.name,
+                  area: payload.area?.trim() || item.area || '',
+                  people_goal: Number(payload.people_goal || item.people_goal || 3),
+                  description: payload.description?.trim() || '',
+                }
+              : item
+          )),
         )
         showToast('Grupo atualizado offline. Vou sincronizar ao reconectar.')
         return { id: groupId, ...requestPayload }
@@ -7052,6 +10511,133 @@ export default function App() {
         return
       }
       showToast(error.message || 'Não foi possível adicionar contato ao grupo.')
+    }
+  }
+
+  async function removeSharedGroupMember(groupId, member) {
+    if (!user || !groupId || !member?.id) return
+    const memberId = member.id
+    const normalizedEmail = normalize(member.email)
+
+    const applyLocalRemoval = () => {
+      setSharedGroups((current) =>
+        current.map((group) => {
+          if (String(group.id) !== String(groupId)) return group
+          const members = Array.isArray(group.members) ? group.members : []
+          const nextMembers = members.filter((item) => String(item.id) !== String(memberId))
+          if (nextMembers.length === members.length) return group
+          return {
+            ...group,
+            member_count: Math.max(0, Number(group.member_count ?? members.length) - 1),
+            members: nextMembers,
+          }
+        }),
+      )
+    }
+
+    let cancelledPendingAdd = false
+    updateOfflineMutations(user, (queued) =>
+      queued.filter((mutation) => {
+        const matchesPendingAdd = mutation.type === 'group:member:add'
+          && String(mutation.groupId) === String(groupId)
+          && normalize(mutation.payload?.email) === normalizedEmail
+        if (matchesPendingAdd) cancelledPendingAdd = true
+        return !matchesPendingAdd
+      }),
+    )
+    if (cancelledPendingAdd) {
+      applyLocalRemoval()
+      refreshPendingMutations(user)
+      showToast('Convite removido da fila offline.')
+      return
+    }
+
+    if (String(groupId).startsWith('local-group-') || String(memberId).startsWith('local-member-')) {
+      applyLocalRemoval()
+      refreshPendingMutations(user)
+      showToast('Membro removido do grupo local.')
+      return
+    }
+
+    try {
+      await apiRequest(`/api/groups/${groupId}/members/${memberId}?requester_id=${encodeURIComponent(contactOwnerId(user))}`, {
+        method: 'DELETE',
+      })
+      applyLocalRemoval()
+      setBackendOnline(true)
+      showToast('Membro removido.')
+    } catch (error) {
+      setBackendOnline(false)
+      if (isOfflineRequestError(error)) {
+        queueLocalMutation({ type: 'group:member:remove', groupId, memberId })
+        applyLocalRemoval()
+        showToast('Remoção salva offline. Vou sincronizar ao reconectar.')
+        return
+      }
+      showToast(error.message || 'Não foi possível remover este membro.')
+    }
+  }
+
+  async function removeContactFromSharedGroup(groupId, contact) {
+    if (!user || !groupId || !contact?.id) return
+    const contactId = contact.id
+
+    const applyLocalRemoval = () => {
+      setGroupContactsById((current) => {
+        const existing = current[groupId] ?? []
+        const nextContacts = existing.filter((item) => String(item.id) !== String(contactId))
+        if (nextContacts.length === existing.length) return current
+        return { ...current, [groupId]: nextContacts }
+      })
+      setSharedGroups((current) =>
+        current.map((group) =>
+          String(group.id) === String(groupId)
+            ? { ...group, contact_count: Math.max(0, Number(group.contact_count ?? 0) - 1) }
+            : group,
+        ),
+      )
+    }
+
+    let cancelledPendingAdd = false
+    updateOfflineMutations(user, (queued) =>
+      queued.filter((mutation) => {
+        const matchesPendingAdd = mutation.type === 'group:contact:add'
+          && String(mutation.groupId) === String(groupId)
+          && String(mutation.payload?.contact_id) === String(contactId)
+        if (matchesPendingAdd) cancelledPendingAdd = true
+        return !matchesPendingAdd
+      }),
+    )
+    if (cancelledPendingAdd) {
+      applyLocalRemoval()
+      refreshPendingMutations(user)
+      showToast('Contato removido da fila offline.')
+      return
+    }
+
+    if (String(groupId).startsWith('local-group-')) {
+      applyLocalRemoval()
+      refreshPendingMutations(user)
+      showToast('Contato removido do grupo local.')
+      return
+    }
+
+    try {
+      await apiRequest(`/api/groups/${groupId}/contacts/${contactId}?requester_id=${encodeURIComponent(contactOwnerId(user))}`, {
+        method: 'DELETE',
+      })
+      applyLocalRemoval()
+      setBackendOnline(true)
+      showToast('Contato removido do grupo.')
+    } catch (error) {
+      setBackendOnline(false)
+      if (isOfflineRequestError(error)) {
+        queueLocalMutation({ type: 'group:contact:remove', groupId, contactId })
+        applyLocalRemoval()
+        showToast('Remoção salva offline. Vou sincronizar ao reconectar.')
+        return
+      }
+      showToast(error.message || 'Não foi possível remover este contato do grupo.')
     }
   }
 
@@ -7320,7 +10906,8 @@ export default function App() {
       instagram: form.instagram || '',
       linkedin: form.linkedin || '',
       custom_url: form.custom_url || '',
-      custom_fields: form.custom_fields || '[]',
+      custom_fields: serializeCustomFields(prepareCustomFieldPayload(form.custom_field_values || [])),
+      custom_field_values: prepareCustomFieldPayload(form.custom_field_values || []),
       trust: 'Novo',
       source: 'Manual',
       crm_status: form.crm_status || 'Novo',
@@ -7401,7 +10988,8 @@ export default function App() {
       instagram: nextContact.instagram || '',
       linkedin: nextContact.linkedin || '',
       custom_url: nextContact.custom_url || '',
-      custom_fields: nextContact.custom_fields || '[]',
+      custom_fields: serializeCustomFields(prepareCustomFieldPayload(nextContact.custom_field_values || [])),
+      custom_field_values: prepareCustomFieldPayload(nextContact.custom_field_values || []),
       crm_status: nextContact.crm_status || 'Novo',
       crm_priority: nextContact.crm_priority || 'Média',
       last_contact_at: nextContact.last_contact_at || '',
@@ -7689,26 +11277,42 @@ export default function App() {
   } else if (effectiveRoute.page === 'crm') {
     page = <CrmPage contacts={contactsWithCategory} onEdit={setEditingContact} onCompleteFollowUp={completeFollowUp} onCancelFollowUp={cancelFollowUp} onNavigate={navigate} onAsk={askCopilot} messages={chatMessages} isThinking={isChatThinking} />
   } else if (effectiveRoute.page === 'new') {
-    page = <NewContactPage form={form} updateForm={updateForm} addContact={addContact} inferredCategory={inferredCategory} tagSuggestions={tagSuggestions} onNavigate={navigate} />
+    page = <NewContactPage form={form} updateForm={updateForm} addContact={addContact} inferredCategory={inferredCategory} tagSuggestions={tagSuggestions} customFieldDefinitions={customFieldDefinitions} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'map') {
-    page = <MapPage contacts={contactsWithCategory} users={networkUsers} user={user} onNavigate={navigate} />
+    page = <MapPage contacts={contactsWithCategory} users={networkUsers} publicProfiles={publicProfilesWithCategory} groups={sharedGroups} groupContactsById={groupContactsById} user={user} onNavigate={navigate} onOpenGroup={setSelectedGroup} />
   } else if (effectiveRoute.page === 'public') {
     page = <PublicNetworkPage publicProfiles={publicProfilesWithCategory} contacts={contactsWithCategory} user={user} onNavigate={navigate} onOpenGroup={setSelectedGroup} />
+  } else if (effectiveRoute.page === 'feed') {
+    page = <FeedPage publicProfiles={publicProfilesWithCategory} user={user} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'groups') {
     page = (
-      <SharedGroupsPage
+      <SharedGroupsPageModern
         user={user}
         groups={sharedGroups}
         contacts={contactsWithCategory}
+        users={networkUsers}
         groupContactsById={groupContactsById}
+        groupMessagesById={groupMessagesById}
+        groupCustomFieldsById={groupCustomFieldsById}
         onCreateGroup={createSharedGroup}
         onUpdateGroup={updateSharedGroup}
         onAddMember={addSharedGroupMember}
+        onRemoveMember={removeSharedGroupMember}
         onAddContact={addContactToSharedGroup}
+        onRemoveContact={removeContactFromSharedGroup}
         onLoadContacts={loadGroupContacts}
+        onLoadMessages={loadGroupMessages}
+        onSendMessage={sendGroupMessage}
+        onLoadCustomFields={(groupId) => loadCustomFieldDefinitions('group', String(groupId))}
+        onSaveCustomField={saveCustomFieldDefinition}
+        onDeleteCustomField={deleteCustomFieldDefinition}
+        onUpdateContactCustomFields={updateGroupContactCustomFields}
+        onClearMessages={clearGroupMessages}
         onNavigate={navigate}
       />
     )
+  } else if (effectiveRoute.page === 'apiDocs') {
+    page = <ApiDocsPage onNavigate={navigate} />
   } else if (effectiveRoute.page === 'chat') {
     page = <ChatPage contacts={contactsWithCategory} messages={chatMessages} onAsk={askCopilot} onApplySuggestion={applyCopilotSuggestion} onNavigate={navigate} isThinking={isChatThinking} />
   } else if (effectiveRoute.page === 'settings') {
@@ -7720,12 +11324,16 @@ export default function App() {
         backendOnline={backendOnline}
         pendingMutations={pendingMutations}
         recents={recents}
+        customFieldDefinitions={customFieldDefinitions}
         onNavigate={navigate}
         onRefreshDuplicates={refreshDuplicates}
         onImportGoogleContacts={importGoogleContactsFromSettings}
         onSyncPending={syncPendingNow}
         onExportContacts={exportContacts}
         onClearRecents={clearRecentSearches}
+        onSaveCustomField={saveCustomFieldDefinition}
+        onDeleteCustomField={deleteCustomFieldDefinition}
+        onSaveUser={saveUser}
         onLogout={logout}
       />
     )
@@ -7751,7 +11359,7 @@ export default function App() {
     <Shell user={user} route={effectiveRoute} online={backendOnline} unread={newCount} pendingChanges={pendingMutations.length} onSyncPending={syncPendingNow} onNavigate={navigate} onLogout={logout}>
       <Toast message={toast} />
       {page}
-      {editingContact ? <EditContactModal contact={editingContact} tagSuggestions={tagSuggestions} onClose={() => setEditingContact(null)} onSave={saveEditedContact} /> : null}
+      {editingContact ? <EditContactModal contact={editingContact} tagSuggestions={tagSuggestions} customFieldDefinitions={customFieldDefinitions} onClose={() => setEditingContact(null)} onSave={saveEditedContact} /> : null}
       {selectedGroup ? <GroupModal profile={selectedGroup} onClose={() => setSelectedGroup(null)} onToast={showToast} /> : null}
     </Shell>
   )

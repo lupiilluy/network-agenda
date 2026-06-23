@@ -25,6 +25,7 @@ from .categories import classify_service, infer_service_from_contact, is_generic
 from .database import (
     authenticate_user,
     find_user_by_email,
+    find_group_by_id,
     get_connection,
     find_user_by_phone,
     init_db,
@@ -35,23 +36,32 @@ from .database import (
     can_access_group,
     can_manage_group,
     create_group,
+    create_group_message,
+    clear_group_messages,
     list_merge_suggestions,
     list_categories,
     list_group_contacts,
+    list_group_messages,
     list_groups_for_user,
     merge_contacts,
+    list_custom_fields,
     remove_group_contact,
     remove_group_member,
     row_to_contact,
+    row_to_custom_field,
     row_to_public_profile,
     row_to_public_user_profile,
     row_to_user,
+    save_custom_field_definition,
     update_group,
+    update_group_contact_custom_fields,
     update_contact,
     upsert_google_user,
     upsert_user,
+    delete_custom_field_definition,
+    get_custom_field,
 )
-from .schemas import AddressLookupOut, AiChatIn, AiChatOut, CategoryOut, ContactCreate, ContactOut, GoogleLoginIn, GroupContactLinkIn, GroupCreate, GroupMemberCreate, GroupMemberOut, GroupOut, LoginIn, MergeDecisionIn, MergeSuggestionOut, PublicProfileOut, SearchOut, UserCreate, UserOut
+from .schemas import AddressLookupOut, AiChatIn, AiChatOut, CategoryOut, ContactCreate, ContactOut, CustomFieldDefinitionIn, CustomFieldDefinitionOut, GoogleLoginIn, GroupContactCustomFieldsIn, GroupContactLinkIn, GroupCreate, GroupMemberCreate, GroupMemberOut, GroupMessageCreate, GroupMessageOut, GroupOut, LoginIn, MergeDecisionIn, MergeSuggestionOut, PublicProfileOut, SearchOut, UserCreate, UserOut
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -137,6 +147,21 @@ def authenticated_owner_id(fallback: str | None = "demo-user") -> str:
     if context and context.get("owner_id"):
         return str(context["owner_id"])
     return str(fallback or "demo-user")
+
+
+def resolve_custom_field_scope_owner(connection, requester_id: str, scope_type: str, scope_id: str) -> str:
+    normalized_scope = str(scope_type or "user").strip().lower() or "user"
+    normalized_scope_id = str(scope_id or "").strip()
+    if normalized_scope == "group":
+        if not normalized_scope_id.isdigit():
+            raise HTTPException(status_code=422, detail="Grupo inválido para campos personalizados.")
+        group = find_group_by_id(connection, int(normalized_scope_id))
+        if group is None:
+            raise HTTPException(status_code=404, detail="Grupo não encontrado.")
+        if not can_manage_group(connection, int(normalized_scope_id), requester_id):
+            raise HTTPException(status_code=403, detail="Você não pode gerenciar campos deste grupo.")
+        return str(group["owner_id"])
+    return str(requester_id)
 
 
 @app.middleware("http")
@@ -290,6 +315,78 @@ def merge_duplicate(payload: MergeDecisionIn) -> dict:
         return row_to_contact(row, connection)
 
 
+@app.get("/api/custom-fields", response_model=list[CustomFieldDefinitionOut])
+def custom_fields(
+    user_id: str = Query(default="demo-user"),
+    scope_type: str = Query(default="user"),
+    scope_id: str = Query(default=""),
+) -> list[dict]:
+    requester_id = authenticated_owner_id(user_id)
+    normalized_scope = str(scope_type or "user").strip().lower() or "user"
+    normalized_scope_id = str(scope_id or "").strip()
+    with get_connection() as connection:
+        owner_id = requester_id
+        if normalized_scope == "group":
+            if not normalized_scope_id.isdigit():
+                raise HTTPException(status_code=422, detail="Grupo inválido para campos personalizados.")
+            if not can_access_group(connection, int(normalized_scope_id), requester_id):
+                raise HTTPException(status_code=403, detail="Você não pode acessar os campos deste grupo.")
+            group = find_group_by_id(connection, int(normalized_scope_id))
+            if group is None:
+                raise HTTPException(status_code=404, detail="Grupo não encontrado.")
+            owner_id = str(group["owner_id"])
+        return list_custom_fields(connection, owner_id, normalized_scope, normalized_scope_id)
+
+
+@app.post("/api/custom-fields", response_model=CustomFieldDefinitionOut, status_code=201)
+def create_custom_field(payload: CustomFieldDefinitionIn) -> dict:
+    requester_id = authenticated_owner_id(payload.owner_id)
+    with get_connection() as connection:
+        owner_id = resolve_custom_field_scope_owner(connection, requester_id, payload.scope_type, payload.scope_id or "")
+        try:
+            field = save_custom_field_definition(connection, owner_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        connection.commit()
+        return field
+
+
+@app.put("/api/custom-fields/{field_id}", response_model=CustomFieldDefinitionOut)
+def edit_custom_field(field_id: int, payload: CustomFieldDefinitionIn) -> dict:
+    requester_id = authenticated_owner_id(payload.owner_id)
+    with get_connection() as connection:
+        owner_id = resolve_custom_field_scope_owner(connection, requester_id, payload.scope_type, payload.scope_id or "")
+        existing = get_custom_field(connection, field_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Campo personalizado não encontrado.")
+        if str(existing["owner_id"]) != owner_id:
+            raise HTTPException(status_code=403, detail="Você não pode editar este campo.")
+        try:
+            field = save_custom_field_definition(connection, owner_id, payload.model_dump(), field_id=field_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        connection.commit()
+        return field
+
+
+@app.delete("/api/custom-fields/{field_id}", status_code=204, response_class=Response)
+def remove_custom_field(field_id: int, requester_id: str = Query(default="demo-user")) -> Response:
+    resolved_requester_id = authenticated_owner_id(requester_id)
+    with get_connection() as connection:
+        existing = get_custom_field(connection, field_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Campo personalizado não encontrado.")
+        if existing["scope_type"] == "group":
+            if not existing["scope_id"].isdigit() or not can_manage_group(connection, int(existing["scope_id"]), resolved_requester_id):
+                raise HTTPException(status_code=403, detail="Você não pode remover este campo.")
+        elif str(existing["owner_id"]) != resolved_requester_id:
+            raise HTTPException(status_code=403, detail="Você não pode remover este campo.")
+        if not delete_custom_field_definition(connection, str(existing["owner_id"]), field_id):
+            raise HTTPException(status_code=404, detail="Campo personalizado não encontrado.")
+        connection.commit()
+    return Response(status_code=204)
+
+
 @app.get("/api/groups", response_model=list[GroupOut])
 def groups(user_id: str = Query(default="demo-user")) -> list[dict]:
     with get_connection() as connection:
@@ -316,7 +413,10 @@ def edit_shared_group(group_id: int, payload: GroupCreate) -> dict:
     with get_connection() as connection:
         if not can_manage_group(connection, group_id, requester_id):
             raise HTTPException(status_code=403, detail="Você não pode editar este grupo.")
-        group = update_group(connection, group_id, payload.model_dump())
+        try:
+            group = update_group(connection, group_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         if group is None:
             raise HTTPException(status_code=404, detail="Grupo não encontrado.")
         connection.commit()
@@ -374,10 +474,46 @@ def create_group_contact(group_id: int, payload: GroupContactLinkIn) -> dict:
                     "added_by": requester_id,
                 },
             )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         connection.commit()
         return contact
+
+
+@app.get("/api/groups/{group_id}/messages", response_model=list[GroupMessageOut])
+def group_messages(group_id: int, user_id: str = Query(default="demo-user")) -> list[dict]:
+    requester_id = authenticated_owner_id(user_id)
+    with get_connection() as connection:
+        if not can_access_group(connection, group_id, requester_id):
+            raise HTTPException(status_code=403, detail="VocÃª nÃ£o pode acessar este grupo.")
+        return list_group_messages(connection, group_id)
+
+
+@app.post("/api/groups/{group_id}/messages", response_model=GroupMessageOut, status_code=201)
+def create_shared_group_message(group_id: int, payload: GroupMessageCreate) -> dict:
+    requester_id = authenticated_owner_id(payload.requester_id)
+    with get_connection() as connection:
+        if not can_access_group(connection, group_id, requester_id):
+            raise HTTPException(status_code=403, detail="VocÃª nÃ£o pode conversar neste grupo.")
+        try:
+            message = create_group_message(connection, group_id, {**payload.model_dump(), "requester_id": requester_id})
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        connection.commit()
+        return message
+
+
+@app.delete("/api/groups/{group_id}/messages", status_code=204, response_class=Response)
+def clear_shared_group_messages(group_id: int, requester_id: str = Query(default="demo-user")) -> Response:
+    requester_owner_id = authenticated_owner_id(requester_id)
+    with get_connection() as connection:
+        if not can_manage_group(connection, group_id, requester_owner_id):
+            raise HTTPException(status_code=403, detail="VocÃª nÃ£o pode limpar a conversa deste grupo.")
+        clear_group_messages(connection, group_id)
+        connection.commit()
+    return Response(status_code=204)
 
 
 @app.delete("/api/groups/{group_id}/contacts/{contact_id}", status_code=204, response_class=Response)
@@ -390,6 +526,20 @@ def delete_group_contact(group_id: int, contact_id: int, requester_id: str = Que
             raise HTTPException(status_code=404, detail="Contato não encontrado no grupo.")
         connection.commit()
     return Response(status_code=204)
+
+
+@app.put("/api/groups/{group_id}/contacts/{contact_id}/custom-fields", response_model=ContactOut)
+def edit_group_contact_custom_fields(group_id: int, contact_id: int, payload: GroupContactCustomFieldsIn) -> dict:
+    requester_id = authenticated_owner_id(payload.requester_id)
+    with get_connection() as connection:
+        if not can_manage_group(connection, group_id, requester_id):
+            raise HTTPException(status_code=403, detail="VocÃª nÃ£o pode editar campos deste contato no grupo.")
+        try:
+            contact = update_group_contact_custom_fields(connection, group_id, contact_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        connection.commit()
+        return contact
 
 
 @app.post("/api/users", response_model=UserOut)
