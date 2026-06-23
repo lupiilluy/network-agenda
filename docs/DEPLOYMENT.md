@@ -67,6 +67,7 @@ Variaveis:
 ```env
 DATABASE_URL=postgresql://...
 CORS_ALLOWED_ORIGINS=https://seu-app.vercel.app
+SUPABASE_URL=https://seu-projeto.supabase.co
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```

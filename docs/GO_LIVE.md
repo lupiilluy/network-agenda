@@ -31,10 +31,11 @@ Guarde tambem estes dados para ativar Auth pelo Supabase:
 ```env
 VITE_SUPABASE_URL=https://seu-projeto.supabase.co
 VITE_SUPABASE_ANON_KEY=...
-SUPABASE_JWT_SECRET=...
+SUPABASE_URL=https://seu-projeto.supabase.co
+SUPABASE_JWT_SECRET=
 ```
 
-`VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` ficam no frontend. `SUPABASE_JWT_SECRET` fica somente no backend.
+`VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` ficam no frontend. `SUPABASE_URL` fica no backend para validacao via JWKS. `SUPABASE_JWT_SECRET` so e necessario se voce estiver usando um projeto com JWT simetrico legado.
 
 ## 2. Render
 
@@ -55,7 +56,8 @@ Preencha as variaveis do servico `network-agenda-api`:
 ```env
 DATABASE_URL=postgresql://...
 CORS_ALLOWED_ORIGINS=https://seu-app.vercel.app
-SUPABASE_JWT_SECRET=...
+SUPABASE_URL=https://seu-projeto.supabase.co
+SUPABASE_JWT_SECRET=
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
@@ -108,7 +110,7 @@ Depois do deploy do Vercel, copie o dominio final e coloque no Render:
 CORS_ALLOWED_ORIGINS=https://seu-app.vercel.app
 ```
 
-Sem as variaveis `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `SUPABASE_JWT_SECRET`, o app continua funcionando pelo login local/Google antigo, mas Google via Supabase e magic link ficam desligados.
+Sem as variaveis `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `SUPABASE_URL`, o app continua funcionando pelo login local/Google antigo, mas Google via Supabase e magic link ficam desligados.
 
 ## 4. Google OAuth
 

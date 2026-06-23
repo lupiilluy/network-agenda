@@ -5,6 +5,7 @@ import os
 from contextvars import ContextVar
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlencode
@@ -16,9 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 try:
     import jwt
-    from jwt import PyJWTError
+    from jwt import PyJWKClient, PyJWTError
 except ImportError:
     jwt = None
+    PyJWKClient = None
     PyJWTError = Exception
 
 from .categories import classify_service, infer_service_from_contact, is_generic_service, normalize
@@ -104,18 +106,89 @@ app.add_middleware(
 
 
 def decode_supabase_token(token: str) -> dict | None:
-    jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "").strip()
-    if not token or not jwt_secret or jwt is None:
+    if not token or jwt is None:
         return None
-    try:
-        claims = jwt.decode(token, jwt_secret, algorithms=["HS256"], options={"verify_aud": False})
-    except PyJWTError:
+    claims = decode_supabase_hs256_claims(token)
+    if claims is None:
+        issuer_hint = ""
+        unverified_claims = supabase_unverified_claims(token)
+        if unverified_claims is not None:
+            issuer_hint = str(unverified_claims.get("iss") or "").strip().rstrip("/")
+        claims = decode_supabase_jwks_claims(token, issuer_hint or configured_supabase_url())
+    if claims is None:
         return None
     email = str(claims.get("email") or "").strip()
     subject = str(claims.get("sub") or "").strip()
     if not email or not subject:
         return None
     return {"sub": subject, "email": email}
+
+
+def configured_supabase_url() -> str:
+    for key in ("SUPABASE_URL", "VITE_SUPABASE_URL"):
+        value = os.getenv(key, "").strip().rstrip("/")
+        if value:
+            return value
+    return ""
+
+
+def decode_supabase_hs256_claims(token: str) -> dict | None:
+    jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "").strip()
+    if not token or not jwt_secret or jwt is None:
+        return None
+    try:
+        return jwt.decode(token, jwt_secret, algorithms=["HS256"], options={"verify_aud": False})
+    except PyJWTError:
+        return None
+
+
+def supabase_unverified_claims(token: str) -> dict | None:
+    if not token or jwt is None:
+        return None
+    try:
+        return jwt.decode(
+            token,
+            options={
+                "verify_signature": False,
+                "verify_aud": False,
+                "verify_exp": False,
+                "verify_nbf": False,
+                "verify_iat": False,
+            },
+            algorithms=["HS256", "RS256", "ES256"],
+        )
+    except PyJWTError:
+        return None
+
+
+def supabase_jwks_url(base_or_issuer: str) -> str:
+    normalized = str(base_or_issuer or "").strip().rstrip("/")
+    if not normalized:
+        return ""
+    if normalized.endswith("/auth/v1"):
+        return f"{normalized}/.well-known/jwks.json"
+    return f"{normalized}/auth/v1/.well-known/jwks.json"
+
+
+@lru_cache(maxsize=8)
+def supabase_jwks_client(jwks_url: str):
+    if not jwks_url or PyJWKClient is None:
+        return None
+    return PyJWKClient(jwks_url)
+
+
+def decode_supabase_jwks_claims(token: str, issuer_or_url: str) -> dict | None:
+    jwks_url = supabase_jwks_url(issuer_or_url)
+    if not token or not jwks_url or jwt is None:
+        return None
+    try:
+        client = supabase_jwks_client(jwks_url)
+        if client is None:
+            return None
+        signing_key = client.get_signing_key_from_jwt(token)
+        return jwt.decode(token, signing_key.key, algorithms=["ES256", "RS256"], options={"verify_aud": False})
+    except Exception:
+        return None
 
 
 def auth_context_from_header(authorization: str) -> dict | None:
@@ -143,7 +216,7 @@ def auth_context_from_header(authorization: str) -> dict | None:
 
 
 def supabase_auth_required() -> bool:
-    return bool(os.getenv("SUPABASE_JWT_SECRET", "").strip()) and jwt is not None
+    return bool(os.getenv("SUPABASE_JWT_SECRET", "").strip() or configured_supabase_url()) and jwt is not None
 
 
 def auth_context_or_unauthorized() -> dict | None:

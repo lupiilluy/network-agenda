@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import jwt
 from fastapi import HTTPException
@@ -35,6 +36,9 @@ class NetworkAgendaApiTests(unittest.TestCase):
         database.DB_PATH = database.DATA_DIR / "network_agenda_test.sqlite3"
         os.environ.pop("DATABASE_URL", None)
         os.environ.pop("OPENAI_API_KEY", None)
+        os.environ.pop("SUPABASE_JWT_SECRET", None)
+        os.environ.pop("SUPABASE_URL", None)
+        os.environ.pop("VITE_SUPABASE_URL", None)
         database.init_db()
 
     def tearDown(self):
@@ -278,6 +282,40 @@ class NetworkAgendaApiTests(unittest.TestCase):
             self.assertEqual(response.json()["email"], "route@example.com")
         finally:
             os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+    def test_supabase_auth_required_with_url_only_blocks_local_login(self):
+        os.environ["SUPABASE_URL"] = "https://qbqqfkvvbvsdpwsajkha.supabase.co"
+        try:
+            client = TestClient(main.app)
+            contacts_response = client.get("/api/contacts?user_id=test-user")
+            login_response = client.post(
+                "/api/login",
+                json={"email": "demo@network.local", "password": "123456"},
+            )
+
+            self.assertEqual(contacts_response.status_code, 401)
+            self.assertEqual(login_response.status_code, 403)
+        finally:
+            os.environ.pop("SUPABASE_URL", None)
+
+    def test_supabase_jwks_claims_are_used_when_secret_is_missing(self):
+        os.environ["SUPABASE_URL"] = "https://qbqqfkvvbvsdpwsajkha.supabase.co"
+        try:
+            with patch.object(main, "decode_supabase_hs256_claims", return_value=None), patch.object(
+                main,
+                "supabase_unverified_claims",
+                return_value={"iss": "https://qbqqfkvvbvsdpwsajkha.supabase.co/auth/v1"},
+            ), patch.object(
+                main,
+                "decode_supabase_jwks_claims",
+                return_value={"sub": "jwks-user", "email": "jwks@example.com", "aud": "authenticated"},
+            ) as decode_jwks:
+                claims = main.decode_supabase_token("fake-token")
+
+            self.assertEqual(claims, {"sub": "jwks-user", "email": "jwks@example.com"})
+            decode_jwks.assert_called_once_with("fake-token", "https://qbqqfkvvbvsdpwsajkha.supabase.co/auth/v1")
+        finally:
+            os.environ.pop("SUPABASE_URL", None)
 
     def test_admin_can_create_group_and_share_contact(self):
         admin = main.save_user(

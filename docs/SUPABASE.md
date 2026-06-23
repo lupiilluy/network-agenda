@@ -23,7 +23,8 @@ Backend:
 ```env
 DATABASE_URL=postgresql://...
 CORS_ALLOWED_ORIGINS=https://seu-app.vercel.app
-SUPABASE_JWT_SECRET=...
+SUPABASE_URL=https://seu-projeto.supabase.co
+SUPABASE_JWT_SECRET=
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
@@ -38,7 +39,7 @@ VITE_GOOGLE_CLIENT_ID=...
 VITE_GOOGLE_MAPS_API_KEY=...
 ```
 
-Com essas variaveis, o frontend usa Supabase para Google OAuth e magic link. O backend valida o bearer token com `SUPABASE_JWT_SECRET` e usa o usuario autenticado como dono real dos contatos.
+Com essas variaveis, o frontend usa Supabase para Google OAuth e magic link. O backend valida o bearer token via JWKS usando `SUPABASE_URL` e usa o usuario autenticado como dono real dos contatos.
 
 Nao use no navegador:
 
@@ -55,7 +56,7 @@ SUPABASE_SERVICE_ROLE_KEY=...
 3. Configurar `DATABASE_URL` no host da API.
 4. Hospedar a API FastAPI em Render, Railway, Fly.io ou container equivalente.
 5. Configurar `VITE_API_URL` no Vercel apontando para a API.
-6. Configurar `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `SUPABASE_JWT_SECRET`.
+6. Configurar `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `SUPABASE_URL`.
 7. Depois ativar RLS nas tabelas expostas, caso o frontend passe a chamar Supabase direto.
 
 ## Seguranca

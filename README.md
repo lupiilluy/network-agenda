@@ -171,6 +171,7 @@ VITE_GOOGLE_MAPS_API_KEY=sua_chave_google_maps
 ```env
 DATABASE_URL=
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:5174,http://localhost:5174
+SUPABASE_URL=https://seu-projeto.supabase.co
 SUPABASE_JWT_SECRET=
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
