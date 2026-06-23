@@ -44,8 +44,12 @@ import {
   Zap,
 } from 'lucide-react'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8006'
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || ''
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.PROD ? 'https://network-agenda-api.onrender.com' : 'http://127.0.0.1:8006')
+const SUPABASE_URL =
+  import.meta.env.VITE_SUPABASE_URL ||
+  (import.meta.env.PROD ? 'https://qbqqfkvvbvsdpwsajkha.supabase.co' : '')
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? ''
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? ''
