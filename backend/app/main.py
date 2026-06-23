@@ -80,7 +80,7 @@ def load_local_env() -> None:
 
 load_local_env()
 
-app = FastAPI(title="Network Agenda API", version="0.1.0")
+app = FastAPI(title="Network Intelligence CRM API", version="0.1.0")
 AUTH_CONTEXT: ContextVar[dict | None] = ContextVar("AUTH_CONTEXT", default=None)
 
 
@@ -142,10 +142,25 @@ def auth_context_from_header(authorization: str) -> dict | None:
     return {**claims, "owner_id": owner_id}
 
 
+def supabase_auth_required() -> bool:
+    return bool(os.getenv("SUPABASE_JWT_SECRET", "").strip()) and jwt is not None
+
+
+def auth_context_or_unauthorized() -> dict | None:
+    context = AUTH_CONTEXT.get()
+    if context and context.get("owner_id") and context.get("email"):
+        return context
+    if supabase_auth_required():
+        raise HTTPException(status_code=401, detail="Autenticação Supabase obrigatória.")
+    return None
+
+
 def authenticated_owner_id(fallback: str | None = "demo-user") -> str:
     context = AUTH_CONTEXT.get()
     if context and context.get("owner_id"):
         return str(context["owner_id"])
+    if supabase_auth_required():
+        raise HTTPException(status_code=401, detail="Autenticação Supabase obrigatória.")
     return str(fallback or "demo-user")
 
 
@@ -544,11 +559,18 @@ def edit_group_contact_custom_fields(group_id: int, contact_id: int, payload: Gr
 
 @app.post("/api/users", response_model=UserOut)
 def save_user(payload: UserCreate) -> dict:
-    if not (payload.google_connected or payload.google_contacts_imported_at or payload.google_profile_synced_at):
+    context = auth_context_or_unauthorized()
+    if not supabase_auth_required() and not (payload.google_connected or payload.google_contacts_imported_at or payload.google_profile_synced_at):
         raise HTTPException(status_code=422, detail="Conta Google obrigatória para salvar o perfil.")
+    data = payload.model_dump()
+    if context:
+        data["email"] = context["email"]
+        if not data.get("name"):
+            data["name"] = context["email"].split("@", 1)[0]
+        data["google_connected"] = True
     with get_connection() as connection:
         try:
-            row = upsert_user(connection, payload.model_dump())
+            row = upsert_user(connection, data)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         connection.commit()
@@ -557,6 +579,8 @@ def save_user(payload: UserCreate) -> dict:
 
 @app.post("/api/login", response_model=UserOut)
 def login(payload: LoginIn) -> dict:
+    if supabase_auth_required():
+        raise HTTPException(status_code=403, detail="Use Google ou magic link via Supabase para entrar.")
     with get_connection() as connection:
         row = authenticate_user(connection, payload.email, payload.password)
         if row is None:
@@ -566,14 +590,24 @@ def login(payload: LoginIn) -> dict:
 
 @app.post("/api/google-login", response_model=UserOut)
 def google_login(payload: GoogleLoginIn) -> dict:
+    context = auth_context_or_unauthorized()
+    data = payload.model_dump()
+    if context:
+        if normalize(data["email"]) != normalize(context["email"]):
+            raise HTTPException(status_code=401, detail="Token Supabase não corresponde ao email informado.")
+        data["sub"] = context["sub"]
+        data["email"] = context["email"]
+        if not data.get("name"):
+            data["name"] = context["email"].split("@", 1)[0]
     with get_connection() as connection:
-        row = upsert_google_user(connection, payload.model_dump())
+        row = upsert_google_user(connection, data)
         connection.commit()
         return row_to_user(row)
 
 
 @app.get("/api/users", response_model=list[UserOut])
 def users() -> list[dict]:
+    auth_context_or_unauthorized()
     with get_connection() as connection:
         rows = connection.execute("SELECT * FROM users ORDER BY datetime(created_at) DESC, id DESC").fetchall()
         return [row_to_user(row) for row in rows]
@@ -581,6 +615,7 @@ def users() -> list[dict]:
 
 @app.get("/api/users/lookup", response_model=UserOut | None)
 def lookup_user(phone: str = Query(default="")) -> dict | None:
+    auth_context_or_unauthorized()
     with get_connection() as connection:
         row = find_user_by_phone(connection, phone)
         return row_to_user(row) if row is not None else None
@@ -1255,7 +1290,7 @@ def ai_chat(payload: AiChatIn) -> dict:
     provider = "local"
     if action_suggestions:
         names = ", ".join(item["name"] for item in action_suggestions[:4])
-        answer = f"Entendi. Preparei {len(action_suggestions)} ação(ões) para confirmar: {names}. Dá uma olhada na lateral e clique em Aplicar se estiver certo."
+        answer = f"Entendi. Preparei {len(action_suggestions)} ação(ões) para confirmar: {names}. Dá uma olhada na lateral e clique em Revisar se estiver certo."
     else:
         clarification = action_clarification(payload.message, rows, payload.target_contact_id)
         answer = clarification or call_openai_chat(payload.message, rows, suggestions)
@@ -1266,12 +1301,12 @@ def ai_chat(payload: AiChatIn) -> dict:
             if item.get("action") == "conflict":
                 answer = item["reason"]
             elif item.get("next_follow_up_at"):
-                answer = f"Perfeito. Localizei a data: {format_follow_up(item['next_follow_up_at'])}. Preparei o follow-up de {item['name']} na lateral; clique em Aplicar para salvar."
+                answer = f"Perfeito. Localizei a data: {format_follow_up(item['next_follow_up_at'])}. Preparei o follow-up de {item['name']} na lateral; clique em Revisar para salvar."
             else:
-                answer = f"Certo. Estou com {item['name']} e preparei: {action_label}. Confere a sugestão na lateral e clique em Aplicar para eu salvar."
+                answer = f"Certo. Estou com {item['name']} e preparei: {action_label}. Confere a sugestão na lateral e clique em Revisar para eu salvar."
         else:
             names = ", ".join(item["name"] for item in action_suggestions[:4])
-            answer = f"Certo. Encontrei estes contatos no seu pedido: {names}. Confere as sugestões na lateral e aplique apenas as corretas."
+            answer = f"Certo. Encontrei estes contatos no seu pedido: {names}. Confere as sugestões na lateral e confirme apenas as corretas."
 
     if answer and not action_suggestions and os.getenv("OPENAI_API_KEY", "").strip():
         provider = "openai"

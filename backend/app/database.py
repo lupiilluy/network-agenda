@@ -234,6 +234,7 @@ def init_db() -> None:
               instagram TEXT NOT NULL DEFAULT '',
               linkedin TEXT NOT NULL DEFAULT '',
               custom_url TEXT NOT NULL DEFAULT '',
+              avatar_url TEXT NOT NULL DEFAULT '',
               custom_fields TEXT NOT NULL DEFAULT '[]',
               crm_status TEXT NOT NULL DEFAULT 'Novo',
               crm_priority TEXT NOT NULL DEFAULT 'Média',
@@ -300,6 +301,7 @@ def init_db() -> None:
               public_instagram TEXT NOT NULL DEFAULT '',
               public_linkedin TEXT NOT NULL DEFAULT '',
               public_url TEXT NOT NULL DEFAULT '',
+              avatar_url TEXT NOT NULL DEFAULT '',
               google_connected INTEGER NOT NULL DEFAULT 0,
               google_contacts_imported_at TEXT NOT NULL DEFAULT '',
               google_profile_synced_at TEXT NOT NULL DEFAULT '',
@@ -450,6 +452,7 @@ def init_postgres_db(connection: DbConnection) -> None:
 
 def ensure_contact_columns(connection: DbConnection) -> None:
     if connection.dialect == "postgres":
+        connection.execute("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT ''")
         return
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(contacts)").fetchall()}
     if "owner_id" not in columns:
@@ -477,6 +480,7 @@ def ensure_contact_columns(connection: DbConnection) -> None:
         ("instagram", ""),
         ("linkedin", ""),
         ("custom_url", ""),
+        ("avatar_url", ""),
         ("custom_fields", "[]"),
     ):
         if column not in columns:
@@ -487,6 +491,7 @@ def ensure_contact_columns(connection: DbConnection) -> None:
 
 def ensure_user_columns(connection: DbConnection) -> None:
     if connection.dialect == "postgres":
+        connection.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT ''")
         connection.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_preference TEXT NOT NULL DEFAULT 'relevant'")
         return
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
@@ -519,6 +524,7 @@ def ensure_user_columns(connection: DbConnection) -> None:
         ("public_instagram", "TEXT", ""),
         ("public_linkedin", "TEXT", ""),
         ("public_url", "TEXT", ""),
+        ("avatar_url", "TEXT", ""),
         ("google_connected", "INTEGER", "0"),
         ("google_contacts_imported_at", "TEXT", ""),
         ("google_profile_synced_at", "TEXT", ""),
@@ -739,7 +745,7 @@ def repair_text_encoding(connection: DbConnection) -> None:
         "contacts": (
             "name", "phone", "service", "note", "city", "address", "trust", "source",
             "description", "demand", "solves", "tags", "email", "whatsapp", "instagram",
-            "linkedin", "custom_url", "custom_fields", "crm_status", "crm_priority",
+            "linkedin", "custom_url", "avatar_url", "custom_fields", "crm_status", "crm_priority",
             "last_contact_at", "next_follow_up_at", "crm_note", "category_id",
             "category_label", "category_group", "search_text",
         ),
@@ -750,7 +756,7 @@ def repair_text_encoding(connection: DbConnection) -> None:
             "service_address_line", "service_address_number", "service_address_complement",
             "service_neighborhood", "service_city", "service_state", "public_description",
             "public_demand", "public_solves", "public_tags", "public_whatsapp",
-            "public_instagram", "public_linkedin", "public_url", "google_contacts_imported_at",
+            "public_instagram", "public_linkedin", "public_url", "avatar_url", "google_contacts_imported_at",
             "google_profile_synced_at", "notification_preference", "role",
         ),
         "public_profiles": ("name", "service", "area", "response", "category_id", "category_label", "category_group", "search_text"),
@@ -1403,6 +1409,7 @@ def row_to_payload(row) -> dict:
         "instagram": row["instagram"],
         "linkedin": row["linkedin"],
         "custom_url": row["custom_url"],
+        "avatar_url": row["avatar_url"],
         "custom_fields": row["custom_fields"],
         "crm_status": row["crm_status"],
         "crm_priority": row["crm_priority"],
@@ -1449,6 +1456,7 @@ def upsert_user(connection: DbConnection, payload: dict):
     notification_preference = str(payload.get("notification_preference") or "relevant")
     if notification_preference not in {"relevant", "low_in_app", "irrelevant"}:
         notification_preference = "relevant"
+    avatar_url = str(payload.get("avatar_url") or payload.get("picture") or "").strip()
     values = (
         payload["name"],
         payload.get("birth_date") or "",
@@ -1487,6 +1495,7 @@ def upsert_user(connection: DbConnection, payload: dict):
         payload.get("public_instagram") or "",
         payload.get("public_linkedin") or "",
         payload.get("public_url") or "",
+        avatar_url,
         db_bool(connection, payload.get("google_connected")),
         payload.get("google_contacts_imported_at") or "",
         payload.get("google_profile_synced_at") or "",
@@ -1503,10 +1512,10 @@ def upsert_user(connection: DbConnection, payload: dict):
           service_address_line, service_address_number, service_address_complement,
           service_neighborhood, service_city, service_state, service_address_visible,
           public_visible, public_description, public_demand,
-          public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url,
+          public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url, avatar_url,
           google_connected, google_contacts_imported_at, google_profile_synced_at, notification_preference, role
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(email) DO UPDATE SET
           name = excluded.name,
           birth_date = excluded.birth_date,
@@ -1544,6 +1553,7 @@ def upsert_user(connection: DbConnection, payload: dict):
           public_instagram = excluded.public_instagram,
           public_linkedin = excluded.public_linkedin,
           public_url = excluded.public_url,
+          avatar_url = excluded.avatar_url,
           google_connected = excluded.google_connected,
           google_contacts_imported_at = excluded.google_contacts_imported_at,
           google_profile_synced_at = excluded.google_profile_synced_at,
@@ -1557,15 +1567,17 @@ def upsert_user(connection: DbConnection, payload: dict):
 
 def upsert_google_user(connection: DbConnection, payload: dict):
     existing = connection.execute("SELECT * FROM users WHERE lower(email) = lower(?)", (payload["email"],)).fetchone()
+    avatar_url = str(payload.get("picture") or payload.get("avatar_url") or "").strip()
     if existing is not None:
         connection.execute(
             """
             UPDATE users
             SET google_connected = true,
-                google_profile_synced_at = COALESCE(NULLIF(google_profile_synced_at, ''), CURRENT_TIMESTAMP)
+                google_profile_synced_at = COALESCE(NULLIF(google_profile_synced_at, ''), CURRENT_TIMESTAMP),
+                avatar_url = COALESCE(NULLIF(?, ''), avatar_url)
             WHERE id = ?
             """,
-            (existing["id"],),
+            (avatar_url, existing["id"]),
         )
         return connection.execute("SELECT * FROM users WHERE id = ?", (existing["id"],)).fetchone()
 
@@ -1577,12 +1589,12 @@ def upsert_google_user(connection: DbConnection, payload: dict):
           name, birth_date, email, password_hash, phone, phone_digits, cep, address,
           city, state, address_visible, interests, is_collaborator, offered_services,
           service_address, service_address_visible, public_visible, public_description, public_demand,
-          public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url,
+          public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url, avatar_url,
           google_connected, google_profile_synced_at, notification_preference, role
         )
-        VALUES (?, '', ?, ?, '', ?, '', '', '', '', false, '[]', false, '', '', true, false, '', '', '', '', '', '', '', '', true, CURRENT_TIMESTAMP, 'relevant', 'user')
+        VALUES (?, '', ?, ?, '', ?, '', '', '', '', false, '[]', false, '', '', true, false, '', '', '', '', '', '', '', '', ?, true, CURRENT_TIMESTAMP, 'relevant', 'user')
         """,
-        (payload["name"], payload["email"], password_hash, phone_digits_value),
+        (payload["name"], payload["email"], password_hash, phone_digits_value, avatar_url),
     )
     return connection.execute("SELECT * FROM users WHERE email = ?", (payload["email"],)).fetchone()
 
@@ -1658,6 +1670,7 @@ def row_to_user(row) -> dict:
         "public_instagram": row["public_instagram"],
         "public_linkedin": row["public_linkedin"],
         "public_url": row["public_url"],
+        "avatar_url": row["avatar_url"],
         "google_connected": bool(row["google_connected"]),
         "google_contacts_imported_at": row["google_contacts_imported_at"],
         "google_profile_synced_at": row["google_profile_synced_at"],
@@ -1691,24 +1704,25 @@ def insert_contact(connection: DbConnection, payload: dict):
     instagram = payload.get("instagram") or ""
     linkedin = payload.get("linkedin") or ""
     custom_url = payload.get("custom_url") or ""
+    avatar_url = payload.get("avatar_url") or ""
     custom_fields = payload.get("custom_fields") or "[]"
     crm_status = payload.get("crm_status") or "Novo"
     crm_priority = payload.get("crm_priority") or "Média"
     last_contact_at = payload.get("last_contact_at") or ""
     next_follow_up_at = payload.get("next_follow_up_at") or ""
     crm_note = payload.get("crm_note") or ""
-    search_text = normalize(" ".join([payload["name"], payload["phone"], service, note, city, address, trust, source, description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, custom_fields, crm_status, crm_priority, crm_note, category.label, category.group]))
+    search_text = normalize(" ".join([payload["name"], payload["phone"], service, note, city, address, trust, source, description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, avatar_url, custom_fields, crm_status, crm_priority, crm_note, category.label, category.group]))
 
     returning_clause = " RETURNING id" if connection.dialect == "postgres" else ""
     cursor = connection.execute(
         f"""
         INSERT INTO contacts (
             owner_id, name, phone, service, note, city, address, trust, source,
-            description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, custom_fields,
+            description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, avatar_url, custom_fields,
             crm_status, crm_priority, last_contact_at, next_follow_up_at, crm_note,
             category_id, category_label, category_group, search_text
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         {returning_clause}
         """,
         (
@@ -1730,6 +1744,7 @@ def insert_contact(connection: DbConnection, payload: dict):
             instagram,
             linkedin,
             custom_url,
+            avatar_url,
             custom_fields,
             crm_status,
             crm_priority,
@@ -1762,6 +1777,7 @@ def insert_contact(connection: DbConnection, payload: dict):
         "instagram": instagram,
         "linkedin": linkedin,
         "custom_url": custom_url,
+        "avatar_url": avatar_url,
         "custom_fields": custom_fields,
         "crm_status": crm_status,
         "crm_priority": crm_priority,
@@ -1791,13 +1807,14 @@ def update_contact(connection: DbConnection, contact_id: int, payload: dict):
     instagram = payload.get("instagram") or ""
     linkedin = payload.get("linkedin") or ""
     custom_url = payload.get("custom_url") or ""
+    avatar_url = payload.get("avatar_url") or ""
     custom_fields = payload.get("custom_fields") or "[]"
     crm_status = payload.get("crm_status") or "Novo"
     crm_priority = payload.get("crm_priority") or "Média"
     last_contact_at = payload.get("last_contact_at") or ""
     next_follow_up_at = payload.get("next_follow_up_at") or ""
     crm_note = payload.get("crm_note") or ""
-    search_text = normalize(" ".join([payload["name"], payload["phone"], service, note, city, address, trust, source, description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, custom_fields, crm_status, crm_priority, crm_note, category.label, category.group]))
+    search_text = normalize(" ".join([payload["name"], payload["phone"], service, note, city, address, trust, source, description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, avatar_url, custom_fields, crm_status, crm_priority, crm_note, category.label, category.group]))
 
     cursor = connection.execute(
         """
@@ -1819,6 +1836,7 @@ def update_contact(connection: DbConnection, contact_id: int, payload: dict):
             instagram = ?,
             linkedin = ?,
             custom_url = ?,
+            avatar_url = ?,
             custom_fields = ?,
             crm_status = ?,
             crm_priority = ?,
@@ -1849,6 +1867,7 @@ def update_contact(connection: DbConnection, contact_id: int, payload: dict):
             instagram,
             linkedin,
             custom_url,
+            avatar_url,
             custom_fields,
             crm_status,
             crm_priority,
@@ -1884,6 +1903,7 @@ def update_contact(connection: DbConnection, contact_id: int, payload: dict):
         "instagram": instagram,
         "linkedin": linkedin,
         "custom_url": custom_url,
+        "avatar_url": avatar_url,
         "custom_fields": custom_fields,
         "crm_status": crm_status,
         "crm_priority": crm_priority,
@@ -2174,6 +2194,7 @@ def row_to_contact(row, connection: DbConnection | None = None) -> dict:
         "instagram": row["instagram"],
         "linkedin": row["linkedin"],
         "custom_url": row["custom_url"],
+        "avatar_url": row["avatar_url"],
         "custom_fields": row["custom_fields"],
         "crm_status": row["crm_status"],
         "crm_priority": row["crm_priority"],
@@ -2618,6 +2639,7 @@ def row_to_public_user_profile(row) -> dict:
         "instagram": row["public_instagram"],
         "linkedin": row["public_linkedin"],
         "custom_url": row["public_url"],
+        "avatar_url": row["avatar_url"],
         "source_user_id": row["id"],
         "search_text": search_text,
         "category": {

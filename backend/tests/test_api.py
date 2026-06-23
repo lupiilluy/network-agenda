@@ -187,13 +187,6 @@ class NetworkAgendaApiTests(unittest.TestCase):
     def test_supabase_token_owner_overrides_client_owner_id(self):
         os.environ["SUPABASE_JWT_SECRET"] = "test-secret"
         try:
-            user = main.google_login(
-                GoogleLoginIn(
-                    sub="supabase-user-1",
-                    email="supabase@example.com",
-                    name="Supabase User",
-                )
-            )
             token = jwt.encode(
                 {"sub": "supabase-user-1", "email": "supabase@example.com", "aud": "authenticated"},
                 "test-secret",
@@ -201,14 +194,25 @@ class NetworkAgendaApiTests(unittest.TestCase):
             )
 
             client = TestClient(main.app)
+            login_response = client.post(
+                "/api/google-login",
+                headers={"Authorization": f"Bearer {token}"},
+                json=GoogleLoginIn(
+                    sub="spoofed-sub",
+                    email="supabase@example.com",
+                    name="Supabase User",
+                ).model_dump(),
+            )
             response = client.post(
                 "/api/contacts",
                 headers={"Authorization": f"Bearer {token}"},
                 json=contact_payload(owner_id="spoofed-owner", name="Contato Seguro", phone="11 97777-1010").model_dump(),
             )
 
+            self.assertEqual(login_response.status_code, 200)
+            self.assertEqual(login_response.json()["email"], "supabase@example.com")
             self.assertEqual(response.status_code, 201)
-            self.assertEqual(response.json()["owner_id"], str(user["id"]))
+            self.assertEqual(response.json()["owner_id"], str(login_response.json()["id"]))
         finally:
             os.environ.pop("SUPABASE_JWT_SECRET", None)
 
@@ -233,6 +237,45 @@ class NetworkAgendaApiTests(unittest.TestCase):
             with database.get_connection() as connection:
                 user = database.find_user_by_email(connection, "new-supabase@example.com")
             self.assertEqual(response.json()["owner_id"], str(user["id"]))
+        finally:
+            os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+    def test_supabase_auth_required_blocks_local_login_and_private_routes(self):
+        os.environ["SUPABASE_JWT_SECRET"] = "test-secret"
+        try:
+            client = TestClient(main.app)
+            contacts_response = client.get("/api/contacts?user_id=test-user")
+            login_response = client.post(
+                "/api/login",
+                json={"email": "demo@network.local", "password": "123456"},
+            )
+
+            self.assertEqual(contacts_response.status_code, 401)
+            self.assertEqual(login_response.status_code, 403)
+        finally:
+            os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+    def test_supabase_google_login_route_uses_bearer_identity(self):
+        os.environ["SUPABASE_JWT_SECRET"] = "test-secret"
+        try:
+            token = jwt.encode(
+                {"sub": "supabase-route-user", "email": "route@example.com", "aud": "authenticated"},
+                "test-secret",
+                algorithm="HS256",
+            )
+            client = TestClient(main.app)
+            response = client.post(
+                "/api/google-login",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "sub": "spoofed-sub",
+                    "email": "route@example.com",
+                    "name": "Spoofed Name",
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["email"], "route@example.com")
         finally:
             os.environ.pop("SUPABASE_JWT_SECRET", None)
 

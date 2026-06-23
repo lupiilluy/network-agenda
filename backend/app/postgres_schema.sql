@@ -37,6 +37,7 @@ create table if not exists users (
   public_instagram text not null default '',
   public_linkedin text not null default '',
   public_url text not null default '',
+  avatar_url text not null default '',
   google_connected boolean not null default false,
   google_contacts_imported_at text not null default '',
   google_profile_synced_at text not null default '',
@@ -65,6 +66,7 @@ create table if not exists contacts (
   instagram text not null default '',
   linkedin text not null default '',
   custom_url text not null default '',
+  avatar_url text not null default '',
   custom_fields text not null default '[]',
   crm_status text not null default 'Novo',
   crm_priority text not null default 'Média',
@@ -212,6 +214,8 @@ create table if not exists group_messages (
 );
 
 alter table users add column if not exists notification_preference text not null default 'relevant';
+alter table users add column if not exists avatar_url text not null default '';
+alter table contacts add column if not exists avatar_url text not null default '';
 
 create index if not exists contacts_owner_created_idx on contacts(owner_id, created_at desc, id desc);
 create index if not exists contacts_owner_category_idx on contacts(owner_id, category_id);

@@ -1,46 +1,82 @@
-# Network Agenda
+# Network Intelligence CRM
 
-Webapp browser-first para gestão inteligente de contatos, CRM pessoal e networking. O produto combina agenda privada por usuário, importação de contatos, categorização por serviços e tags, CRM de follow-ups, chat operacional, mapa/grafo interativo e rede pública opcional.
+Repositorio do MVP atual do produto `Network Intelligence CRM`, um webapp PWA-first para gestao inteligente de contatos, CRM pessoal, networking, grupos compartilhados e descoberta de perfis publicos.
 
-## Objetivo
+O nome do repositorio ainda e `network-agenda`, mas o produto e apresentado no app como `Network Intelligence CRM`.
 
-O Network Agenda ajuda cada usuário a organizar sua rede pessoal/profissional e encontrar rapidamente quem pode ajudar, prestar um serviço, resolver um problema ou receber uma indicação.
+## MVP atual
 
-O MVP atual prioriza:
+- onboarding em 5 passos: login, perfil, visibilidade publica, importacao e primeiros insights;
+- dashboard com metricas, atalhos e mini grafo da rede;
+- agenda privada com busca, filtros, detalhe, edicao e exclusao de contatos;
+- grafo privado separado do grafo publico e do grafo de grupos;
+- mapa/rede com leitura por proximidade, DDD e contexto;
+- CRM com status, prioridade, follow-up, conclusao e cancelamento;
+- grupos compartilhados com chat, grafo, membros, contatos e campos customizados proprios;
+- rede publica com cards, feed, perfis visiveis e exploracao em grafo;
+- perfil proprio separado do perfil publico;
+- importacao via Google Contacts, CSV e cadastro manual;
+- sugestao de duplicados por email/telefone com merge manual;
+- campos customizados por agenda e por grupo;
+- chat de copiloto com resposta local estruturada e suporte opcional a OpenAI;
+- PWA instalavel com manifest, service worker, cache basico, shell offline e fila de sincronizacao ao reconectar;
+- tema dark como padrao e light theme funcional, inclusive nas areas de grafo;
+- documentacao OpenAPI/Swagger no backend e pagina interna `/api-docs`.
 
-- base privada de contatos por usuário;
-- importação via Google Contacts, CSV/TXT e cadastro manual;
-- categorização por serviços, tags e contexto;
-- CRM com follow-ups, prioridade, status, conclusão e cancelamento;
-- chat operacional para buscar contatos e aplicar ações no CRM;
-- mapa com grafo 3D em Canvas nativo;
-- perfil pessoal separado do perfil público;
-- rede pública opcional para usuários que querem aparecer dentro da plataforma;
-- serviços oferecidos na rede pública apresentados por tags.
+## Autenticacao
 
-## Funcionalidades
+O projeto hoje trabalha em modo hibrido:
 
-- Login por email/senha.
-- Login com Google OAuth.
-- Importação real de contatos via Google People API.
-- Cadastro com dados preenchidos pelo Google quando disponíveis.
-- Sessão local com expiração em 24 horas.
-- Agenda privada separada por usuário.
-- Cadastro, edição, remoção e detalhe completo de contatos.
-- Campos ricos no contato: descrição, demanda atual, problema que resolve, tags, links sociais, email e campos personalizados.
-- Deduplicação por telefone/email com revisão manual.
-- Dashboard com métricas, atalhos e visual de rede.
-- CRM com contatos ativos, com tags, sem tags e todos.
-- Follow-up com data/hora, concluir, alterar e cancelar.
-- Bloqueio de follow-up apenas quando outro contato do mesmo usuário já usa o mesmo dia e horário.
-- Chat de copiloto para localizar contatos, sugerir comandos parecidos, ajustar categorias e acionar CRM.
-- Campo de contato alvo digitável e selecionável no próprio chat.
-- Mapa/grafo 3D em Canvas 2D nativo, sem dependências 3D externas.
-- Distâncias aproximadas por DDD/localização quando possível.
-- Google obrigatório para salvar perfil, usar mapa e usar rede pública.
-- Perfil público opcional em tela separada.
-- Rede pública com cards de pessoas visíveis e serviços oferecidos.
-- Configurações com perfil, perfil público, importação Google, duplicados, exportação e sessão.
+- `Google login` implementado;
+- `Email magic link` implementado quando Supabase Auth estiver configurado;
+- `Email e senha` continuam disponiveis apenas no modo local/legado, quando Supabase nao estiver exigido;
+- `Apple login` aparece como placeholder `em breve`.
+
+Regra importante:
+
+- quando `SUPABASE_JWT_SECRET` estiver configurado no backend, a API entra em modo `Supabase-first` e bloqueia login local por senha;
+- no fluxo legado/local, algumas operacoes do perfil ainda exigem conta Google conectada.
+
+## Importacao e dados
+
+Contatos e perfis hoje suportam:
+
+- nome, avatar, descricao, demanda atual, problema que resolve e notas;
+- tags livres;
+- telefone principal e email principal;
+- estruturas auxiliares para multiplos telefones, multiplos emails e valores de campos customizados;
+- DDD derivado e usado em visualizacao/filtros;
+- links sociais opcionais;
+- origem do contato;
+- status e prioridade de CRM;
+- relacao com grupos e perfil publico quando aplicavel.
+
+O fluxo de foto de perfil aceita:
+
+- arquivo local;
+- camera do dispositivo;
+- seletor nativo do celular;
+- Google Drive;
+- Google Fotos.
+
+## Areas principais
+
+Rotas principais do frontend:
+
+- `/onboarding`
+- `/dashboard`
+- `/agenda`
+- `/grafo`
+- `/mapa`
+- `/crm`
+- `/chat`
+- `/grupos`
+- `/rede`
+- `/feed`
+- `/perfil-publico`
+- `/configuracoes`
+- `/duplicados`
+- `/api-docs`
 
 ## Stack
 
@@ -50,13 +86,14 @@ O MVP atual prioriza:
 - Vite
 - Tailwind CSS
 - Lucide React
-- Canvas 2D API nativa para o grafo
+- Supabase JS
+- Canvas 2D nativo para os grafos
 
 ### Backend
 
-- Python
 - FastAPI
-- SQLite local ou Supabase Postgres
+- SQLite local para desenvolvimento rapido
+- Postgres/Supabase para deploy
 - Uvicorn
 
 ## Estrutura
@@ -64,27 +101,15 @@ O MVP atual prioriza:
 ```text
 network-agenda/
 ├── backend/
-│   ├── app/
-│   │   ├── categories.py
-│   │   ├── database.py
-│   │   ├── main.py
-│   │   └── schemas.py
-│   ├── data/
-│   ├── requirements.txt
-│   └── README.md
+├── docs/
 ├── frontend/
-│   ├── public/
-│   ├── src/
-│   │   ├── App.jsx
-│   │   ├── index.css
-│   │   └── main.jsx
-│   ├── package.json
-│   └── vite.config.js
+├── supabase/
 ├── PRD.md
-└── README.md
+├── README.md
+└── render.yaml
 ```
 
-## Como Rodar
+## Como rodar localmente
 
 ### Backend
 
@@ -96,10 +121,16 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8006
 ```
 
-A API fica em:
+API local:
 
 ```text
 http://127.0.0.1:8006
+```
+
+Swagger:
+
+```text
+http://127.0.0.1:8006/docs
 ```
 
 ### Frontend
@@ -110,32 +141,32 @@ npm install
 npm run dev -- --host 127.0.0.1 --port 5174
 ```
 
-O app fica em:
+App local:
 
 ```text
 http://127.0.0.1:5174
 ```
 
-## Variáveis de Ambiente
+## Variaveis de ambiente
 
-Crie os arquivos locais a partir dos exemplos:
+Copie os exemplos:
 
 ```powershell
 Copy-Item frontend/.env.example frontend/.env.local
 Copy-Item backend/.env.example backend/.env.local
 ```
 
-Frontend:
+### Frontend
 
 ```env
 VITE_API_URL=http://127.0.0.1:8006
 VITE_SUPABASE_URL=https://seu-projeto.supabase.co
-VITE_SUPABASE_ANON_KEY=cole_aqui_a_anon_key_publica
+VITE_SUPABASE_ANON_KEY=cole_aqui_a_anon_key
 VITE_GOOGLE_CLIENT_ID=seu_client_id_google
 VITE_GOOGLE_MAPS_API_KEY=sua_chave_google_maps
 ```
 
-Backend:
+### Backend
 
 ```env
 DATABASE_URL=
@@ -145,89 +176,46 @@ OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
 
-## Google
+## Banco de dados
 
-Para testar login e importação de contatos pelo Google:
+- sem `DATABASE_URL`, a API sobe com SQLite local em `backend/data/network_agenda.sqlite3`;
+- com `DATABASE_URL=postgresql://...`, a API usa Postgres/Supabase;
+- o bootstrap de producao pode usar `supabase/schema.sql`;
+- o backend tambem contem o schema SQL em `backend/app/postgres_schema.sql`.
 
-1. Crie um projeto no Google Cloud.
-2. Ative a Google People API.
-3. Configure a tela de consentimento OAuth.
-4. Adicione seu email como usuário de teste enquanto o app estiver em modo teste.
-5. Crie credenciais OAuth do tipo **Web application**.
-6. Em **Authorized JavaScript origins**, adicione `http://127.0.0.1:5174`.
-7. Copie o **Client ID** para `VITE_GOOGLE_CLIENT_ID` em `frontend/.env.local`.
-8. Reinicie o frontend.
-
-O fluxo usa Google Identity Services no navegador e Google People API para contatos.
-
-## IA / Chat
-
-O chat funciona mesmo sem chave externa, usando regras locais para:
-
-- buscar contatos;
-- sugerir comandos parecidos quando a frase não é reconhecida;
-- selecionar ou digitar o contato alvo no mesmo campo;
-- sugerir categorias;
-- marcar, alterar, concluir ou cancelar follow-ups;
-- bloquear conflito de follow-up no mesmo dia e horário;
-- atualizar dados de CRM com confirmação.
-
-Com `OPENAI_API_KEY`, o backend pode usar modelo externo para melhorar a conversa.
-
-## Banco de Dados
-
-Sem `DATABASE_URL`, o SQLite é criado automaticamente em:
-
-```text
-backend/data/network_agenda.sqlite3
-```
-
-Esse arquivo não deve ir para o GitHub.
-
-Com `DATABASE_URL=postgresql://...`, o backend usa Postgres/Supabase e cria as tabelas pelo schema em `backend/app/postgres_schema.sql`.
-
-Tabelas principais:
-
-- `users`: usuários, dados de perfil, autenticação, endereço, conexão Google e perfil público.
-- `contacts`: contatos privados por `owner_id`.
-- `public_profiles`: serviços/rede pública usados como sugestões iniciais.
-- `merge_suggestions`: sugestões de duplicidade aprovadas/ignoradas.
-
-## Endpoints Principais
+## Endpoints principais
 
 ```text
 GET    /api/health
-GET    /api/categories
-GET    /api/contacts?user_id=1
+GET    /api/contacts
 POST   /api/contacts
 PUT    /api/contacts/{contact_id}
-DELETE /api/contacts/{contact_id}?user_id=1
+DELETE /api/contacts/{contact_id}
+
+GET    /api/merge-suggestions
+POST   /api/merge-suggestions/ignore
+POST   /api/merge-suggestions/merge
+
+GET    /api/custom-fields
+POST   /api/custom-fields
+PUT    /api/custom-fields/{field_id}
+DELETE /api/custom-fields/{field_id}
+
+GET    /api/groups
+POST   /api/groups
+POST   /api/groups/{group_id}/members
+GET    /api/groups/{group_id}/contacts
+POST   /api/groups/{group_id}/messages
 
 POST   /api/users
 POST   /api/login
 POST   /api/google-login
-GET    /api/users
-GET    /api/users/lookup?phone=...
-
-GET    /api/address/lookup?query=...
 GET    /api/public-profiles
-GET    /api/merge-suggestions?user_id=1
-POST   /api/merge-suggestions/ignore
-POST   /api/merge-suggestions/merge
+GET    /api/search
 POST   /api/ai/chat
-GET    /api/search?query=...&user_id=1
 ```
 
-## Usuários de Teste
-
-Quando o banco está vazio:
-
-```text
-ana@network.local / 123456
-admin@network.local / admin123
-```
-
-## Build e Validação
+## Validacao
 
 Frontend:
 
@@ -246,14 +234,43 @@ python -m unittest discover -s tests
 
 ## Deploy
 
-O frontend esta preparado para deploy no Vercel usando `frontend` como Root Directory. O backend FastAPI agora suporta SQLite local e Supabase Postgres via `DATABASE_URL`; para deploy publico, use Supabase Postgres.
+Stack de publicacao prevista pelo repositorio:
 
-Guia detalhado: `docs/DEPLOYMENT.md`.
+- `frontend` no Vercel;
+- `backend` no Render via `render.yaml`;
+- `database` no Supabase Postgres.
 
-Guia Supabase: `docs/SUPABASE.md`.
+Arquivos de apoio:
 
-Roteiro de publicacao: `docs/GO_LIVE.md`.
+- `docs/DEPLOYMENT.md`
+- `docs/GO_LIVE.md`
+- `docs/SUPABASE.md`
 
-## Status
+Fluxo esperado:
 
-MVP funcional em desenvolvimento local. A versão atual é focada em navegador; empacotamento app/PWA completo fica para uma etapa posterior. Integrações com Google, Google Maps e IA externa dependem de chaves reais. A próxima prioridade é consolidar testes automatizados, persistência de produção e autenticação/token robustos.
+1. conectar o repositorio do GitHub ao Vercel e ao Render;
+2. configurar as variaveis de ambiente dos dois servicos;
+3. fazer `push` para `main`;
+4. deixar o auto deploy publicar frontend e backend.
+
+## Status resumido
+
+Ja implementado:
+
+- base privada multiusuario;
+- grupos compartilhados com escopo proprio;
+- rede publica opcional;
+- onboarding;
+- PWA base;
+- chat preparado para IA;
+- campos customizados;
+- deduplicacao manual;
+- documentacao de API.
+
+Ainda pendente ou parcial:
+
+- Apple login real;
+- importacao nativa de Apple Contacts, Outlook e LinkedIn;
+- push notifications reais;
+- rollout completo de Supabase Auth + RLS em producao;
+- automacoes mais avancadas de match e inteligencia de networking.

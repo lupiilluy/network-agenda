@@ -31,6 +31,7 @@ class ContactCreate(BaseModel):
     instagram: str | None = Field(default="", max_length=160)
     linkedin: str | None = Field(default="", max_length=200)
     custom_url: str | None = Field(default="", max_length=240)
+    avatar_url: str | None = Field(default="", max_length=200000)
     custom_fields: str | None = Field(default="[]", max_length=2000)
     phones: list[dict | str] = []
     emails: list[dict | str] = []
@@ -63,6 +64,7 @@ class ContactOut(BaseModel):
     instagram: str
     linkedin: str
     custom_url: str
+    avatar_url: str
     custom_fields: str
     phones: list[dict] = []
     emails: list[dict] = []
@@ -97,6 +99,7 @@ class PublicProfileOut(BaseModel):
     instagram: str = ""
     linkedin: str = ""
     custom_url: str = ""
+    avatar_url: str = ""
     source_user_id: int | None = None
     category: CategoryOut
 
@@ -277,6 +280,7 @@ class UserCreate(BaseModel):
     public_instagram: str | None = Field(default="", max_length=160)
     public_linkedin: str | None = Field(default="", max_length=200)
     public_url: str | None = Field(default="", max_length=240)
+    avatar_url: str | None = Field(default="", max_length=200000)
     google_connected: bool = False
     google_contacts_imported_at: str | None = Field(default="", max_length=40)
     google_profile_synced_at: str | None = Field(default="", max_length=40)
@@ -321,6 +325,7 @@ class UserOut(BaseModel):
     public_instagram: str = ""
     public_linkedin: str = ""
     public_url: str = ""
+    avatar_url: str = ""
     google_connected: bool = False
     google_contacts_imported_at: str = ""
     google_profile_synced_at: str = ""

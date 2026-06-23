@@ -7,6 +7,7 @@ import {
   Bell,
   Briefcase,
   Building2,
+  Camera,
   Car,
   Check,
   CheckCircle,
@@ -19,6 +20,7 @@ import {
   HeartPulse,
   Home,
   LayoutGrid,
+  Image,
   Lock,
   LogIn,
   LogOut,
@@ -55,12 +57,17 @@ const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? ''
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? ''
 const GOOGLE_LOGIN_SCOPE = 'openid email profile'
 const GOOGLE_CONTACTS_SCOPE = 'https://www.googleapis.com/auth/contacts.readonly'
+const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
+const GOOGLE_PHOTOS_SCOPE = 'https://www.googleapis.com/auth/photoslibrary.readonly'
 const GOOGLE_ACCOUNT_PROFILE_SCOPE = `${GOOGLE_LOGIN_SCOPE} https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/user.birthday.read`
 const AUTH_STORAGE_KEY = 'network-agenda-user'
 const AUTH_TTL_MS = 24 * 60 * 60 * 1000
+const THEME_STORAGE_KEY = 'network-agenda-theme-v1'
+const ONBOARDING_STORAGE_KEY = 'network-agenda-onboarding-v1'
 const OFFLINE_DATA_STORAGE_KEY = 'network-agenda-offline-data-v1'
 const OFFLINE_MUTATION_STORAGE_KEY = 'network-agenda-offline-mutations-v1'
 const SUPABASE_AUTH_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
+const DEFAULT_THEME = 'dark'
 let supabaseClient = null
 
 function getSupabaseClient() {
@@ -81,6 +88,7 @@ async function getSupabaseAccessToken() {
 const ROUTES = {
   DASHBOARD: '/dashboard',
   AGENDA: '/agenda',
+  GRAPH: '/grafo',
   MAP: '/mapa',
   PUBLIC: '/rede',
   FEED: '/feed',
@@ -93,6 +101,7 @@ const ROUTES = {
   NEW: '/novo',
   GROUPS: '/grupos',
   API_DOCS: '/api-docs',
+  ONBOARDING: '/onboarding',
   LOGIN: '/login',
   REGISTER: '/cadastro',
   CONNECTIONS: '/admin/conexoes',
@@ -137,6 +146,13 @@ const GROUPS_SEED = [
 ]
 
 const TRUST_COL = { Favorito: '#f59e0b', Recomendado: '#06b6d4', Confiavel: '#10b981', Novo: '#64748b' }
+const GRAPH_PALETTE = {
+  contact: '#F20574',
+  tag: '#A127F2',
+  ddd: '#F29F05',
+  structure: '#030140',
+  accent: '#F26835',
+}
 
 function catCol(id) {
   return CATS.find((category) => category.id === id)?.col ?? '#64748b'
@@ -412,6 +428,7 @@ const defaultUser = {
   publicInstagram: '',
   publicLinkedin: '',
   publicUrl: '',
+  avatarUrl: '',
   googleConnected: false,
   googleContactsImportedAt: '',
   googleProfileSyncedAt: '',
@@ -457,6 +474,7 @@ const adminUser = {
   publicInstagram: '',
   publicLinkedin: '',
   publicUrl: '',
+  avatarUrl: '',
   googleConnected: false,
   googleContactsImportedAt: '',
   googleProfileSyncedAt: '',
@@ -659,6 +677,48 @@ function initials(name) {
     .map((word) => word[0])
     .join('')
     .toUpperCase()
+}
+
+function Avatar({ name, src, className = '', fallbackClassName = '', imageClassName = '', alt, style, children }) {
+  const [imageFailed, setImageFailed] = useState(false)
+
+  useEffect(() => {
+    setImageFailed(false)
+  }, [src])
+
+  const showImage = Boolean(src) && !imageFailed
+
+  return (
+    <span className={className} style={style}>
+      {showImage ? (
+        <img
+          src={src}
+          alt={alt || name || 'Avatar'}
+          className={['h-full w-full rounded-[inherit] object-cover', imageClassName].join(' ')}
+          onError={() => setImageFailed(true)}
+        />
+      ) : (
+        <span className={fallbackClassName}>{children ?? initials(name || '??')}</span>
+      )}
+    </span>
+  )
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('Não foi possível ler a imagem.'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function fetchBlobAsDataUrl(url, headers = {}) {
+  const response = await fetch(url, { headers })
+  if (!response.ok) {
+    throw new Error('Não foi possível carregar a imagem selecionada.')
+  }
+  return fileToDataUrl(await response.blob())
 }
 
 function contactAddress(contact) {
@@ -1036,6 +1096,7 @@ function parsePath() {
     '/buscar': 'agenda',
     [ROUTES.DASHBOARD]: 'dashboard',
     [ROUTES.AGENDA]: 'agenda',
+    [ROUTES.GRAPH]: 'graph',
     [ROUTES.MAP]: 'map',
     [ROUTES.PUBLIC]: 'public',
     [ROUTES.FEED]: 'feed',
@@ -1050,6 +1111,7 @@ function parsePath() {
     [ROUTES.LOGIN]: 'login',
     [ROUTES.REGISTER]: 'register',
     [ROUTES.CONNECTIONS]: 'connections',
+    [ROUTES.ONBOARDING]: 'onboarding',
   }
 
   return { page: pageByPath[path] ?? 'agenda', categoryId: null }
@@ -1092,6 +1154,44 @@ function getStoredSessionExpiry() {
     return Number(JSON.parse(stored)?.expiresAt ?? 0)
   } catch {
     return 0
+  }
+}
+
+function loadThemePreference() {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY)
+    if (stored === 'light' || stored === 'dark') return stored
+  } catch {
+    // Keep the default theme when localStorage is unavailable.
+  }
+  return DEFAULT_THEME
+}
+
+function storeThemePreference(theme) {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme === 'light' ? 'light' : 'dark')
+  } catch {
+    // Ignore storage failures in private mode or when quota is unavailable.
+  }
+}
+
+function onboardingStorageKey(owner) {
+  return `${ONBOARDING_STORAGE_KEY}:${contactOwnerId(owner) || 'guest'}`
+}
+
+function loadOnboardingCompletion(owner) {
+  try {
+    return localStorage.getItem(onboardingStorageKey(owner)) === 'complete'
+  } catch {
+    return false
+  }
+}
+
+function storeOnboardingCompletion(owner, completed = true) {
+  try {
+    localStorage.setItem(onboardingStorageKey(owner), completed ? 'complete' : 'pending')
+  } catch {
+    // Ignore storage failures in restricted environments.
   }
 }
 
@@ -1153,6 +1253,7 @@ function normalizeUserDraft(user) {
     publicInstagram: user?.publicInstagram ?? '',
     publicLinkedin: user?.publicLinkedin ?? '',
     publicUrl: user?.publicUrl ?? '',
+    avatarUrl: user?.avatarUrl ?? user?.avatar_url ?? '',
     googleConnected: Boolean(user?.googleConnected),
     googleContactsImportedAt: user?.googleContactsImportedAt ?? '',
     googleProfileSyncedAt: user?.googleProfileSyncedAt ?? '',
@@ -1285,6 +1386,7 @@ function userToApiPayload(user) {
     public_instagram: normalized.publicInstagram,
     public_linkedin: normalized.publicLinkedin,
     public_url: normalized.publicUrl,
+    avatar_url: normalized.avatarUrl,
     google_connected: normalized.googleConnected,
     google_contacts_imported_at: normalized.googleContactsImportedAt,
     google_profile_synced_at: normalized.googleProfileSyncedAt,
@@ -1333,6 +1435,7 @@ function apiUserToLocal(user) {
     publicInstagram: user.public_instagram,
     publicLinkedin: user.public_linkedin,
     publicUrl: user.public_url,
+    avatarUrl: user.avatar_url,
     googleConnected: user.google_connected,
     googleContactsImportedAt: user.google_contacts_imported_at,
     googleProfileSyncedAt: user.google_profile_synced_at,
@@ -1490,6 +1593,7 @@ function googlePersonToContact(person, index) {
   const occupation = person.occupations?.[0]?.value || ''
   const organization = [person.organizations?.[0]?.title, person.organizations?.[0]?.name].filter(Boolean).join(' - ')
   const address = person.addresses?.[0]?.formattedValue || ''
+  const avatar_url = person.photos?.[0]?.url || ''
   const base = {
     name,
     occupation,
@@ -1507,6 +1611,7 @@ function googlePersonToContact(person, index) {
     email,
     city: '',
     address,
+    avatar_url,
     source: 'Google People API',
   }
 }
@@ -1523,7 +1628,7 @@ function googleAccountToUserDraft(profile, peopleProfile = {}) {
   const email = peopleProfile.emailAddresses?.[0]?.value || profile?.email || ''
   const phone = peopleProfile.phoneNumbers?.[0]?.canonicalForm || peopleProfile.phoneNumbers?.[0]?.value || ''
   const birthDate = googleBirthdayToDate(peopleProfile.birthdays)
-  return { name, email, phone, birthDate }
+  return { name, email, phone, birthDate, avatarUrl: profile?.picture || peopleProfile.photos?.[0]?.url || '' }
 }
 
 function loadRecentSearches() {
@@ -1601,7 +1706,7 @@ async function fetchGoogleProfile(accessToken) {
 
 async function fetchGoogleContacts(accessToken) {
   const params = new URLSearchParams({
-    personFields: 'names,phoneNumbers,addresses,emailAddresses,occupations,organizations',
+    personFields: 'names,phoneNumbers,addresses,emailAddresses,occupations,organizations,photos',
     pageSize: '200',
   })
   const response = await fetch(`https://people.googleapis.com/v1/people/me/connections?${params.toString()}`, {
@@ -1646,6 +1751,50 @@ async function getGoogleAccountDraft() {
   return googleAccountToUserDraft(profile, peopleProfile)
 }
 
+async function fetchGoogleDriveImageItems() {
+  const accessToken = await requestGoogleToken(`${GOOGLE_LOGIN_SCOPE} ${GOOGLE_DRIVE_SCOPE}`, 'consent')
+  const params = new URLSearchParams({
+    q: "mimeType contains 'image/' and trashed = false",
+    pageSize: '24',
+    fields: 'files(id,name,mimeType,thumbnailLink,webViewLink)',
+    orderBy: 'modifiedTime desc',
+    spaces: 'drive',
+  })
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!response.ok) throw new Error('Não foi possível ler imagens do Google Drive.')
+  const data = await response.json()
+  return {
+    accessToken,
+    items: (data.files ?? []).map((file) => ({
+      id: file.id,
+      name: file.name || 'Imagem do Drive',
+      thumbnailUrl: file.thumbnailLink || '',
+      type: 'drive',
+    })),
+  }
+}
+
+async function fetchGooglePhotosImageItems() {
+  const accessToken = await requestGoogleToken(`${GOOGLE_LOGIN_SCOPE} ${GOOGLE_PHOTOS_SCOPE}`, 'consent')
+  const response = await fetch('https://photoslibrary.googleapis.com/v1/mediaItems?pageSize=24', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!response.ok) throw new Error('Não foi possível ler imagens do Google Fotos.')
+  const data = await response.json()
+  return {
+    accessToken,
+    items: (data.mediaItems ?? []).map((item) => ({
+      id: item.id,
+      name: item.filename || 'Imagem do Google Fotos',
+      thumbnailUrl: item.baseUrl ? `${item.baseUrl}=w256-h256-c` : '',
+      sourceUrl: item.baseUrl || '',
+      type: 'photos',
+    })),
+  }
+}
+
 function loadGoogleMaps() {
   if (window.google?.maps) return Promise.resolve(window.google.maps)
   if (!GOOGLE_MAPS_API_KEY) return Promise.reject(new Error('Google Maps API key missing'))
@@ -1665,19 +1814,39 @@ function loadGoogleMaps() {
   return googleMapsPromise
 }
 
-function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onNavigate, onLogout, children }) {
+function Shell({
+  user,
+  route,
+  online,
+  unread,
+  pendingChanges,
+  onSyncPending,
+  onNavigate,
+  onLogout,
+  theme,
+  onToggleTheme,
+  onInstallApp,
+  installReady,
+  installed,
+  notificationPermission,
+  onEnableNotifications,
+  children,
+}) {
   const [menuOpen, setMenuOpen] = useState(false)
   const isAdmin = user?.role === 'admin'
-  const isAuthPage = !user && (route.page === 'login' || route.page === 'register')
+  const isAuthPage = route.page === 'onboarding' || (!user && (route.page === 'login' || route.page === 'register'))
+  const themeLabel = theme === 'dark' ? 'Tema claro' : 'Tema escuro'
   const primaryTabs = [
     { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: LayoutGrid, page: 'dashboard' },
     { label: 'Agenda', path: ROUTES.AGENDA, icon: ContactRound, page: 'agenda' },
+    { label: 'Grafo privado', path: ROUTES.GRAPH, icon: Route, page: 'graph' },
     { label: 'Feed', path: ROUTES.FEED, icon: Bell, page: 'feed' },
     { label: 'Grupos', path: ROUTES.GROUPS, icon: UsersRound, page: 'groups' },
   ]
   const menuTabs = [
     { label: 'Novo contato', path: ROUTES.NEW, icon: Plus, page: 'new' },
     { label: 'CRM', path: ROUTES.CRM, icon: Activity, page: 'crm' },
+    { label: 'Grafo privado', path: ROUTES.GRAPH, icon: Route, page: 'graph' },
     { label: 'Mapa', path: ROUTES.MAP, icon: Map, page: 'map' },
     { label: 'Chat', path: ROUTES.CHAT, icon: MessageCircle, page: 'chat' },
     { label: 'Rede pública', path: ROUTES.PUBLIC, icon: Compass, page: 'public' },
@@ -1727,6 +1896,7 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
   const mobileTabs = [
     { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: LayoutGrid, page: 'dashboard' },
     { label: 'Agenda', path: ROUTES.AGENDA, icon: ContactRound, page: 'agenda' },
+    { label: 'Grafo', path: ROUTES.GRAPH, icon: Route, page: 'graph' },
     { label: 'Feed', path: ROUTES.FEED, icon: Bell, page: 'feed' },
     { label: 'Grupos', path: ROUTES.GROUPS, icon: UsersRound, page: 'groups' },
   ]
@@ -1736,6 +1906,7 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
       items: [
         { label: 'Novo contato', path: ROUTES.NEW, icon: Plus, page: 'new', hint: 'Importar ou cadastrar' },
         { label: 'CRM', path: ROUTES.CRM, icon: Activity, page: 'crm', hint: 'Pipeline e follow-up' },
+        { label: 'Grafo privado', path: ROUTES.GRAPH, icon: Route, page: 'graph', hint: 'Rede pessoal' },
         { label: 'Mapa', path: ROUTES.MAP, icon: Map, page: 'map', hint: 'Grafo privado' },
         { label: 'Chat', path: ROUTES.CHAT, icon: MessageCircle, page: 'chat', hint: 'Copiloto' },
       ],
@@ -1779,8 +1950,8 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
             <Zap size={20} />
           </span>
           <span className="min-w-0">
-            <span className="block truncate text-sm font-black text-slate-100">NETWORK<span className="text-cyan-300">.AGENDA</span></span>
-            <span className="block truncate text-[11px] font-bold uppercase tracking-widest text-slate-500">Command center</span>
+            <span className="block truncate text-sm font-black text-slate-100">NETWORK<span className="text-cyan-300">.INTELLIGENCE</span></span>
+            <span className="block truncate text-[11px] font-bold uppercase tracking-widest text-slate-500">CRM command center</span>
           </span>
         </button>
 
@@ -1791,6 +1962,30 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
           </div>
           <p className="mt-2 text-sm font-black text-slate-100">{online ? 'Operando online' : 'Modo local'}</p>
           <p className="mt-1 text-xs font-semibold text-slate-500">{unread > 0 ? `${unread} novo${unread === 1 ? '' : 's'} contato${unread === 1 ? '' : 's'}` : 'Rede pronta para busca'}</p>
+          {onInstallApp && installReady && !installed ? (
+            <div className="mt-3 rounded-lg border border-slate-800/70 bg-slate-950/35 p-2.5">
+              <p className="text-[10px] font-black uppercase tracking-widest text-cyan-300">PWA</p>
+              <p className="mt-1 text-xs font-semibold text-slate-400">Instale no Android ou desktop para acesso mais rápido e offline.</p>
+              <button type="button" onClick={onInstallApp} className="secondary-button mt-2 inline-flex h-8 w-full items-center justify-center rounded-lg px-2 text-xs font-black">
+                Instalar app
+              </button>
+            </div>
+          ) : null}
+          {onEnableNotifications ? (
+            <div className="mt-3 rounded-lg border border-slate-800/70 bg-slate-950/35 p-2.5">
+              <p className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Notificações</p>
+              <p className="mt-1 text-xs font-semibold text-slate-400">
+                {notificationPermission === 'granted'
+                  ? 'Permissão ativa. Push real pode ser integrado depois.'
+                  : notificationPermission === 'denied'
+                    ? 'Permissão bloqueada. A função ficará como preparação.'
+                    : 'Prepare a base para notificações futuras.'}
+              </p>
+              <button type="button" onClick={onEnableNotifications} className="secondary-button mt-2 inline-flex h-8 w-full items-center justify-center rounded-lg px-2 text-xs font-black">
+                {notificationPermission === 'granted' ? 'Revisar permissão' : 'Ativar notificações'}
+              </button>
+            </div>
+          ) : null}
           {pendingChanges > 0 ? (
             <button type="button" onClick={onSyncPending} className="mt-3 inline-flex h-8 w-full items-center justify-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-2 text-xs font-black text-amber-200">
               <Cloud size={14} />
@@ -1821,12 +2016,22 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
 
         <div className="mt-auto rounded-lg border border-slate-800/80 bg-slate-950/35 p-3">
           <button type="button" onClick={() => onNavigate(ROUTES.SETTINGS)} className="flex w-full min-w-0 items-center gap-3 text-left">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-cyan-400/10 text-sm font-black text-cyan-100">{initials(user?.name ?? 'EU')}</span>
+            <Avatar
+              name={user?.name ?? 'EU'}
+              src={user?.avatarUrl}
+              className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-cyan-400/10 ring-1 ring-white/10"
+              fallbackClassName="flex h-full w-full items-center justify-center rounded-[inherit] bg-cyan-400/10 text-sm font-black text-cyan-100"
+            />
             <span className="min-w-0">
               <span className="block truncate text-sm font-black text-slate-100">{user?.name ?? 'Entrar'}</span>
               <span className="block truncate text-xs font-semibold text-slate-500">{user?.email ?? 'Conta local'}</span>
             </span>
           </button>
+          {onToggleTheme ? (
+            <button type="button" onClick={onToggleTheme} className="secondary-button mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg text-xs font-black">
+              {themeLabel}
+            </button>
+          ) : null}
           {user ? (
             <button type="button" onClick={onLogout} className="secondary-button mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg text-xs font-black">
               <LogOut size={15} />
@@ -1844,9 +2049,21 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
               <Zap size={19} />
             </span>
             <span className="truncate text-sm font-black tracking-normal text-slate-100">
-              NETWORK<span className="text-cyan-300">.AGENDA</span>
+              NETWORK<span className="text-cyan-300">.INTELLIGENCE</span>
             </span>
           </button>
+
+          <div className="flex items-center gap-2">
+            {onToggleTheme ? (
+              <button type="button" onClick={onToggleTheme} className="secondary-button inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-black sm:h-10 sm:px-3.5">
+                {themeLabel}
+              </button>
+            ) : null}
+            <button type="button" onClick={() => setMenuOpen((current) => !current)} className="inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-black sm:h-10 sm:px-3.5 md:hidden">
+              <Menu size={16} />
+              Menu
+            </button>
+          </div>
 
           <nav className="hidden items-center gap-1 md:flex">
             {primaryTabs.map((tab) => (
@@ -1914,7 +2131,12 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
               className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-2.5 text-sm font-bold"
               aria-label={user ? 'Conta' : 'Entrar'}
             >
-              <span className="flex h-7 w-7 items-center justify-center rounded-md bg-cyan-500/10 text-xs font-black text-cyan-200">{initials(user?.name ?? 'EU')}</span>
+              <Avatar
+                name={user?.name ?? 'EU'}
+                src={user?.avatarUrl}
+                className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-md bg-cyan-500/10 ring-1 ring-white/10"
+                fallbackClassName="flex h-full w-full items-center justify-center rounded-[inherit] bg-cyan-500/10 text-xs font-black text-cyan-200"
+              />
               <span className="hidden sm:inline">{user?.name ?? 'Entrar'}</span>
             </button>
             {user ? (
@@ -2059,7 +2281,7 @@ function Shell({ user, route, online, unread, pendingChanges, onSyncPending, onN
               </div>
             </>
           ) : null}
-          <nav className="glass-panel fixed inset-x-3 bottom-3 z-40 grid grid-cols-5 rounded-lg p-1.5 md:hidden">
+          <nav className="glass-panel fixed inset-x-3 bottom-3 z-40 grid grid-cols-6 rounded-lg p-1.5 md:hidden">
             {mobileTabs.map((tab) => (
               <button
                 key={tab.path}
@@ -2278,9 +2500,13 @@ function CategoryButton({ category, count, active, onNavigate, onSelect }) {
 function ContactAvatar({ contact }) {
   const category = contact.category ?? classifyService(contact.service)
   return (
-    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-black text-white shadow-lg shadow-black/25 ring-1 ring-white/10 sm:h-11 sm:w-11" style={{ backgroundColor: category.color }}>
-      {initials(contact.name)}
-    </span>
+    <Avatar
+      name={contact.name}
+      src={contact.avatar_url}
+      className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full shadow-lg shadow-black/25 ring-1 ring-white/10 sm:h-11 sm:w-11"
+      style={{ backgroundColor: category.color }}
+      fallbackClassName="flex h-full w-full items-center justify-center rounded-[inherit] text-sm font-black text-white"
+    />
   )
 }
 
@@ -3321,6 +3547,7 @@ function FeedPage({ publicProfiles, user, onNavigate }) {
   const posts = (visiblePeople.length ? visiblePeople : publicProfiles).slice(0, 8).map((profile, index) => ({
     id: `${profile.kind || 'profile'}-${profile.id}`,
     author: profile.name,
+    avatar_url: profile.avatar_url || '',
     role: profile.service || profile.category?.label || 'Perfil da rede',
     text: profile.solves
       ? `Disponível para ajudar com: ${profile.solves}`
@@ -3345,7 +3572,12 @@ function FeedPage({ publicProfiles, user, onNavigate }) {
           {posts.length ? posts.map((post) => (
             <article key={post.id} className="glass-panel rounded-xl p-4">
               <div className="flex items-start gap-3">
-                <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-cyan-500 text-sm font-black text-slate-950">{initials(post.author)}</span>
+                <Avatar
+                  name={post.author}
+                  src={post.avatar_url}
+                  className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-cyan-500 ring-1 ring-white/10"
+                  fallbackClassName="flex h-full w-full items-center justify-center rounded-[inherit] bg-cyan-500 text-sm font-black text-slate-950"
+                />
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
@@ -3414,9 +3646,13 @@ function PublicPersonCard({ profile, contacts, currentUserId }) {
   return (
     <article className="glass-panel rounded-lg p-4 transition hover:border-cyan-400/35">
       <div className="flex items-start gap-3">
-        <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-sm font-black text-white" style={{ backgroundColor: category.color }}>
-          {initials(profile.name)}
-        </span>
+        <Avatar
+          name={profile.name}
+          src={profile.avatar_url}
+          className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-lg ring-1 ring-white/10"
+          style={{ backgroundColor: category.color }}
+          fallbackClassName="flex h-full w-full items-center justify-center rounded-[inherit] text-sm font-black text-white"
+        />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h3 className="truncate text-base font-black text-slate-100">{profile.name}</h3>
@@ -3566,6 +3802,7 @@ function buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser
       description: contact.description || contact.note || '',
       category: contact.category ?? classifyService(contact.service),
       scopes,
+      semanticTypes: graphContactSemanticTypes(contact),
       groupIds: groupsForContact.map((item) => item.id),
       groupNames: groupsForContact.map((item) => item.name),
       linkedPlatform: Boolean(publicMatch || userMatch),
@@ -3615,6 +3852,19 @@ function buildGroupGraphRecords({ group, members, users, currentUser }) {
       description: memberUser?.publicDescription || memberUser?.description || '',
       category: memberUser?.category ?? classifyService(offeredServices),
       scopes: ['grupo'],
+      semanticTypes: graphContactSemanticTypes({
+        ...memberUser,
+        tags,
+        source: 'Membro do grupo',
+        ddd: memberUser?.ddd || extractDdd(memberUser?.phone || member.email),
+        demand: memberUser?.publicDemand || '',
+        solves: memberUser?.publicSolves || memberUser?.offeredServices || '',
+        linkedPlatform: Boolean(memberUser),
+        organization: memberUser?.organization || memberUser?.company || '',
+        company: memberUser?.company || '',
+        org: memberUser?.org || '',
+        scopes: ['grupo'],
+      }),
       groupIds: [String(group.id)],
       groupNames: [group.name],
       linkedPlatform: Boolean(memberUser),
@@ -3663,6 +3913,12 @@ function buildPublicGraphRecords({ publicProfiles, contacts }) {
       description: profile.description || '',
       category: profile.category ?? classifyService(profile.service),
       scopes: ['publico', ...(internalMatch ? ['interno'] : [])],
+      semanticTypes: graphContactSemanticTypes({
+        ...profile,
+        source: kind === 'person' ? 'Perfil público' : 'Serviço público',
+        linkedPlatform: true,
+        scopes: ['publico', ...(internalMatch ? ['interno'] : [])],
+      }),
       groupIds: [],
       groupNames: [],
       linkedPlatform: true,
@@ -3690,10 +3946,10 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
   const [sourceFilter, setSourceFilter] = useState('all')
   const [dddFilter, setDddFilter] = useState('all')
   const [groupFilter, setGroupFilter] = useState('all')
-  const [contactFilter, setContactFilter] = useState('all')
   const [onlyDemand, setOnlyDemand] = useState(false)
   const [onlySolves, setOnlySolves] = useState(false)
   const [onlyLinked, setOnlyLinked] = useState(false)
+  const [filtersOpen, setFiltersOpen] = useState(false)
   const [selectedId, setSelectedId] = useState('')
 
   const tagOptions = useMemo(() => uniqueTextOptions(items.flatMap((item) => item.tags ?? [])), [items])
@@ -3723,13 +3979,12 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
       if (sourceFilter !== 'all' && normalize(item.source) !== normalize(sourceFilter)) return false
       if (dddFilter !== 'all' && String(item.ddd || '') !== String(dddFilter)) return false
       if (groupFilter !== 'all' && !(item.groupIds ?? []).includes(groupFilter)) return false
-      if (contactFilter !== 'all' && item.id !== contactFilter) return false
       if (onlyDemand && !item.demand?.trim()) return false
       if (onlySolves && !item.solves?.trim()) return false
       if (onlyLinked && !item.linkedPlatform) return false
       return true
     })
-  }, [items, query, scopeFilter, tagFilter, sourceFilter, dddFilter, groupFilter, contactFilter, onlyDemand, onlySolves, onlyLinked])
+  }, [items, query, scopeFilter, tagFilter, sourceFilter, dddFilter, groupFilter, onlyDemand, onlySolves, onlyLinked])
 
   useEffect(() => {
     if (!visibleItems.length) {
@@ -3766,8 +4021,34 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
   const summary = {
     nodes: visibleItems.length,
     tags: new Set(visibleItems.flatMap((item) => item.tags ?? []).filter(Boolean)).size,
+    sources: new Set(visibleItems.map((item) => item.source).filter(Boolean)).size,
     ddds: new Set(visibleItems.map((item) => item.ddd).filter(Boolean)).size,
+    demand: visibleItems.filter((item) => item.demand?.trim()).length,
+    solves: visibleItems.filter((item) => item.solves?.trim()).length,
     linked: visibleItems.filter((item) => item.linkedPlatform).length,
+    orgs: visibleItems.filter((item) => [item.organization, item.company, item.org].some(Boolean)).length,
+  }
+  const activeFilterCount = [
+    scopeFilter !== 'all',
+    tagFilter !== 'all',
+    sourceFilter !== 'all',
+    dddFilter !== 'all',
+    groupFilter !== 'all',
+    onlyDemand,
+    onlySolves,
+    onlyLinked,
+  ].filter(Boolean).length
+
+  function clearGraphFilters() {
+    setQuery('')
+    setScopeFilter('all')
+    setTagFilter('all')
+    setSourceFilter('all')
+    setDddFilter('all')
+    setGroupFilter('all')
+    setOnlyDemand(false)
+    setOnlySolves(false)
+    setOnlyLinked(false)
   }
 
   return (
@@ -3777,6 +4058,15 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
           <p className="text-xs font-black uppercase tracking-widest text-cyan-400">{contextLabel}</p>
           <h2 className="mt-1 text-xl font-black text-slate-100">{title}</h2>
           <p className="mt-1 text-sm font-semibold text-slate-500">{description}</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <span className="rounded-full border border-cyan-400/15 bg-cyan-400/10 px-3 py-1 text-[11px] font-black text-cyan-100">{summary.tags} tags</span>
+            <span className="rounded-full border border-blue-400/15 bg-blue-400/10 px-3 py-1 text-[11px] font-black text-blue-100">{summary.sources} fontes</span>
+            <span className="rounded-full border border-amber-400/15 bg-amber-400/10 px-3 py-1 text-[11px] font-black text-amber-100">{summary.ddds} DDDs</span>
+            <span className="rounded-full border border-rose-400/15 bg-rose-400/10 px-3 py-1 text-[11px] font-black text-rose-100">{summary.demand} demandas</span>
+            <span className="rounded-full border border-emerald-400/15 bg-emerald-400/10 px-3 py-1 text-[11px] font-black text-emerald-100">{summary.solves} soluções</span>
+            <span className="rounded-full border border-cyan-400/15 bg-cyan-400/10 px-3 py-1 text-[11px] font-black text-cyan-100">{summary.linked} vínculos</span>
+            <span className="rounded-full border border-slate-400/15 bg-slate-400/10 px-3 py-1 text-[11px] font-black text-slate-100">{summary.orgs} empresas</span>
+          </div>
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <Metric value={summary.nodes} label="nós" />
@@ -3789,84 +4079,108 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
       <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_320px]">
         <div className="space-y-3">
           <div className="glass-panel-soft rounded-lg p-3">
-            <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
-              <Field label="Busca textual">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+              <Field label="Busca no grafo">
                 <div className="glass-panel-soft flex min-w-0 items-center gap-2 rounded-lg px-3">
                   <Search size={17} className="shrink-0 text-slate-500" />
-                  <input value={query} onChange={(event) => setQuery(event.target.value)} className="h-10 min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-100 outline-none placeholder:text-slate-600" placeholder="nome, demanda, solução, tag, DDD..." />
+                  <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    className="h-10 min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-100 outline-none placeholder:text-slate-600"
+                    placeholder="nome, demanda, solução, tag, DDD..."
+                  />
                 </div>
               </Field>
-              <Field label="Tipo">
-                <select value={scopeFilter} onChange={(event) => setScopeFilter(event.target.value)} className="field-input h-10">
-                  <option value="all">Todos</option>
-                  <option value="interno">Interno</option>
-                  <option value="grupo">Grupo</option>
-                  <option value="publico">Público</option>
-                </select>
-              </Field>
-              <Field label="Contato específico">
-                <select value={contactFilter} onChange={(event) => setContactFilter(event.target.value)} className="field-input h-10">
-                  <option value="all">Todos</option>
-                  {visibleItems.map((item) => <option key={item.id} value={item.id}>{graphRecordLabel(item)}</option>)}
-                </select>
-              </Field>
-              <Field label="Tag">
-                <select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)} className="field-input h-10">
-                  <option value="all">Todas</option>
-                  {tagOptions.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
-                </select>
-              </Field>
-              <Field label="Fonte">
-                <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)} className="field-input h-10">
-                  <option value="all">Todas</option>
-                  {sourceOptions.map((source) => <option key={source} value={source}>{source}</option>)}
-                </select>
-              </Field>
-              <Field label="DDD">
-                <select value={dddFilter} onChange={(event) => setDddFilter(event.target.value)} className="field-input h-10">
-                  <option value="all">Todos</option>
-                  {dddOptions.map((ddd) => <option key={ddd} value={ddd}>{ddd}</option>)}
-                </select>
-              </Field>
-              {groupOptions.length ? (
-                <Field label="Grupo">
-                  <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)} className="field-input h-10">
-                    <option value="all">Todos</option>
-                    {groupOptions.map((group) => <option key={`${group.id}-${group.name}`} value={group.id}>{group.name}</option>)}
-                  </select>
-                </Field>
-              ) : null}
+              <div className="flex items-center gap-2 lg:self-end">
+                <button
+                  type="button"
+                  onClick={() => setFiltersOpen((current) => !current)}
+                  className={['inline-flex h-10 items-center gap-2 rounded-lg border px-3 text-xs font-black', filtersOpen ? 'border-cyan-400/40 bg-cyan-400/10 text-cyan-100' : 'border-slate-800 text-slate-300'].join(' ')}
+                >
+                  <SlidersHorizontal size={15} />
+                  Filtros
+                  {activeFilterCount ? <span className="rounded-full bg-cyan-400 px-2 py-0.5 text-[10px] font-black text-slate-950">{activeFilterCount}</span> : null}
+                </button>
+                {activeFilterCount ? (
+                  <button type="button" onClick={clearGraphFilters} className="inline-flex h-10 items-center rounded-lg border border-slate-800 px-3 text-xs font-black text-slate-400">
+                    Limpar
+                  </button>
+                ) : null}
+              </div>
             </div>
 
             <div className="mt-3 flex flex-wrap gap-2">
-              <button type="button" onClick={() => setOnlyDemand((current) => !current)} className={['rounded-lg px-3 py-2 text-xs font-black', onlyDemand ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
-                Com demanda
-              </button>
-              <button type="button" onClick={() => setOnlySolves((current) => !current)} className={['rounded-lg px-3 py-2 text-xs font-black', onlySolves ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
-                Resolve problema
-              </button>
-              <button type="button" onClick={() => setOnlyLinked((current) => !current)} className={['rounded-lg px-3 py-2 text-xs font-black', onlyLinked ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
-                Vinculado à plataforma
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setQuery('')
-                  setScopeFilter('all')
-                  setTagFilter('all')
-                  setSourceFilter('all')
-                  setDddFilter('all')
-                  setGroupFilter('all')
-                  setContactFilter('all')
-                  setOnlyDemand(false)
-                  setOnlySolves(false)
-                  setOnlyLinked(false)
-                }}
-                className="rounded-lg border border-slate-800 px-3 py-2 text-xs font-black text-slate-300"
-              >
-                Limpar filtros
-              </button>
+              {scopeFilter !== 'all' ? <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-black text-cyan-100">Tipo: {graphFilterLabel(scopeFilter)}</span> : null}
+              {tagFilter !== 'all' ? <span className="rounded-full border border-violet-400/20 bg-violet-400/10 px-3 py-1 text-[11px] font-black text-violet-100">Tag: {tagFilter}</span> : null}
+              {sourceFilter !== 'all' ? <span className="rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-[11px] font-black text-sky-100">Fonte: {sourceFilter}</span> : null}
+              {dddFilter !== 'all' ? <span className="rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-[11px] font-black text-amber-100">DDD: {dddFilter}</span> : null}
+              {groupFilter !== 'all' ? <span className="rounded-full border border-slate-400/20 bg-slate-400/10 px-3 py-1 text-[11px] font-black text-slate-100">Grupo: {groupOptions.find((group) => group.id === groupFilter)?.name ?? 'selecionado'}</span> : null}
+              {onlyDemand ? <span className="rounded-full border border-rose-400/20 bg-rose-500/10 px-3 py-1 text-[11px] font-black text-rose-100">Com demanda</span> : null}
+              {onlySolves ? <span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-3 py-1 text-[11px] font-black text-emerald-100">Resolve problema</span> : null}
+              {onlyLinked ? <span className="rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-1 text-[11px] font-black text-cyan-100">Vínculo com plataforma</span> : null}
             </div>
+
+            {filtersOpen ? (
+              <div className="mt-3 rounded-xl border border-slate-800/80 bg-slate-950/40 p-3">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  <Field label="Tipo">
+                    <select value={scopeFilter} onChange={(event) => setScopeFilter(event.target.value)} className="field-input h-10">
+                      <option value="all">Todos</option>
+                      <option value="interno">Interno</option>
+                      <option value="grupo">Grupo</option>
+                      <option value="publico">Público</option>
+                    </select>
+                  </Field>
+                  <Field label="Tag">
+                    <select value={tagFilter} onChange={(event) => setTagFilter(event.target.value)} className="field-input h-10">
+                      <option value="all">Todas</option>
+                      {tagOptions.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="Fonte">
+                    <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)} className="field-input h-10">
+                      <option value="all">Todas</option>
+                      {sourceOptions.map((source) => <option key={source} value={source}>{source}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="DDD">
+                    <select value={dddFilter} onChange={(event) => setDddFilter(event.target.value)} className="field-input h-10">
+                      <option value="all">Todos</option>
+                      {dddOptions.map((ddd) => <option key={ddd} value={ddd}>{ddd}</option>)}
+                    </select>
+                  </Field>
+                  {groupOptions.length ? (
+                    <Field label="Grupo">
+                      <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)} className="field-input h-10">
+                        <option value="all">Todos</option>
+                        {groupOptions.map((group) => <option key={`${group.id}-${group.name}`} value={group.id}>{group.name}</option>)}
+                      </select>
+                    </Field>
+                  ) : null}
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" onClick={() => setScopeFilter('interno')} className={['rounded-lg px-3 py-2 text-xs font-black', scopeFilter === 'interno' ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
+                    Interno
+                  </button>
+                  <button type="button" onClick={() => setScopeFilter('grupo')} className={['rounded-lg px-3 py-2 text-xs font-black', scopeFilter === 'grupo' ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
+                    Grupo
+                  </button>
+                  <button type="button" onClick={() => setScopeFilter('publico')} className={['rounded-lg px-3 py-2 text-xs font-black', scopeFilter === 'publico' ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
+                    Público
+                  </button>
+                  <button type="button" onClick={() => setOnlyDemand((current) => !current)} className={['rounded-lg px-3 py-2 text-xs font-black', onlyDemand ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
+                    Com demanda
+                  </button>
+                  <button type="button" onClick={() => setOnlySolves((current) => !current)} className={['rounded-lg px-3 py-2 text-xs font-black', onlySolves ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
+                    Resolve problema
+                  </button>
+                  <button type="button" onClick={() => setOnlyLinked((current) => !current)} className={['rounded-lg px-3 py-2 text-xs font-black', onlyLinked ? 'bg-cyan-500 text-slate-950' : 'border border-slate-800 text-slate-300'].join(' ')}>
+                    Vínculo com plataforma
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           {visibleItems.length ? (
@@ -3979,6 +4293,154 @@ function SearchPage({ queryDraft, setQueryDraft, onSearch, recents, contacts, pu
   )
 }
 
+function chatSuggestionActionLabel(suggestion) {
+  switch (suggestion?.action) {
+    case 'set_crm':
+      return 'Atualizar CRM'
+    case 'complete_follow_up':
+      return 'Concluir follow-up'
+    case 'clear_follow_up':
+      return 'Remover follow-up'
+    case 'categorize':
+    default:
+      return 'Atualizar categoria'
+  }
+}
+
+function chatSuggestionPreviewLines(suggestion, contact) {
+  if (!suggestion) return []
+  const targetName = contact?.name || suggestion.name || 'Este contato'
+  const currentService = contact?.service || suggestion.current_service || 'sem serviço definido'
+  const nextService = suggestion.suggested_service || suggestion.category_label || currentService
+
+  if (suggestion.action === 'set_crm') {
+    const lines = []
+    if (suggestion.crm_status) lines.push(`Status: ${suggestion.crm_status}`)
+    if (suggestion.crm_priority) lines.push(`Prioridade: ${suggestion.crm_priority}`)
+    if (suggestion.next_follow_up_at) lines.push(`Próximo follow-up: ${formatFollowUp(suggestion.next_follow_up_at)}`)
+    if (suggestion.crm_note) lines.push(`Nota: ${suggestion.crm_note}`)
+    if (!lines.length) lines.push(`Vai atualizar o CRM de ${targetName}.`)
+    return lines
+  }
+
+  if (suggestion.action === 'complete_follow_up') {
+    return [`Vai marcar o follow-up de ${targetName} como concluído.`, 'O próximo agendamento será limpo para evitar conflito.']
+  }
+
+  if (suggestion.action === 'clear_follow_up') {
+    return [`Vai remover o follow-up de ${targetName}.`, 'O contato continua na agenda sem próxima data marcada.']
+  }
+
+  return [
+    `${targetName}: ${currentService} → ${nextService}`,
+    suggestion.reason || 'Essa revisão só será aplicada depois da sua confirmação.',
+  ]
+}
+
+function ChatSuggestionReviewModal({ suggestion, contact, onClose, onConfirm, isApplying }) {
+  if (!suggestion || !contact) return null
+  const previewLines = chatSuggestionPreviewLines(suggestion, contact)
+  const actionLabel = chatSuggestionActionLabel(suggestion)
+  const actionTone =
+    suggestion.action === 'conflict'
+      ? 'border-rose-400/20 bg-rose-500/10 text-rose-100'
+      : suggestion.action === 'complete_follow_up'
+        ? 'border-amber-400/20 bg-amber-500/10 text-amber-100'
+        : 'border-cyan-400/20 bg-cyan-500/10 text-cyan-100'
+  const confirmLabel =
+    suggestion.action === 'complete_follow_up'
+      ? 'Confirmar conclusão'
+      : suggestion.action === 'clear_follow_up'
+        ? 'Confirmar remoção'
+        : suggestion.action === 'set_crm'
+          ? 'Confirmar CRM'
+          : 'Aplicar alteração'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/75 p-3 sm:items-center">
+      <div className="glass-panel max-h-[92vh] w-full max-w-2xl overflow-auto rounded-2xl p-4 shadow-2xl sm:p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Confirmação do copiloto</p>
+            <h3 className="mt-1 text-xl font-black text-slate-100">{contact.name}</h3>
+            <p className="mt-1 text-sm font-semibold text-slate-500">{actionLabel}</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg bg-slate-900 p-2 text-slate-400" aria-label="Fechar revisão">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_280px]">
+          <section className="space-y-3">
+            <div className="glass-panel-soft rounded-xl p-3">
+              <div className="flex items-start gap-3">
+                <ContactAvatar contact={contact} />
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-black text-slate-100">{contact.name}</p>
+                  <p className="mt-1 truncate text-sm font-semibold text-slate-400">{contact.service || 'Contato sem serviço definido'}</p>
+                  <p className="mt-1 text-xs font-bold text-slate-500">{contact.city || contact.address || 'Sem localidade'}</p>
+                </div>
+              </div>
+              <div className="mt-3 grid gap-2 text-sm">
+                <DetailRow label="Categoria atual" value={contact.category?.label || 'Geral'} />
+                <DetailRow label="DDD" value={contact.ddd || extractDdd(contact.phone || '') || 'Não identificado'} />
+                <DetailRow label="Fonte" value={contact.source || 'Não informada'} />
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-cyan-400/10 bg-cyan-500/5 p-3">
+              <p className="text-xs font-black uppercase tracking-widest text-cyan-300">O que vai mudar</p>
+              <div className="mt-3 space-y-2">
+                {previewLines.map((line) => (
+                  <p key={line} className="rounded-lg border border-slate-800 bg-slate-950/45 px-3 py-2 text-sm font-semibold text-slate-200">
+                    {line}
+                  </p>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <aside className="space-y-3">
+            <div className={`rounded-xl border px-3 py-3 ${actionTone}`}>
+              <p className="text-xs font-black uppercase tracking-widest opacity-80">Resumo da ação</p>
+              <p className="mt-2 text-sm font-semibold">
+                {suggestion.action === 'categorize'
+                  ? 'Você está prestes a alterar a categoria/serviço sugerido.'
+                  : suggestion.action === 'set_crm'
+                    ? 'Você está prestes a atualizar o estado do CRM deste contato.'
+                    : suggestion.action === 'complete_follow_up'
+                      ? 'Você está prestes a concluir o follow-up.'
+                      : suggestion.action === 'clear_follow_up'
+                        ? 'Você está prestes a remover o follow-up.'
+                        : 'Esta ação precisa da sua confirmação.'}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={onConfirm}
+              disabled={isApplying}
+              className="primary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg px-4 text-sm font-black disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <CheckCircle size={17} />
+              {isApplying ? 'Aplicando...' : confirmLabel}
+            </button>
+
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isApplying}
+              className="secondary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg px-4 text-sm font-black disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Cancelar
+            </button>
+          </aside>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function AgendaPage({ contacts, activeCategory, queryDraft, setQueryDraft, onSearch, recents, onDelete, onToast, onEdit, onOpenContact, onNavigate, onImport, isImporting }) {
   const filtered = useMemo(() => {
     return contacts.filter((contact) => {
@@ -4025,11 +4487,16 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
   const [draft, setDraft] = useState('')
   const [selectedContactId, setSelectedContactId] = useState('')
   const [targetInput, setTargetInput] = useState('')
+  const [pendingSuggestion, setPendingSuggestion] = useState(null)
+  const [isApplyingSuggestion, setIsApplyingSuggestion] = useState(false)
   const messagesEndRef = useRef(null)
   const reviewCount = contacts.filter((contact) => contact.category?.id === 'general' || isGenericService(contact.service)).length
   const lastSuggestions = [...messages].reverse().find((message) => message.suggestions?.length)?.suggestions ?? []
   const visibleSuggestions = lastSuggestions.slice(0, 4)
   const selectedContact = contacts.find((contact) => String(contact.id) === selectedContactId)
+  const pendingSuggestionContact = pendingSuggestion
+    ? contacts.find((contact) => String(contact.id) === String(pendingSuggestion.contact_id))
+    : null
   const targetContactOptions = useMemo(() => {
     const normalizedSearch = normalize(targetInput)
     const ordered = contacts
@@ -4081,6 +4548,17 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
     if (isThinking) return
     setDraft('')
     onAsk(message, selectedContactId || null)
+  }
+
+  async function confirmPendingSuggestion() {
+    if (!pendingSuggestion || !pendingSuggestionContact || isApplyingSuggestion) return
+    setIsApplyingSuggestion(true)
+    try {
+      await onApplySuggestion(pendingSuggestion)
+      setPendingSuggestion(null)
+    } finally {
+      setIsApplyingSuggestion(false)
+    }
   }
 
   return (
@@ -4194,10 +4672,10 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <h3 className="truncate text-sm font-black text-slate-100">{suggestion.name}</h3>
-                      <p className="mt-1 text-xs font-semibold text-slate-500">
-                        {suggestion.label || (suggestion.action === 'categorize' ? 'Atualizar categoria' : 'Atualizar contato')}
-                      </p>
-                      <p className="mt-1 text-xs font-black text-cyan-300">
+                  <p className="mt-1 text-xs font-semibold text-slate-500">
+                    {suggestion.label || (suggestion.action === 'categorize' ? 'Atualizar categoria' : 'Atualizar contato')}
+                  </p>
+                  <p className="mt-1 text-xs font-black text-cyan-300">
                         {suggestion.action === 'set_crm' && suggestion.next_follow_up_at
                           ? formatFollowUp(suggestion.next_follow_up_at)
                           : suggestion.action === 'set_crm' && (suggestion.crm_status || suggestion.crm_priority)
@@ -4209,8 +4687,13 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
                                 : categoryDetails({ id: suggestion.category_id }, suggestion.suggested_service).label}
                       </p>
                     </div>
-                    <button type="button" onClick={() => onApplySuggestion(suggestion)} disabled={suggestion.action === 'conflict'} className="primary-button h-9 shrink-0 rounded-lg px-3 text-xs font-black disabled:cursor-not-allowed disabled:opacity-50">
-                      {suggestion.action === 'conflict' ? 'Bloqueado' : 'Aplicar'}
+                    <button
+                      type="button"
+                      onClick={() => setPendingSuggestion(suggestion)}
+                      disabled={suggestion.action === 'conflict'}
+                      className="primary-button h-9 shrink-0 rounded-lg px-3 text-xs font-black disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {suggestion.action === 'conflict' ? 'Bloqueado' : 'Revisar'}
                     </button>
                   </div>
                   <p className="mt-2 text-xs font-medium text-slate-500">{suggestion.reason}</p>
@@ -4227,6 +4710,16 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
           )}
         </aside>
       </section>
+
+      <ChatSuggestionReviewModal
+        suggestion={pendingSuggestion}
+        contact={pendingSuggestionContact}
+        isApplying={isApplyingSuggestion}
+        onClose={() => {
+          if (!isApplyingSuggestion) setPendingSuggestion(null)
+        }}
+        onConfirm={confirmPendingSuggestion}
+      />
     </div>
   )
 }
@@ -4423,7 +4916,12 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMu
       <section className="glass-panel rounded-lg p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
-            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-cyan-500 text-base font-black text-slate-950">{initials(visibleName)}</span>
+            <Avatar
+              name={visibleName}
+              src={user?.avatarUrl}
+              className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-cyan-500 ring-1 ring-white/10"
+              fallbackClassName="flex h-full w-full items-center justify-center rounded-[inherit] bg-cyan-500 text-base font-black text-slate-950"
+            />
             <div className="min-w-0">
               <h2 className="truncate text-lg font-black text-slate-100">{visibleName}</h2>
               <p className="truncate text-sm font-semibold text-slate-500">{user?.email || 'Conta local'}</p>
@@ -4889,6 +5387,10 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSug
   const [addressStatus, setAddressStatus] = useState('')
   const [addressOptions, setAddressOptions] = useState([])
   const [errors, setErrors] = useState({})
+  const localPhotoInputRef = useRef(null)
+  const cameraPhotoInputRef = useRef(null)
+  const [photoSourceOpen, setPhotoSourceOpen] = useState(false)
+  const [photoPicker, setPhotoPicker] = useState(null)
 
   async function findContactAddress() {
     setAddressStatus('Buscando endereço...')
@@ -4914,6 +5416,69 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSug
     setAddressStatus(option.cep ? `Endereço selecionado. CEP: ${option.cep}` : 'Endereço selecionado, mas sem CEP público retornado.')
   }
 
+  async function applyAvatarFile(file) {
+    if (!file) return
+    const dataUrl = await fileToDataUrl(file)
+    updateForm('avatar_url', dataUrl)
+  }
+
+  function openLocalPhotoPicker() {
+    localPhotoInputRef.current?.click()
+  }
+
+  function openCameraPhotoPicker() {
+    cameraPhotoInputRef.current?.click()
+  }
+
+  async function loadGooglePhotoLibrary(source) {
+    setPhotoPicker({
+      source,
+      loading: true,
+      items: [],
+      accessToken: '',
+      error: '',
+    })
+    try {
+      const result = source === 'drive' ? await fetchGoogleDriveImageItems() : await fetchGooglePhotosImageItems()
+      setPhotoPicker({
+        source,
+        loading: false,
+        items: result.items,
+        accessToken: result.accessToken,
+        error: '',
+      })
+    } catch (error) {
+      setPhotoPicker(null)
+      setErrors((current) => ({ ...current, photo: error.message || 'Não foi possível abrir a biblioteca do Google.' }))
+    }
+  }
+
+  async function chooseGooglePhoto(item) {
+    if (!photoPicker?.accessToken || !item) return
+    try {
+      let dataUrl = ''
+      if (photoPicker.source === 'drive') {
+        dataUrl = await fetchBlobAsDataUrl(`https://www.googleapis.com/drive/v3/files/${item.id}?alt=media`, {
+          Authorization: `Bearer ${photoPicker.accessToken}`,
+        })
+      } else {
+        const imageUrl = item.sourceUrl ? `${item.sourceUrl}=w1280-h1280-c` : item.thumbnailUrl
+        if (imageUrl) {
+          try {
+            dataUrl = await fetchBlobAsDataUrl(imageUrl)
+          } catch {
+            dataUrl = imageUrl
+          }
+        }
+      }
+      if (!dataUrl) throw new Error('Não foi possível usar a imagem selecionada.')
+      updateForm('avatar_url', dataUrl)
+      setPhotoPicker(null)
+    } catch (error) {
+      setErrors((current) => ({ ...current, photo: error.message || 'Não foi possível importar a imagem selecionada.' }))
+    }
+  }
+
   function submit(event) {
     const nextErrors = {
       name: form.name.trim() ? '' : 'Obrigatório.',
@@ -4936,10 +5501,10 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSug
       </button>
       <PageTitle eyebrow="Novo contato" title="Salvar contato" description="Informe o serviço para a categoria ser definida automaticamente." />
       <form onSubmit={submit} noValidate className="glass-panel rounded-lg p-4 sm:p-5">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Nome" required error={errors.name}>
-            <input value={form.name} onChange={(event) => updateForm('name', event.target.value)} className={inputClass(errors.name)} placeholder="Nome do contato" />
-          </Field>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Nome" required error={errors.name}>
+          <input value={form.name} onChange={(event) => updateForm('name', event.target.value)} className={inputClass(errors.name)} placeholder="Nome do contato" />
+        </Field>
           <Field label="Telefone" required error={errors.phone}>
             <input value={form.phone} onChange={(event) => updateForm('phone', event.target.value)} className={inputClass(errors.phone)} placeholder="WhatsApp ou número" />
           </Field>
@@ -4950,6 +5515,59 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSug
             <input value={form.city} onChange={(event) => updateForm('city', event.target.value)} className="field-input" placeholder="São Paulo" />
           </Field>
         </div>
+
+        <section className="glass-panel-soft mt-4 rounded-lg p-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            <Avatar
+              name={form.name}
+              src={form.avatar_url}
+              className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-slate-900 ring-1 ring-white/10"
+              fallbackClassName="flex h-full w-full items-center justify-center rounded-[inherit] bg-gradient-to-br from-cyan-400/20 to-emerald-400/20 text-lg font-black text-cyan-100"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-black uppercase tracking-widest text-slate-500">Foto do contato</p>
+              <p className="mt-1 text-sm font-semibold leading-6 text-slate-400">Um único botão para escolher a origem da foto.</p>
+              <button type="button" onClick={() => setPhotoSourceOpen(true)} className="mt-3 inline-flex h-10 items-center gap-2 rounded-lg bg-cyan-500 px-3 text-sm font-black text-slate-950">
+                <Upload size={16} />
+                Adicionar foto
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {photoSourceOpen ? (
+          <PhotoSourceModal
+            onClose={() => setPhotoSourceOpen(false)}
+            onPickLocal={() => {
+              setPhotoSourceOpen(false)
+              openLocalPhotoPicker()
+            }}
+            onPickCamera={() => {
+              setPhotoSourceOpen(false)
+              openCameraPhotoPicker()
+            }}
+            onPickDrive={async () => {
+              setPhotoSourceOpen(false)
+              await loadGooglePhotoLibrary('drive')
+            }}
+            onPickPhotos={async () => {
+              setPhotoSourceOpen(false)
+              await loadGooglePhotoLibrary('photos')
+            }}
+          />
+        ) : null}
+
+        {photoPicker ? (
+          <PhotoLibraryModal
+            source={photoPicker.source}
+            loading={photoPicker.loading}
+            items={photoPicker.items}
+            onClose={() => setPhotoPicker(null)}
+            onPick={chooseGooglePhoto}
+          />
+        ) : null}
+
+        {errors.photo ? <p className="mt-3 rounded-lg border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-xs font-bold text-rose-200">{errors.photo}</p> : null}
 
         <div className="glass-panel-soft mt-4 rounded-lg p-3">
           <p className="mb-3 text-xs font-black uppercase tracking-widest text-slate-500">Inteligência do contato</p>
@@ -4971,6 +5589,60 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSug
             </Field>
           </div>
         </div>
+
+        <input
+          ref={localPhotoInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={async (event) => {
+            const file = event.target.files?.[0]
+            event.target.value = ''
+            try {
+              await applyAvatarFile(file)
+            } catch (error) {
+              setErrors((current) => ({ ...current, photo: error.message || 'Não foi possível usar a imagem selecionada.' }))
+            }
+          }}
+        />
+        <input
+          ref={cameraPhotoInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={async (event) => {
+            const file = event.target.files?.[0]
+            event.target.value = ''
+            try {
+              await applyAvatarFile(file)
+            } catch (error) {
+              setErrors((current) => ({ ...current, photo: error.message || 'Não foi possível usar a foto capturada.' }))
+            }
+          }}
+        />
+
+        {photoSourceOpen ? (
+          <PhotoSourceModal
+            onClose={() => setPhotoSourceOpen(false)}
+            onPickLocal={() => {
+              setPhotoSourceOpen(false)
+              openLocalPhotoPicker()
+            }}
+            onPickCamera={() => {
+              setPhotoSourceOpen(false)
+              openCameraPhotoPicker()
+            }}
+            onPickDrive={async () => {
+              setPhotoSourceOpen(false)
+              await loadGooglePhotoLibrary('drive')
+            }}
+            onPickPhotos={async () => {
+              setPhotoSourceOpen(false)
+              await loadGooglePhotoLibrary('photos')
+            }}
+          />
+        ) : null}
 
         <div className="glass-panel-soft mt-4 rounded-lg p-3">
           <CustomFieldValuesEditor
@@ -5072,6 +5744,7 @@ function contactToEditForm(contact) {
     instagram: contact.instagram ?? '',
     linkedin: contact.linkedin ?? '',
     custom_url: contact.custom_url ?? '',
+    avatar_url: contact.avatar_url ?? '',
     custom_fields: contact.custom_fields ?? '[]',
     custom_field_values: contact.custom_field_values?.length ? contact.custom_field_values.map((item) => normalizeCustomFieldValueItem(item)) : parseCustomFields(contact.custom_fields).map((item) => normalizeCustomFieldValueItem(item)),
     crm_status: contact.crm_status ?? 'Novo',
@@ -5339,6 +6012,10 @@ function EditContactModal({ contact, tagSuggestions, customFieldDefinitions, onC
   const [addressStatus, setAddressStatus] = useState('')
   const [addressOptions, setAddressOptions] = useState([])
   const [errors, setErrors] = useState({})
+  const localPhotoInputRef = useRef(null)
+  const cameraPhotoInputRef = useRef(null)
+  const [photoSourceOpen, setPhotoSourceOpen] = useState(false)
+  const [photoPicker, setPhotoPicker] = useState(null)
 
   useEffect(() => {
     setDraft(contactToEditForm(contact))
@@ -5368,6 +6045,69 @@ function EditContactModal({ contact, tagSuggestions, customFieldDefinitions, onC
     setDraft((current) => ({ ...current, address: option.address, city: option.city || current.city, state: option.state, cep: option.cep }))
     setAddressOptions([])
     setAddressStatus(option.cep ? `Endereço selecionado. CEP: ${option.cep}` : 'Endereço selecionado, mas sem CEP público retornado.')
+  }
+
+  async function applyAvatarFile(file) {
+    if (!file) return
+    const dataUrl = await fileToDataUrl(file)
+    setDraft((current) => ({ ...current, avatar_url: dataUrl }))
+  }
+
+  function openLocalPhotoPicker() {
+    localPhotoInputRef.current?.click()
+  }
+
+  function openCameraPhotoPicker() {
+    cameraPhotoInputRef.current?.click()
+  }
+
+  async function loadGooglePhotoLibrary(source) {
+    setPhotoPicker({
+      source,
+      loading: true,
+      items: [],
+      accessToken: '',
+      error: '',
+    })
+    try {
+      const result = source === 'drive' ? await fetchGoogleDriveImageItems() : await fetchGooglePhotosImageItems()
+      setPhotoPicker({
+        source,
+        loading: false,
+        items: result.items,
+        accessToken: result.accessToken,
+        error: '',
+      })
+    } catch (error) {
+      setPhotoPicker(null)
+      setErrors((current) => ({ ...current, photo: error.message || 'Não foi possível abrir a biblioteca do Google.' }))
+    }
+  }
+
+  async function chooseGooglePhoto(item) {
+    if (!photoPicker?.accessToken || !item) return
+    try {
+      let dataUrl = ''
+      if (photoPicker.source === 'drive') {
+        dataUrl = await fetchBlobAsDataUrl(`https://www.googleapis.com/drive/v3/files/${item.id}?alt=media`, {
+          Authorization: `Bearer ${photoPicker.accessToken}`,
+        })
+      } else {
+        const imageUrl = item.sourceUrl ? `${item.sourceUrl}=w1280-h1280-c` : item.thumbnailUrl
+        if (imageUrl) {
+          try {
+            dataUrl = await fetchBlobAsDataUrl(imageUrl)
+          } catch {
+            dataUrl = imageUrl
+          }
+        }
+      }
+      if (!dataUrl) throw new Error('Não foi possível usar a imagem selecionada.')
+      setDraft((current) => ({ ...current, avatar_url: dataUrl }))
+      setPhotoPicker(null)
+    } catch (error) {
+      setErrors((current) => ({ ...current, photo: error.message || 'Não foi possível importar a imagem selecionada.' }))
+    }
   }
 
   function submit(event) {
@@ -5413,6 +6153,59 @@ function EditContactModal({ contact, tagSuggestions, customFieldDefinitions, onC
             <input value={draft.city} onChange={(event) => updateDraft('city', event.target.value)} className="field-input" />
           </Field>
         </div>
+
+        <section className="glass-panel-soft mt-4 rounded-lg p-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            <Avatar
+              name={draft.name}
+              src={draft.avatar_url}
+              className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-slate-900 ring-1 ring-white/10"
+              fallbackClassName="flex h-full w-full items-center justify-center rounded-[inherit] bg-gradient-to-br from-cyan-400/20 to-emerald-400/20 text-lg font-black text-cyan-100"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-black uppercase tracking-widest text-slate-500">Foto do contato</p>
+              <p className="mt-1 text-sm font-semibold leading-6 text-slate-400">Escolha a origem da foto em um botão único.</p>
+              <button type="button" onClick={() => setPhotoSourceOpen(true)} className="mt-3 inline-flex h-10 items-center gap-2 rounded-lg bg-cyan-500 px-3 text-sm font-black text-slate-950">
+                <Upload size={16} />
+                Adicionar foto
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {photoSourceOpen ? (
+          <PhotoSourceModal
+            onClose={() => setPhotoSourceOpen(false)}
+            onPickLocal={() => {
+              setPhotoSourceOpen(false)
+              openLocalPhotoPicker()
+            }}
+            onPickCamera={() => {
+              setPhotoSourceOpen(false)
+              openCameraPhotoPicker()
+            }}
+            onPickDrive={async () => {
+              setPhotoSourceOpen(false)
+              await loadGooglePhotoLibrary('drive')
+            }}
+            onPickPhotos={async () => {
+              setPhotoSourceOpen(false)
+              await loadGooglePhotoLibrary('photos')
+            }}
+          />
+        ) : null}
+
+        {photoPicker ? (
+          <PhotoLibraryModal
+            source={photoPicker.source}
+            loading={photoPicker.loading}
+            items={photoPicker.items}
+            onClose={() => setPhotoPicker(null)}
+            onPick={chooseGooglePhoto}
+          />
+        ) : null}
+
+        {errors.photo ? <p className="mt-3 rounded-lg border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-xs font-bold text-rose-200">{errors.photo}</p> : null}
 
         <div className="glass-panel-soft mt-4 rounded-lg p-3">
           <p className="mb-3 text-xs font-black uppercase tracking-widest text-slate-500">Inteligência do contato</p>
@@ -5515,6 +6308,60 @@ function EditContactModal({ contact, tagSuggestions, customFieldDefinitions, onC
             Salvar alterações
           </button>
         </div>
+
+        <input
+          ref={localPhotoInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={async (event) => {
+            const file = event.target.files?.[0]
+            event.target.value = ''
+            try {
+              await applyAvatarFile(file)
+            } catch (error) {
+              setErrors((current) => ({ ...current, photo: error.message || 'Não foi possível usar a imagem selecionada.' }))
+            }
+          }}
+        />
+        <input
+          ref={cameraPhotoInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={async (event) => {
+            const file = event.target.files?.[0]
+            event.target.value = ''
+            try {
+              await applyAvatarFile(file)
+            } catch (error) {
+              setErrors((current) => ({ ...current, photo: error.message || 'Não foi possível usar a foto capturada.' }))
+            }
+          }}
+        />
+
+        {photoSourceOpen ? (
+          <PhotoSourceModal
+            onClose={() => setPhotoSourceOpen(false)}
+            onPickLocal={() => {
+              setPhotoSourceOpen(false)
+              openLocalPhotoPicker()
+            }}
+            onPickCamera={() => {
+              setPhotoSourceOpen(false)
+              openCameraPhotoPicker()
+            }}
+            onPickDrive={async () => {
+              setPhotoSourceOpen(false)
+              await loadGooglePhotoLibrary('drive')
+            }}
+            onPickPhotos={async () => {
+              setPhotoSourceOpen(false)
+              await loadGooglePhotoLibrary('photos')
+            }}
+          />
+        ) : null}
       </form>
     </div>
   )
@@ -6979,7 +7826,14 @@ function GroupGraphPanel({ group, members, users, currentUser, graphItems }) {
 
         {visibleItems.length ? (
           <div className="mt-4">
-            <NetworkGraph items={visibleItems} selectedId={selectedItem?.id} onSelect={setSelectedId} showCategoryFilter={false} label="NETWORK · GRUPO · MEMBROS" />
+            <NetworkGraph
+              items={visibleItems}
+              selectedId={selectedItem?.id}
+              onSelect={setSelectedId}
+              showCategoryFilter={true}
+              filterOptions={['all', 'grupo', 'publico', 'interno', 'tag', 'source', 'ddd', 'demand', 'solve', 'link', 'org']}
+              label="NETWORK · GRUPO · MEMBROS"
+            />
           </div>
         ) : (
           <div className="mt-4 rounded-lg border border-dashed border-slate-800 p-6 text-sm font-semibold text-slate-500">
@@ -7556,6 +8410,43 @@ function MapPage({ contacts, users, publicProfiles, groups, groupContactsById, u
   )
 }
 
+function GraphPage({ contacts, publicProfiles, users, groups, groupContactsById, user, onNavigate, onOpenGroup }) {
+  const privateGraphItems = useMemo(
+    () => buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser: user, groups, groupContactsById }),
+    [contacts, publicProfiles, users, user, groups, groupContactsById],
+  )
+
+  return (
+    <div className="space-y-4">
+      <PageTitle
+        eyebrow="Network.graph"
+        title="Grafo privado"
+        description="Leia sua agenda como rede sem misturar com grupos: tags, fontes, DDDs, demandas, soluções e vínculos com perfis públicos."
+        action={
+          <button type="button" onClick={() => onNavigate(ROUTES.MAP)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+            <MapPin size={17} />
+            Ver mapa
+          </button>
+        }
+      />
+      <GraphWorkspace
+        contextLabel="Grafo privado"
+        title="Rede pessoal fora dos grupos"
+        description="Filtre sua base por tag, fonte, DDD, demanda, solução, vínculo e contexto público com leitura semântica."
+        items={privateGraphItems}
+        emptyLabel="Nenhum contato corresponde aos filtros atuais."
+        onOpenItem={(item) => {
+          if (item.actionKind === 'contact' && item.contactId) {
+            onNavigate(`${ROUTES.CONTACT}/${item.contactId}`)
+            return
+          }
+          if (item.actionKind === 'service') onOpenGroup(item.raw)
+        }}
+      />
+    </div>
+  )
+}
+
 function NetworkGraphMap({ user, contacts }) {
   const [serviceQuery, setServiceQuery] = useState('')
   const [selectedId, setSelectedId] = useState('')
@@ -7870,7 +8761,16 @@ function MapGraphPreview({ summary, categories, selectedContact, onLoad }) {
   )
 }
 
-function NetworkGraph({ contacts, items, query = '', selectedId, onSelect, showCategoryFilter = true, filterOptions = ['all', 'home', 'legal', 'business', 'tech', 'groups'], label = 'NETWORK · GRAFO 3D' }) {
+function NetworkGraph({
+  contacts,
+  items,
+  query = '',
+  selectedId,
+  onSelect,
+  showCategoryFilter = true,
+  filterOptions = ['all', 'home', 'legal', 'business', 'tech', 'groups', 'interno', 'grupo', 'publico', 'tag', 'source', 'ddd', 'demand', 'solve', 'link', 'org'],
+  label = 'NETWORK · GRAFO 3D',
+}) {
   const cvRef = useRef(null)
   const rafRef = useRef(null)
   const nodesRef = useRef([])
@@ -8136,8 +9036,9 @@ function NetworkGraph({ contacts, items, query = '', selectedId, onSelect, showC
               type="button"
               onClick={() => changeFilter(nextFilter)}
               className={`rounded-full border px-2.5 py-0.5 font-mono text-[9px] font-bold ${filter === nextFilter ? 'border-cyan-400 bg-cyan-400/15 text-cyan-100' : 'border-cyan-900/40 text-slate-500 hover:border-cyan-400/40 hover:text-cyan-200'}`}
+              title={graphFilterLabel(nextFilter)}
             >
-              {nextFilter}
+              {graphFilterLabel(nextFilter)}
             </button>
           ))}
         </div>
@@ -8155,6 +9056,43 @@ function graphCatId(contact) {
   if (text.includes('tech') || text.includes('design') || text.includes('site') || text.includes('software')) return 'tech'
   if (text.includes('business') || text.includes('negocio') || text.includes('financ') || text.includes('contador') || text.includes('mei')) return 'business'
   return 'home'
+}
+
+const GRAPH_FILTER_LABELS = {
+  all: 'Tudo',
+  home: 'Casa',
+  legal: 'Jurídico',
+  business: 'Negócios',
+  tech: 'Tech',
+  groups: 'Grupos',
+  interno: 'Interno',
+  grupo: 'Grupo',
+  publico: 'Público',
+  tag: 'Tags',
+  source: 'Fontes',
+  ddd: 'DDDs',
+  demand: 'Demandas',
+  solve: 'Soluções',
+  link: 'Vínculos',
+  org: 'Empresas',
+}
+
+const GRAPH_SEMANTIC_FILTERS = new Set(['interno', 'grupo', 'publico', 'tag', 'source', 'ddd', 'demand', 'solve', 'link', 'org'])
+
+function graphFilterLabel(value) {
+  return GRAPH_FILTER_LABELS[value] ?? value
+}
+
+function graphContactSemanticTypes(contact) {
+  const types = new Set(Array.isArray(contact?.scopes) ? contact.scopes : [])
+  if (contact?.tags?.length) types.add('tag')
+  if (contact?.src || contact?.source) types.add('source')
+  if (contact?.ddd) types.add('ddd')
+  if (contact?.demand?.trim()) types.add('demand')
+  if (contact?.solves?.trim()) types.add('solve')
+  if (contact?.linkedPlatform) types.add('link')
+  if (contact?.organization || contact?.company || contact?.org) types.add('org')
+  return [...types]
 }
 
 function clampGraph(value, min, max) {
@@ -8209,6 +9147,77 @@ function drawGraphLabel(ctx, text, x, y, fontSize, color, bgAlpha) {
   ctx.fillText(text, x, y)
 }
 
+function graphNodePalette(node, depthBright, hover) {
+  if (node.kind === 'contact') {
+    const base = GRAPH_PALETTE.contact
+    return {
+      fill: hexA(base, 0.96),
+      stroke: hover ? hexA('#ffffff', 0.95) : hexA(base, 0.82),
+      glow: hexA(base, 0.18),
+      label: hexA('#f8fafc', 0.95),
+      sublabel: hexA('#cbd5e1', 0.75),
+    }
+  }
+
+  if (node.kind === 'semantic') {
+    if (node.semanticType === 'tag') {
+      const base = GRAPH_PALETTE.tag
+      return {
+        fill: hexA(base, 0.96),
+        stroke: hover ? hexA('#ffffff', 0.95) : hexA(base, 0.82),
+        glow: hexA(base, 0.18),
+        label: hexA('#f5f3ff', 0.96),
+        sublabel: hexA('#cbd5e1', 0.75),
+      }
+    }
+    if (node.semanticType === 'ddd') {
+      const base = GRAPH_PALETTE.ddd
+      return {
+        fill: hexA(base, 0.96),
+        stroke: hover ? hexA('#ffffff', 0.95) : hexA(base, 0.82),
+        glow: hexA(base, 0.18),
+        label: hexA('#fff7ed', 0.96),
+        sublabel: hexA('#cbd5e1', 0.75),
+      }
+    }
+    return {
+      fill: hexA('#0f172a', 0.86 + 0.02 * depthBright),
+      stroke: hover ? hexA('#ffffff', 0.84) : hexA('#94a3b8', 0.28),
+      glow: hexA('#94a3b8', 0.04 + 0.02 * depthBright),
+      label: hexA('#e2e8f0', 0.95),
+      sublabel: hexA('#94a3b8', 0.7),
+    }
+  }
+
+  if (node.kind === 'cat') {
+    return {
+      fill: hexA('#0f172a', 0.92),
+      stroke: hover ? hexA('#ffffff', 0.84) : hexA('#64748b', 0.24),
+      glow: hexA('#64748b', 0.03 + 0.02 * depthBright),
+      label: hexA('#ffffff', 0.88),
+      sublabel: hexA('#94a3b8', 0.65),
+    }
+  }
+
+  if (node.kind === 'group') {
+    return {
+      fill: hexA('#0f172a', 0.9),
+      stroke: hover ? hexA('#ffffff', 0.84) : hexA('#64748b', 0.22),
+      glow: hexA('#64748b', 0.03 + 0.02 * depthBright),
+      label: hexA('#cbd5e1', 0.92),
+      sublabel: hexA('#94a3b8', 0.65),
+    }
+  }
+
+  return {
+    fill: hexA('#0f172a', 0.92),
+    stroke: hover ? '#ffffff' : hexA('#94a3b8', 0.22),
+    glow: hexA('#94a3b8', 0.04),
+    label: '#e2e8f0',
+    sublabel: '#94a3b8',
+  }
+}
+
 function graphSlug(value) {
   return normalize(value).replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'item'
 }
@@ -8247,7 +9256,7 @@ function buildCanvasGraph(contacts, query, W, H) {
     .slice(0, 72)
 
   const nodes = [
-    { id: 'you', name: 'YOU', label: 'YOU', x: 0, y: 0, z: 0, r: 22, col: '#06b6d4', kind: 'hub', catId: 'hub', alpha: 1 },
+    { id: 'you', name: 'YOU', label: 'YOU', x: 0, y: 0, z: 0, r: 22, col: GRAPH_PALETTE.structure, kind: 'hub', catId: 'hub', alpha: 1 },
   ]
   const edges = []
   const catNodeIds = new globalThis.Map()
@@ -8260,9 +9269,9 @@ function buildCanvasGraph(contacts, query, W, H) {
       label: 'tag',
       ring: 204,
       z: -18,
-      color: '#a78bfa',
+      color: GRAPH_PALETTE.tag,
       limit: 12,
-      size: 10,
+      size: 11,
       phase: 0.18,
       extract: (contact) => tagList(contact.tags),
       keyOf: (value) => normalize(value),
@@ -8274,7 +9283,7 @@ function buildCanvasGraph(contacts, query, W, H) {
       label: 'fonte',
       ring: 286,
       z: 18,
-      color: '#60a5fa',
+      color: GRAPH_PALETTE.structure,
       limit: 8,
       size: 10,
       phase: 0.44,
@@ -8288,9 +9297,9 @@ function buildCanvasGraph(contacts, query, W, H) {
       label: 'ddd',
       ring: 326,
       z: -10,
-      color: '#fbbf24',
+      color: GRAPH_PALETTE.ddd,
       limit: 8,
-      size: 10,
+      size: 8,
       phase: 0.73,
       extract: (contact) => (contact.ddd ? [String(contact.ddd).replace(/\D/g, '')] : []),
       keyOf: (value) => normalize(String(value ?? '').replace(/\D/g, '')),
@@ -8308,7 +9317,7 @@ function buildCanvasGraph(contacts, query, W, H) {
       label: 'demanda',
       ring: 244,
       z: 24,
-      color: '#fb7185',
+      color: GRAPH_PALETTE.accent,
       limit: 8,
       size: 10,
       phase: -0.24,
@@ -8322,7 +9331,7 @@ function buildCanvasGraph(contacts, query, W, H) {
       label: 'resolve',
       ring: 364,
       z: -22,
-      color: '#34d399',
+      color: GRAPH_PALETTE.accent,
       limit: 8,
       size: 10,
       phase: -0.5,
@@ -8336,7 +9345,7 @@ function buildCanvasGraph(contacts, query, W, H) {
       label: 'usuário',
       ring: 266,
       z: 14,
-      color: '#67e8f9',
+      color: GRAPH_PALETTE.structure,
       limit: 12,
       size: 11,
       phase: 0.82,
@@ -8350,7 +9359,7 @@ function buildCanvasGraph(contacts, query, W, H) {
       label: 'empresa',
       ring: 410,
       z: 30,
-      color: '#e2e8f0',
+      color: GRAPH_PALETTE.structure,
       limit: 8,
       size: 10,
       phase: 1.1,
@@ -8361,7 +9370,7 @@ function buildCanvasGraph(contacts, query, W, H) {
     },
   ]
 
-  function addSemanticBucket(spec, value, contactId, catId) {
+  function addSemanticBucket(spec, value, contactId, catId, scopeTypes = []) {
     const fullLabel = spec.fullOf(value)
     const bucketKeyValue = spec.keyOf(value)
     if (!fullLabel || !bucketKeyValue) return
@@ -8375,11 +9384,13 @@ function buildCanvasGraph(contacts, query, W, H) {
       count: 0,
       contactIds: new Set(),
       catIds: new Set(),
+      scopeTypes: new Set(),
       color: spec.color,
     }
     current.count += 1
     current.contactIds.add(contactId)
     current.catIds.add(catId)
+    scopeTypes.forEach((scope) => current.scopeTypes.add(scope))
     if (fullLabel.length > current.label.length) current.label = fullLabel
     const displayLabel = spec.displayOf(value) || fullLabel
     if (displayLabel.length > current.displayLabel.length) current.displayLabel = displayLabel
@@ -8398,12 +9409,12 @@ function buildCanvasGraph(contacts, query, W, H) {
       y: Math.sin(angle) * 150,
       z: 0,
       r: 14,
-      col: cat.col,
+      col: GRAPH_PALETTE.structure,
       kind: 'cat',
       catId: cat.id,
       alpha: 1,
     })
-    edges.push({ a: 'you', b: id, k: 'hub', catId: cat.id })
+    edges.push({ a: 'you', b: id, k: 'hub', catId: cat.id, col: GRAPH_PALETTE.accent })
   })
 
   const contactsByCat = new globalThis.Map()
@@ -8420,7 +9431,7 @@ function buildCanvasGraph(contacts, query, W, H) {
         const normalized = spec.keyOf(value)
         if (!normalized || seen.has(normalized)) return
         seen.add(normalized)
-        addSemanticBucket(spec, value, `contact-${contact.id}`, catId)
+        addSemanticBucket(spec, value, `contact-${contact.id}`, catId, contact.scopes ?? [])
       })
     })
 
@@ -8444,10 +9455,11 @@ function buildCanvasGraph(contacts, query, W, H) {
         x: Math.cos(angle) * 265,
         y: Math.sin(angle) * 265,
         z: (index % 3 - 1) * 45,
-        r: 13,
-        col: catCol(catId),
+        r: 19,
+        col: GRAPH_PALETTE.contact,
         kind: contact.kind || 'contact',
         catId,
+        semanticTypes: Array.isArray(contact.semanticTypes) ? contact.semanticTypes : graphContactSemanticTypes(contact),
         alpha: 1,
       })
       edges.push({ a: catNodeIds.get(catId), b: id, k: 'contact', catId })
@@ -8479,6 +9491,7 @@ function buildCanvasGraph(contacts, query, W, H) {
         kind: 'semantic',
         semanticKind: spec.label,
         semanticType: spec.key,
+        scopeTypes: [...bucket.scopeTypes],
         catId: spec.key === 'source' || spec.key === 'link' || spec.key === 'org' ? 'business' : spec.key === 'ddd' ? 'home' : 'tech',
         alpha: 1,
         count: bucket.count,
@@ -8509,19 +9522,19 @@ function buildCanvasGraph(contacts, query, W, H) {
           label: group.name,
           x: Math.cos(angle) * 370,
           y: Math.sin(angle) * 370,
-          z: index % 2 === 0 ? 30 : -30,
-          r: 11,
-          col: catCol(group.cat),
-          kind: 'group',
-          catId: group.cat,
-          dashed: true,
+        z: index % 2 === 0 ? 30 : -30,
+        r: 11,
+        col: GRAPH_PALETTE.structure,
+        kind: 'group',
+        catId: group.cat,
+        dashed: true,
           people: group.people,
           resp: group.resp,
           score: group.score,
           svc: group.svc,
           alpha: 1,
         })
-        edges.push({ a: catNodeIds.get(group.cat), b: id, k: 'group', catId: group.cat })
+        edges.push({ a: catNodeIds.get(group.cat), b: id, k: 'group', catId: group.cat, col: GRAPH_PALETTE.accent })
         groupNodeIds.set(normalize(group.name), id)
       })
   }
@@ -8552,6 +9565,7 @@ function buildCanvasGraph(contacts, query, W, H) {
 }
 
 function applyGraphFilter(filter, nodes) {
+  const semanticFilter = GRAPH_SEMANTIC_FILTERS.has(filter)
   nodes.forEach((node) => {
     if (node.kind === 'hub') {
       node.alpha = 1
@@ -8561,12 +9575,30 @@ function applyGraphFilter(filter, nodes) {
       node.alpha = 1
       return
     }
-    if (node.kind === 'semantic') {
-      node.alpha = 0.18
+    if (filter === 'groups') {
+      node.alpha = node.kind === 'group' || node.kind === 'member' ? 1 : node.kind === 'cat' ? 0.4 : 0.1
       return
     }
-    if (filter === 'groups') {
-      node.alpha = node.kind === 'group' ? 1 : node.kind === 'cat' ? 0.4 : 0.1
+    if (semanticFilter) {
+      const nodeScopes = Array.isArray(node.scopeTypes) ? node.scopeTypes : []
+      const nodeSemantics = Array.isArray(node.semanticTypes) ? node.semanticTypes : []
+      const matchesSemantic = node.kind === 'semantic'
+        ? node.semanticType === filter || nodeScopes.includes(filter)
+        : nodeSemantics.includes(filter) || nodeScopes.includes(filter)
+      if (filter === 'interno' || filter === 'grupo' || filter === 'publico') {
+        const matchesScope = filter === 'grupo'
+          ? node.kind === 'group' || node.kind === 'member' || (Array.isArray(node.scopes) && node.scopes.includes('grupo'))
+          : Array.isArray(node.scopes) && node.scopes.includes(filter)
+        node.alpha = node.kind === 'semantic'
+          ? nodeScopes.includes(filter) ? 1 : 0.14
+          : matchesScope
+            ? 1
+            : node.kind === 'cat'
+              ? 0.35
+              : 0.08
+        return
+      }
+      node.alpha = matchesSemantic ? 1 : node.kind === 'semantic' ? 0.16 : node.kind === 'cat' ? 0.32 : 0.07
       return
     }
     node.alpha = node.catId === filter ? 1 : node.kind === 'cat' ? 0.3 : 0.07
@@ -8586,20 +9618,31 @@ function renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef) {
   ctx.save()
   ctx.scale(DPR, DPR)
   ctx.clearRect(0, 0, W, H)
-  ctx.fillStyle = '#030810'
+  const bg = ctx.createRadialGradient(W * 0.5, H * 0.45, 12, W * 0.5, H * 0.5, Math.max(W, H))
+  bg.addColorStop(0, '#0c1327')
+  bg.addColorStop(0.46, '#060a14')
+  bg.addColorStop(1, '#020308')
+  ctx.fillStyle = bg
+  ctx.fillRect(0, 0, W, H)
+
+  const glow = ctx.createRadialGradient(W * 0.38, H * 0.32, 0, W * 0.38, H * 0.32, Math.max(W, H) * 0.7)
+  glow.addColorStop(0, 'rgba(242,5,116,0.05)')
+  glow.addColorStop(0.45, 'rgba(161,39,242,0.03)')
+  glow.addColorStop(1, 'rgba(161,39,242,0)')
+  ctx.fillStyle = glow
   ctx.fillRect(0, 0, W, H)
 
   for (let gx = -400; gx <= 400; gx += 45) {
     for (let gy = -400; gy <= 400; gy += 45) {
       const p = projectGraphPoint(gx, gy, -90, cam, W, H)
       ctx.beginPath()
-      ctx.fillStyle = 'rgba(6,182,212,0.045)'
+      ctx.fillStyle = 'rgba(148,163,184,0.015)'
       ctx.arc(p.sx, p.sy, 0.9, 0, Math.PI * 2)
       ctx.fill()
     }
   }
 
-  ctx.strokeStyle = 'rgba(6,182,212,0.04)'
+  ctx.strokeStyle = 'rgba(148,163,184,0.018)'
   ctx.lineWidth = 0.5
   for (let g = -400; g <= 400; g += 45) {
     const a = projectGraphPoint(-400, g, -90, cam, W, H)
@@ -8630,8 +9673,8 @@ function renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef) {
     const al = Math.min(a.alpha ?? 1, b.alpha ?? 1)
     if (al <= 0.04) return
     const sc = Math.max(0.45, (a.sc + b.sc) / 2)
-    const color = edge.col ?? (edge.k === 'contact' ? catCol(edge.catId) : edge.k === 'city' ? '#fbbf24' : edge.k === 'group' ? '#94a3b8' : edge.k === 'semantic' ? '#a78bfa' : '#06b6d4')
-    const opacity = edge.k === 'hub' ? 0.3 * al : edge.k === 'contact' ? 0.2 * al : edge.k === 'city' ? 0.25 * al : edge.k === 'semantic' ? 0.18 * al : 0.12 * al
+    const color = edge.col ?? (edge.k === 'contact' ? GRAPH_PALETTE.contact : edge.k === 'city' ? GRAPH_PALETTE.accent : edge.k === 'group' ? GRAPH_PALETTE.structure : edge.k === 'semantic' ? GRAPH_PALETTE.tag : GRAPH_PALETTE.accent)
+    const opacity = edge.k === 'hub' ? 0.34 * al : edge.k === 'contact' ? 0.22 * al : edge.k === 'city' ? 0.2 * al : edge.k === 'semantic' ? 0.18 * al : 0.12 * al
     ctx.setLineDash(edge.k === 'group' ? [6, 9] : edge.k === 'city' || edge.k === 'semantic' ? [2, 5] : [])
     ctx.strokeStyle = hexA(color, opacity)
     ctx.lineWidth = (edge.k === 'hub' ? 1.2 : edge.k === 'contact' ? 0.9 : edge.k === 'city' ? 0.8 : 0.7) * sc
@@ -8659,6 +9702,7 @@ function renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef) {
     const floor = projectGraphPoint(node.x, node.y, -90, cam, W, H)
     const depthBright = clampGraph((node.zd + 300) / 600, 0, 1)
     const hover = state.hov === node.id
+    const palette = graphNodePalette(node, depthBright, hover)
 
     ctx.beginPath()
     ctx.fillStyle = hexA('#000000', 0.18 * al)
@@ -8675,10 +9719,17 @@ function renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef) {
       })
     }
 
+    if (node.kind !== 'hub') {
+      ctx.beginPath()
+      ctx.fillStyle = palette.glow
+      ctx.arc(node.sx, node.sy, r * (node.kind === 'contact' ? 1.35 : 1.28), 0, Math.PI * 2)
+      ctx.fill()
+    }
+
     ctx.beginPath()
-    ctx.fillStyle = node.kind === 'hub' ? `rgba(3,10,22,${al})` : `rgba(7,18,36,${al})`
-    ctx.strokeStyle = hover ? hexA('#ffffff', al) : hexA(node.col, (0.55 + 0.45 * depthBright) * al)
-    ctx.lineWidth = node.kind === 'hub' ? 2.5 : hover ? 2.2 : 1.3
+    ctx.fillStyle = node.kind === 'hub' ? `rgba(3,10,22,${al})` : palette.fill
+    ctx.strokeStyle = node.kind === 'hub' ? hexA('#67e8f9', al) : palette.stroke
+    ctx.lineWidth = node.kind === 'hub' ? 2.5 : hover ? 2.2 : node.kind === 'contact' ? 1.6 : 1.3
     if (node.kind === 'group') ctx.setLineDash([3, 3])
     ctx.arc(node.sx, node.sy, r, 0, Math.PI * 2)
     ctx.fill()
@@ -8687,21 +9738,21 @@ function renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef) {
 
     if (node.kind === 'hub') {
       const fs = Math.max(8, Math.round(11 * node.sc))
-      drawGraphLabel(ctx, 'YOU', node.sx, node.sy - r - fs, fs, hexA('#67e8f9', al), 0.78 * al)
+      drawGraphLabel(ctx, 'YOU', node.sx, node.sy - r - fs, fs, hexA('#ffffff', al), 0.78 * al)
       drawGraphLabel(ctx, 'hub', node.sx, node.sy + r + fs, Math.max(6, Math.round(7 * node.sc)), hexA('#06b6d4', al * 0.7), 0.62 * al)
     } else if (node.kind === 'cat') {
-      drawGraphLabel(ctx, node.label, node.sx, node.sy - r - 9, Math.max(9, Math.round(10 * node.sc)), hexA('#ffffff', al), 0.84 * al)
+      drawGraphLabel(ctx, node.label, node.sx, node.sy - r - 9, Math.max(9, Math.round(10 * node.sc)), palette.label, 0.84 * al)
     } else if (node.kind === 'contact') {
-      const fs = Math.max(7, Math.round(9 * node.sc))
-      drawGraphLabel(ctx, node.name, node.sx, node.sy - r - fs, fs, hexA('#e2e8f0', al * 0.95), 0.72 * al)
-      if (node.sc > 0.45) drawGraphLabel(ctx, node.trust, node.sx, node.sy + r + fs + 2, Math.max(6, Math.round(7.5 * node.sc)), hexA(TRUST_COL[node.trust] ?? '#64748b', al * 0.85), 0.72 * al)
+      const fs = Math.max(8, Math.round(10 * node.sc))
+      drawGraphLabel(ctx, node.name, node.sx, node.sy - r - fs, fs, palette.label, 0.74 * al)
+      if (node.sc > 0.45) drawGraphLabel(ctx, node.trust, node.sx, node.sy + r + fs + 2, Math.max(6, Math.round(7.5 * node.sc)), palette.sublabel, 0.72 * al)
     } else if (node.kind === 'group') {
       const fs = Math.max(7, Math.round(8.5 * node.sc))
-      drawGraphLabel(ctx, node.name, node.sx, node.sy - r - fs, fs, hexA('#cbd5e1', al * 0.9), 0.7 * al)
-      if (node.sc > 0.42) drawGraphLabel(ctx, `${node.people} mbr`, node.sx, node.sy + r + fs + 2, Math.max(6, Math.round(7 * node.sc)), hexA(node.col, al * 0.7), 0.65 * al)
+      drawGraphLabel(ctx, node.name, node.sx, node.sy - r - fs, fs, palette.label, 0.7 * al)
+      if (node.sc > 0.42) drawGraphLabel(ctx, `${node.people} mbr`, node.sx, node.sy + r + fs + 2, Math.max(6, Math.round(7 * node.sc)), palette.sublabel, 0.65 * al)
     } else if (node.kind === 'semantic') {
-      const fs = Math.max(6, Math.round(7.5 * node.sc))
-      drawGraphLabel(ctx, node.label, node.sx, node.sy - r - fs, fs, hexA(node.col, al * 0.9), 0.7 * al)
+      const fs = Math.max(6, Math.round(7.8 * node.sc))
+      drawGraphLabel(ctx, node.label, node.sx, node.sy - r - fs, fs, palette.label, 0.7 * al)
       if (node.sc > 0.5) drawGraphLabel(ctx, node.semanticKind, node.sx, node.sy + r + fs + 1, Math.max(5, Math.round(6 * node.sc)), hexA('#94a3b8', al * 0.72), 0.58 * al)
     }
   })
@@ -8719,11 +9770,26 @@ function drawGraphLegend(ctx) {
   ctx.textBaseline = 'middle'
   ctx.fillStyle = 'rgba(3,8,16,0.68)'
   ctx.beginPath()
-  if (ctx.roundRect) ctx.roundRect(10, 10, 148, 94, 6)
-  else ctx.rect(10, 10, 148, 94)
+  if (ctx.roundRect) ctx.roundRect(10, 10, 168, 146, 6)
+  else ctx.rect(10, 10, 168, 146)
   ctx.fill()
   ctx.fillStyle = '#67e8f9'
   ctx.fillText('camadas', x, y)
+  const legendItems = [
+    { col: GRAPH_PALETTE.contact, label: 'Contato', r: 5.0 },
+    { col: GRAPH_PALETTE.tag, label: 'Tag', r: 3.6 },
+    { col: GRAPH_PALETTE.ddd, label: 'DDD', r: 3.0 },
+  ]
+  legendItems.forEach((item) => {
+    y += 16
+    ctx.beginPath()
+    ctx.fillStyle = item.col
+    ctx.arc(x + 5, y, item.r, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.fillStyle = '#cbd5e1'
+    ctx.fillText(item.label, x + 16, y)
+  })
+  y += 2
   CATS.forEach((cat) => {
     y += 18
     ctx.beginPath()
@@ -8907,7 +9973,7 @@ function geocodeAddress(geocoder, address) {
   })
 }
 
-function LoginPage({ onLogin, onGoogleLogin, onMagicLink, supabaseAuthEnabled, onSaveUser, onImportContacts, onImportGoogleContacts, onImportGoogleProfile }) {
+function LoginPage({ onLogin, onGoogleLogin, onMagicLink, supabaseAuthEnabled, onSaveUser, onImportContacts, onImportGoogleContacts, onImportGoogleProfile, theme, onToggleTheme }) {
   const [mode, setMode] = useState('login')
   const [email, setEmail] = useState('ana@network.local')
   const [password, setPassword] = useState('')
@@ -8918,6 +9984,10 @@ function LoginPage({ onLogin, onGoogleLogin, onMagicLink, supabaseAuthEnabled, o
 
   async function submit(event) {
     event.preventDefault()
+    if (supabaseAuthEnabled) {
+      setStatus('Use Google ou magic link neste ambiente.')
+      return
+    }
     const nextErrors = {
       email: email.trim() ? '' : 'Obrigatório.',
       password: password.trim() ? '' : 'Obrigatória.',
@@ -8934,7 +10004,12 @@ function LoginPage({ onLogin, onGoogleLogin, onMagicLink, supabaseAuthEnabled, o
   }
 
   return (
-    <AuthLayout title="Sua agenda vira uma rede de oportunidades" description="O Network Agenda organiza seus contatos, acompanha follow-ups, conecta perfis públicos e ajuda você a encontrar a pessoa certa pelo contexto certo.">
+    <AuthLayout
+      title="Sua agenda vira uma rede de oportunidades"
+      description="O Network Intelligence CRM organiza seus contatos, acompanha follow-ups, conecta perfis públicos e ajuda você a encontrar a pessoa certa pelo contexto certo."
+      theme={theme}
+      onToggleTheme={onToggleTheme}
+    >
       <div className="glass-panel-soft mb-4 grid grid-cols-2 rounded-lg p-1">
         {[
           ['login', 'Entrar'],
@@ -8956,21 +10031,31 @@ function LoginPage({ onLogin, onGoogleLogin, onMagicLink, supabaseAuthEnabled, o
 
       {mode === 'login' ? (
         <form onSubmit={submit} noValidate className="space-y-3">
+          {supabaseAuthEnabled ? (
+            <div className="rounded-lg border border-cyan-400/20 bg-cyan-500/10 px-3 py-3 text-xs font-bold text-cyan-100">
+              <p>Esta instalação está em modo Supabase-first.</p>
+              <p className="mt-1 text-cyan-100/75">Use Google ou magic link. O login por senha fica desativado aqui para evitar sessão híbrida entre produção e modo local.</p>
+            </div>
+          ) : null}
           <Field label="Email" required error={errors.email}>
             <input value={email} onChange={(event) => setEmail(event.target.value)} className={inputClass(errors.email)} type="email" placeholder="você@email.com" />
           </Field>
-          <Field label="Senha" required error={errors.password}>
-            <input value={password} onChange={(event) => setPassword(event.target.value)} className={inputClass(errors.password)} type="password" placeholder="Senha" />
-          </Field>
+          {!supabaseAuthEnabled ? (
+            <Field label="Senha" required error={errors.password}>
+              <input value={password} onChange={(event) => setPassword(event.target.value)} className={inputClass(errors.password)} type="password" placeholder="Senha" />
+            </Field>
+          ) : null}
           {status ? (
             <p className={['rounded-lg border p-3 text-sm font-bold', isGoogleLoading ? 'border-cyan-400/30 bg-cyan-500/10 text-cyan-100' : 'border-rose-400/30 bg-rose-500/10 text-rose-200'].join(' ')}>
               {status}
             </p>
           ) : null}
-          <button type="submit" className="primary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black">
-            <LogIn size={18} />
-            Entrar
-          </button>
+          {!supabaseAuthEnabled ? (
+            <button type="submit" className="primary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black">
+              <LogIn size={18} />
+              Entrar
+            </button>
+          ) : null}
           <button
             type="button"
             disabled={isGoogleLoading}
@@ -9037,9 +10122,9 @@ function LoginPage({ onLogin, onGoogleLogin, onMagicLink, supabaseAuthEnabled, o
   )
 }
 
-function RegisterPage({ user, onSaveUser, onImportContacts, onImportGoogleContacts, onImportGoogleProfile, onNavigate }) {
+function RegisterPage({ user, onSaveUser, onImportContacts, onImportGoogleContacts, onImportGoogleProfile, onNavigate, theme, onToggleTheme }) {
   return (
-    <AuthLayout title="Meu perfil" description="Atualize seus dados pessoais, contato, endereço e conexão Google.">
+    <AuthLayout title="Meu perfil" description="Atualize seus dados pessoais, contato, endereço e conexão Google." theme={theme} onToggleTheme={onToggleTheme}>
       <UserProfileForm initialUser={user ?? defaultUser} submitLabel={user ? 'Salvar perfil' : 'Criar cadastro'} onSubmit={onSaveUser} onImportContacts={onImportContacts} onImportGoogleContacts={onImportGoogleContacts} onImportGoogleProfile={onImportGoogleProfile} />
       <button type="button" onClick={() => onNavigate(ROUTES.LOGIN)} className="secondary-button mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg text-sm font-black">
         <LogIn size={17} />
@@ -9050,11 +10135,15 @@ function RegisterPage({ user, onSaveUser, onImportContacts, onImportGoogleContac
 }
 
 function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts, onImportGoogleContacts, onImportGoogleProfile }) {
+  const localPhotoInputRef = useRef(null)
+  const cameraPhotoInputRef = useRef(null)
   const [draft, setDraft] = useState(normalizeUserDraft(initialUser))
   const [cepStatus, setCepStatus] = useState({ personal: '', service: '' })
   const [importStatus, setImportStatus] = useState('')
   const [pendingImportedContacts, setPendingImportedContacts] = useState([])
   const [errors, setErrors] = useState({})
+  const [photoSourceOpen, setPhotoSourceOpen] = useState(false)
+  const [photoPicker, setPhotoPicker] = useState(null)
   const isCreating = submitLabel.toLowerCase().includes('criar')
   const googleConnected = hasGoogleConnection(draft)
   const googleContactsImported = Boolean(draft.googleContactsImportedAt)
@@ -9078,6 +10167,71 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
       }
       return next
     })
+  }
+
+  async function applyAvatarFile(file) {
+    if (!file) return
+    const dataUrl = await fileToDataUrl(file)
+    updateDraft('avatarUrl', dataUrl)
+    setImportStatus('Foto de perfil atualizada.')
+  }
+
+  function openLocalPhotoPicker() {
+    localPhotoInputRef.current?.click()
+  }
+
+  function openCameraPhotoPicker() {
+    cameraPhotoInputRef.current?.click()
+  }
+
+  async function loadGooglePhotoLibrary(source) {
+    setPhotoPicker({
+      source,
+      loading: true,
+      items: [],
+      accessToken: '',
+      error: '',
+    })
+    try {
+      const result = source === 'drive' ? await fetchGoogleDriveImageItems() : await fetchGooglePhotosImageItems()
+      setPhotoPicker({
+        source,
+        loading: false,
+        items: result.items,
+        accessToken: result.accessToken,
+        error: '',
+      })
+    } catch (error) {
+      setPhotoPicker(null)
+      setImportStatus(error.message || 'Não foi possível abrir a biblioteca do Google.')
+    }
+  }
+
+  async function chooseGooglePhoto(item) {
+    if (!photoPicker?.accessToken || !item) return
+    try {
+      let dataUrl = ''
+      if (photoPicker.source === 'drive') {
+        dataUrl = await fetchBlobAsDataUrl(`https://www.googleapis.com/drive/v3/files/${item.id}?alt=media`, {
+          Authorization: `Bearer ${photoPicker.accessToken}`,
+        })
+      } else {
+        const imageUrl = item.sourceUrl ? `${item.sourceUrl}=w1280-h1280-c` : item.thumbnailUrl
+        if (imageUrl) {
+          try {
+            dataUrl = await fetchBlobAsDataUrl(imageUrl)
+          } catch {
+            dataUrl = imageUrl
+          }
+        }
+      }
+      if (!dataUrl) throw new Error('Não foi possível usar a imagem selecionada.')
+      updateDraft('avatarUrl', dataUrl)
+      setPhotoPicker(null)
+      setImportStatus(`Foto importada do ${photoPicker.source === 'drive' ? 'Google Drive' : 'Google Fotos'}.`)
+    } catch (error) {
+      setImportStatus(error.message || 'Não foi possível importar a imagem selecionada.')
+    }
   }
 
   async function findCep(kind) {
@@ -9193,6 +10347,7 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
         email: googleDraft.email || current.email,
         phone: googleDraft.phone || current.phone,
         birthDate: googleDraft.birthDate || current.birthDate,
+        avatarUrl: googleDraft.avatarUrl || current.avatarUrl,
         googleConnected: true,
         googleProfileSyncedAt: new Date().toISOString(),
       }))
@@ -9295,6 +10450,81 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
         </Field>
       </div>
 
+      <section className="glass-panel-soft rounded-lg p-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+          <Avatar
+            name={draft.name}
+            src={draft.avatarUrl}
+            className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-slate-900 ring-1 ring-white/10"
+            fallbackClassName="flex h-full w-full items-center justify-center rounded-[inherit] bg-gradient-to-br from-cyan-400/20 to-emerald-400/20 text-lg font-black text-cyan-100"
+          />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-black uppercase tracking-widest text-slate-500">Foto de perfil</p>
+            <p className="mt-1 text-sm font-semibold leading-6 text-slate-400">Escolha a origem da imagem em um único botão. O avatar fica salvo no perfil.</p>
+            <div className="mt-3">
+              <button type="button" onClick={() => setPhotoSourceOpen(true)} className="inline-flex h-10 items-center gap-2 rounded-lg bg-cyan-500 px-3 text-sm font-black text-slate-950">
+                <Upload size={16} />
+                Adicionar foto
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <input
+        ref={localPhotoInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={async (event) => {
+          const file = event.target.files?.[0]
+          event.target.value = ''
+          try {
+            await applyAvatarFile(file)
+          } catch (error) {
+            setImportStatus(error.message || 'Não foi possível usar a imagem selecionada.')
+          }
+        }}
+      />
+      <input
+        ref={cameraPhotoInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={async (event) => {
+          const file = event.target.files?.[0]
+          event.target.value = ''
+          try {
+            await applyAvatarFile(file)
+          } catch (error) {
+            setImportStatus(error.message || 'Não foi possível usar a foto capturada.')
+          }
+        }}
+      />
+
+      {photoSourceOpen ? (
+        <PhotoSourceModal
+          onClose={() => setPhotoSourceOpen(false)}
+          onPickLocal={() => {
+            setPhotoSourceOpen(false)
+            openLocalPhotoPicker()
+          }}
+          onPickCamera={() => {
+            setPhotoSourceOpen(false)
+            openCameraPhotoPicker()
+          }}
+          onPickDrive={async () => {
+            setPhotoSourceOpen(false)
+            await loadGooglePhotoLibrary('drive')
+          }}
+          onPickPhotos={async () => {
+            setPhotoSourceOpen(false)
+            await loadGooglePhotoLibrary('photos')
+          }}
+        />
+      ) : null}
+
       <section className="glass-panel-soft rounded-lg border border-cyan-400/15 bg-cyan-950/10 p-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
@@ -9321,6 +10551,16 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
         {importStatus ? <p className="mt-2 text-xs font-bold text-slate-500">{importStatus}</p> : null}
       </section>
 
+      {photoPicker ? (
+        <PhotoLibraryModal
+          source={photoPicker.source}
+          loading={photoPicker.loading}
+          items={photoPicker.items}
+          onClose={() => setPhotoPicker(null)}
+          onPick={chooseGooglePhoto}
+        />
+      ) : null}
+
       <button type="submit" className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-cyan-500 text-sm font-black text-slate-950">
         <Check size={18} />
         {submitLabel}
@@ -9329,18 +10569,138 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
   )
 }
 
-function AuthLayout({ title, description, children }) {
+function PhotoLibraryModal({ source, loading, items, onPick, onClose }) {
+  const title = source === 'drive' ? 'Escolher imagem do Google Drive' : 'Escolher imagem do Google Fotos'
+  const emptyLabel = source === 'drive' ? 'Nenhuma imagem encontrada no Drive.' : 'Nenhuma imagem encontrada no Google Fotos.'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/70 p-3 sm:items-center">
+      <div className="glass-panel max-h-[92vh] w-full max-w-3xl overflow-auto rounded-lg p-4 shadow-2xl sm:p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">{source === 'drive' ? 'Google Drive' : 'Google Fotos'}</p>
+            <h2 className="mt-1 text-xl font-black text-slate-100">{title}</h2>
+            <p className="mt-1 text-sm font-semibold text-slate-500">Clique em uma imagem para usar como avatar do perfil.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg bg-slate-900 p-2 text-slate-400" aria-label="Fechar">
+            <X size={18} />
+          </button>
+        </div>
+
+        {loading ? (
+          <div className="mt-4 rounded-lg border border-dashed border-slate-800 p-6 text-center text-sm font-semibold text-slate-500">
+            Carregando imagens...
+          </div>
+        ) : items.length ? (
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            {items.map((item) => (
+              <button
+                key={`${source}-${item.id}`}
+                type="button"
+                onClick={() => onPick(item)}
+                className="group overflow-hidden rounded-xl border border-slate-800 bg-slate-950/50 text-left transition hover:border-cyan-400/50"
+              >
+                <div className="aspect-square overflow-hidden bg-slate-900">
+                  {item.thumbnailUrl ? (
+                    <img src={item.thumbnailUrl} alt={item.name} className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.03]" />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-slate-700">
+                      <Image size={28} />
+                    </div>
+                  )}
+                </div>
+                <div className="p-3">
+                  <p className="line-clamp-2 text-xs font-black text-slate-100">{item.name}</p>
+                  <p className="mt-1 text-[10px] font-black uppercase tracking-widest text-cyan-300">{source === 'drive' ? 'Drive' : 'Fotos'}</p>
+                </div>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="mt-4 rounded-lg border border-dashed border-slate-800 p-6 text-center text-sm font-semibold text-slate-500">
+            {emptyLabel}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function PhotoSourceModal({ onClose, onPickLocal, onPickCamera, onPickDrive, onPickPhotos }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/70 p-3 sm:items-center">
+      <div className="glass-panel w-full max-w-md rounded-lg p-4 shadow-2xl sm:p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Foto de perfil</p>
+            <h2 className="mt-1 text-xl font-black text-slate-100">Escolha a origem</h2>
+            <p className="mt-1 text-sm font-semibold text-slate-500">O usuário seleciona de onde vem a imagem.</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg bg-slate-900 p-2 text-slate-400" aria-label="Fechar">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-2">
+          <button type="button" onClick={onPickLocal} className="flex items-center gap-3 rounded-xl border border-slate-800 px-4 py-3 text-left">
+            <Upload size={18} className="text-cyan-300" />
+            <span>
+              <span className="block text-sm font-black text-slate-100">Arquivos / galeria</span>
+              <span className="block text-xs font-semibold text-slate-500">Selecionar uma imagem já salva no celular.</span>
+            </span>
+          </button>
+          <button type="button" onClick={onPickCamera} className="flex items-center gap-3 rounded-xl border border-slate-800 px-4 py-3 text-left">
+            <Camera size={18} className="text-cyan-300" />
+            <span>
+              <span className="block text-sm font-black text-slate-100">Tirar foto</span>
+              <span className="block text-xs font-semibold text-slate-500">Abrir a câmera do aparelho para capturar agora.</span>
+            </span>
+          </button>
+          <button type="button" onClick={onPickDrive} className="flex items-center gap-3 rounded-xl border border-slate-800 px-4 py-3 text-left">
+            <Cloud size={18} className="text-cyan-300" />
+            <span>
+              <span className="block text-sm font-black text-slate-100">Google Drive</span>
+              <span className="block text-xs font-semibold text-slate-500">Usar uma imagem do seu Drive.</span>
+            </span>
+          </button>
+          <button type="button" onClick={onPickPhotos} className="flex items-center gap-3 rounded-xl border border-slate-800 px-4 py-3 text-left">
+            <Image size={18} className="text-cyan-300" />
+            <span>
+              <span className="block text-sm font-black text-slate-100">Google Fotos</span>
+              <span className="block text-xs font-semibold text-slate-500">Escolher uma imagem da biblioteca do Google Fotos.</span>
+            </span>
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AuthLayout({ title, description, children, theme = DEFAULT_THEME, onToggleTheme }) {
+  const themeLabel = theme === 'dark' ? 'Tema claro' : 'Tema escuro'
   return (
     <div className="auth-stage mx-auto min-h-[calc(100vh-3rem)] max-w-3xl px-1 py-8 sm:px-0 lg:py-10">
       <section className="auth-lead mx-auto flex max-w-2xl flex-col items-center justify-center text-center text-white">
-        <div className="flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-black uppercase tracking-widest text-cyan-100">
-          <Zap size={14} />
-          Network Agenda
+        <div className="flex w-full items-center justify-between gap-3">
+          <div className="flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-black uppercase tracking-widest text-cyan-100">
+            <Zap size={14} />
+            Network Intelligence CRM
+          </div>
+          {onToggleTheme ? (
+            <button type="button" onClick={onToggleTheme} className="secondary-button inline-flex h-9 shrink-0 items-center gap-2 rounded-full px-3 text-[11px] font-black">
+              {themeLabel}
+            </button>
+          ) : null}
         </div>
         <h1 className="constellation-title mt-5 text-3xl font-black leading-tight tracking-normal sm:text-4xl">{title}</h1>
         <p className="text-balance mt-4 max-w-xl text-sm font-semibold leading-6 text-slate-400 sm:text-base">
           {description}
         </p>
+        <div className="mt-5 grid w-full gap-2 sm:grid-cols-3">
+          <AuthFeature icon={Route} label="Grafo premium" />
+          <AuthFeature icon={UsersRound} label="Rede interna e pública" />
+          <AuthFeature icon={Sparkles} label="Copiloto preparado para IA" />
+        </div>
       </section>
 
       <section className="auth-form-panel mx-auto mt-5 max-w-xl rounded-xl p-4 sm:p-5">{children}</section>
@@ -9350,10 +10710,124 @@ function AuthLayout({ title, description, children }) {
 
 function AuthFeature({ icon: Icon, label }) {
   return (
-    <div className="rounded-lg bg-white/10 p-3">
+    <div className="rounded-lg bg-white/10 p-3 text-left">
       <Icon size={19} className="text-cyan-300" />
       <p className="mt-2 text-sm font-black">{label}</p>
     </div>
+  )
+}
+
+function OnboardingPage({ user, contacts, publicProfiles, duplicateCount, onNavigate, onComplete, theme, onToggleTheme }) {
+  const hasUser = Boolean(user)
+  const profileReady = hasUser && !isCadastroIncomplete(user)
+  const publicReady = Boolean(user?.publicVisible)
+  const importReady = contacts.length > 0 || Boolean(user?.googleContactsImportedAt)
+  const insightReady = contacts.length > 0 && duplicateCount >= 0
+  const steps = [
+    {
+      id: 'auth',
+      label: '1. Login / cadastro',
+      detail: hasUser ? `Você entrou como ${user?.name || user?.email}.` : 'Entre com Google ou magic link para liberar a rede.',
+      done: hasUser,
+      actionLabel: hasUser ? 'Entrou' : 'Ir para login',
+      action: () => onNavigate(ROUTES.LOGIN),
+    },
+    {
+      id: 'profile',
+      label: '2. Completar perfil',
+      detail: profileReady ? 'Seu perfil já tem os dados essenciais.' : 'Complete nome, email, telefone e endereço para liberar a experiência.',
+      done: profileReady,
+      actionLabel: 'Abrir perfil',
+      action: () => onNavigate(ROUTES.REGISTER),
+    },
+    {
+      id: 'public',
+      label: '3. Perfil visível',
+      detail: publicReady ? 'Seu card público já pode aparecer na rede.' : 'Escolha se quer ser visto na rede pública.',
+      done: publicReady,
+      actionLabel: 'Configurar',
+      action: () => onNavigate(ROUTES.PUBLIC_PROFILE),
+    },
+    {
+      id: 'import',
+      label: '4. Importar contatos',
+      detail: importReady ? `${contacts.length} contato${contacts.length === 1 ? '' : 's'} já estão na agenda.` : 'Importe Google Contacts, CSV ou faça cadastro manual.',
+      done: importReady,
+      actionLabel: 'Importar',
+      action: () => onNavigate(ROUTES.SETTINGS),
+    },
+    {
+      id: 'insights',
+      label: '5. Ver insights',
+      detail: insightReady ? 'O dashboard já mostra duplicados, tags e follow-ups.' : 'Abra o dashboard para ver as primeiras leituras da rede.',
+      done: insightReady,
+      actionLabel: 'Abrir dashboard',
+      action: () => onNavigate(ROUTES.DASHBOARD),
+    },
+  ]
+  const completedCount = steps.filter((step) => step.done).length
+  const progress = Math.round((completedCount / steps.length) * 100)
+
+  return (
+    <AuthLayout
+      title="Comece a rede em 5 passos"
+      description="Um caminho curto para deixar sua agenda pronta: entrar, completar perfil, ativar visibilidade, importar contatos e abrir os primeiros insights."
+      theme={theme}
+      onToggleTheme={onToggleTheme}
+    >
+      <div className="space-y-4 text-left">
+        <section className="glass-panel rounded-xl p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-black uppercase tracking-widest text-cyan-300">Progresso</p>
+              <h2 className="mt-1 text-lg font-black text-slate-100">{completedCount} de {steps.length} passos prontos</h2>
+              <p className="mt-1 text-sm font-medium text-slate-500">O onboarding funciona como um mapa inicial da sua rede.</p>
+            </div>
+            <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs font-black text-cyan-100">{progress}%</span>
+          </div>
+          <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-900/70">
+            <div className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-emerald-400" style={{ width: `${progress}%` }} />
+          </div>
+        </section>
+
+        <div className="grid gap-3">
+          {steps.map((step) => (
+            <button key={step.id} type="button" onClick={step.action} className="glass-panel rounded-xl p-4 text-left transition hover:border-cyan-400/35">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-black uppercase tracking-widest text-cyan-300">{step.label}</p>
+                  <p className="mt-1 text-sm font-semibold leading-6 text-slate-400">{step.detail}</p>
+                </div>
+                <span className={['rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-widest', step.done ? 'bg-emerald-400/10 text-emerald-200' : 'bg-slate-900/70 text-slate-400'].join(' ')}>
+                  {step.done ? 'Pronto' : step.actionLabel}
+                </span>
+              </div>
+            </button>
+          ))}
+        </div>
+
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <button
+            type="button"
+            onClick={() => {
+              if (hasUser) {
+                storeOnboardingCompletion(user, true)
+                onComplete?.()
+                return
+              }
+              onNavigate(ROUTES.LOGIN)
+            }}
+            className="primary-button inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-xl px-4 text-sm font-black"
+          >
+            <Check size={18} />
+            {hasUser ? 'Concluir onboarding' : 'Entrar para concluir'}
+          </button>
+          <button type="button" onClick={() => onNavigate(hasUser ? ROUTES.DASHBOARD : ROUTES.LOGIN)} className="secondary-button inline-flex h-11 items-center justify-center rounded-xl px-4 text-sm font-black">
+            {hasUser ? 'Pular para dashboard' : 'Ir para login'}
+          </button>
+        </div>
+      </div>
+    </AuthLayout>
   )
 }
 
@@ -9480,7 +10954,7 @@ function getRecommendedGroups(publicProfiles, user, query) {
 }
 
 export default function App() {
-  const [user, setUser] = useState(loadStoredUser)
+  const [user, setUser] = useState(SUPABASE_AUTH_ENABLED ? null : loadStoredUser)
   const initialOfflineData = loadOfflineSnapshot(user)
   const [contacts, setContacts] = useState(() => Array.isArray(initialOfflineData?.contacts) ? initialOfflineData.contacts : contactsSeed)
   const [publicProfiles, setPublicProfiles] = useState(() => Array.isArray(initialOfflineData?.publicProfiles) ? initialOfflineData.publicProfiles : publicProfilesSeed)
@@ -9494,6 +10968,8 @@ export default function App() {
   const [browserOnline, setBrowserOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine)
   const [syncNonce, setSyncNonce] = useState(0)
   const [pendingMutations, setPendingMutations] = useState(() => loadOfflineMutations(user))
+  const [theme, setTheme] = useState(loadThemePreference)
+  const [onboardingComplete, setOnboardingComplete] = useState(() => loadOnboardingCompletion(user))
   const [queryDraft, setQueryDraft] = useState('')
   const [route, setRoute] = useState(parsePath)
   const [recents, setRecents] = useState(loadRecentSearches)
@@ -9513,6 +10989,7 @@ export default function App() {
     instagram: '',
     linkedin: '',
     custom_url: '',
+    avatar_url: '',
     custom_fields: '[]',
     custom_field_values: [],
     cep: '',
@@ -9536,6 +11013,14 @@ export default function App() {
   const [duplicateSuggestions, setDuplicateSuggestions] = useState(() => initialOfflineData?.duplicateSuggestions ?? [])
   const [isCheckingDuplicates, setIsCheckingDuplicates] = useState(false)
   const [isChatThinking, setIsChatThinking] = useState(false)
+  const [installPrompt, setInstallPrompt] = useState(null)
+  const [isStandaloneApp, setIsStandaloneApp] = useState(() =>
+    typeof window !== 'undefined'
+      && Boolean(window.matchMedia?.('(display-mode: standalone)').matches || window.navigator?.standalone),
+  )
+  const [notificationPermission, setNotificationPermission] = useState(() =>
+    typeof window !== 'undefined' && 'Notification' in window ? window.Notification.permission : 'unsupported',
+  )
   const [chatMessages, setChatMessages] = useState([
     {
       id: 'welcome',
@@ -9695,6 +11180,61 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+
+    const handleBeforeInstallPrompt = (event) => {
+      event.preventDefault()
+      setInstallPrompt(event)
+    }
+
+    const handleAppInstalled = () => {
+      setIsStandaloneApp(true)
+      setInstallPrompt(null)
+      showToast('App instalada com sucesso.')
+    }
+
+    const displayModeQuery = window.matchMedia?.('(display-mode: standalone)')
+    const handleDisplayModeChange = () => {
+      setIsStandaloneApp(Boolean(displayModeQuery?.matches || window.navigator?.standalone))
+    }
+
+    setIsStandaloneApp(Boolean(displayModeQuery?.matches || window.navigator?.standalone))
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt)
+    window.addEventListener('appinstalled', handleAppInstalled)
+    displayModeQuery?.addEventListener?.('change', handleDisplayModeChange)
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt)
+      window.removeEventListener('appinstalled', handleAppInstalled)
+      displayModeQuery?.removeEventListener?.('change', handleDisplayModeChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return undefined
+    const refreshPermission = () => setNotificationPermission(window.Notification.permission)
+    refreshPermission()
+    window.addEventListener('focus', refreshPermission)
+    return () => window.removeEventListener('focus', refreshPermission)
+  }, [])
+
+  useEffect(() => {
+    setOnboardingComplete(loadOnboardingCompletion(user))
+  }, [user?.id, user?.email])
+
+  useEffect(() => {
+    const root = document.documentElement
+    root.dataset.theme = theme
+    root.style.colorScheme = theme
+    storeThemePreference(theme)
+
+    const metaThemeColor = document.querySelector('meta[name="theme-color"]')
+    if (metaThemeColor) {
+      metaThemeColor.setAttribute('content', theme === 'light' ? '#f6f8fc' : '#050812')
+    }
+  }, [theme])
+
+  useEffect(() => {
     const client = getSupabaseClient()
     if (!client) return undefined
     let active = true
@@ -9763,6 +11303,29 @@ export default function App() {
   useEffect(() => {
     refreshPendingMutations(user)
   }, [user?.id, user?.email])
+
+  useEffect(() => {
+    if (!user) return
+    if (onboardingComplete) return
+    const onboardingAllowedPages = new Set([
+      'onboarding',
+      'register',
+      'publicProfile',
+      'settings',
+      'dashboard',
+      'agenda',
+      'crm',
+      'chat',
+      'public',
+      'feed',
+      'groups',
+      'duplicates',
+      'map',
+      'apiDocs',
+    ])
+    if (onboardingAllowedPages.has(route.page)) return
+    navigate(ROUTES.ONBOARDING)
+  }, [user?.id, user?.email, onboardingComplete, route.page])
 
   useEffect(() => {
     let cancelled = false
@@ -9937,6 +11500,10 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
+  function toggleTheme() {
+    setTheme((current) => (current === 'dark' ? 'light' : 'dark'))
+  }
+
   function showToast(message) {
     setToast(message)
   }
@@ -10005,6 +11572,7 @@ export default function App() {
       trust: 'Novo',
       source: 'Importado',
       note: '',
+      avatar_url: payload.avatar_url || '',
       ...payload,
       service,
     }
@@ -10910,6 +12478,7 @@ export default function App() {
       instagram: form.instagram || '',
       linkedin: form.linkedin || '',
       custom_url: form.custom_url || '',
+      avatar_url: form.avatar_url || '',
       custom_fields: serializeCustomFields(prepareCustomFieldPayload(form.custom_field_values || [])),
       custom_field_values: prepareCustomFieldPayload(form.custom_field_values || []),
       trust: 'Novo',
@@ -10992,6 +12561,7 @@ export default function App() {
       instagram: nextContact.instagram || '',
       linkedin: nextContact.linkedin || '',
       custom_url: nextContact.custom_url || '',
+      avatar_url: nextContact.avatar_url || '',
       custom_fields: serializeCustomFields(prepareCustomFieldPayload(nextContact.custom_field_values || [])),
       custom_field_values: prepareCustomFieldPayload(nextContact.custom_field_values || []),
       crm_status: nextContact.crm_status || 'Novo',
@@ -11098,7 +12668,7 @@ export default function App() {
     })
     storeSessionUser(loggedUser)
     showToast('Login realizado.')
-    navigate(ROUTES.DASHBOARD)
+    navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
   }
 
   async function loginWithGoogle() {
@@ -11130,13 +12700,8 @@ export default function App() {
       return [loggedUser, ...others]
     })
     storeSessionUser(loggedUser)
-    if (isCadastroIncomplete(loggedUser)) {
-      showToast('Login Google realizado. Complete seu cadastro.')
-      navigate(ROUTES.REGISTER)
-      return
-    }
     showToast('Login Google realizado.')
-    navigate(ROUTES.DASHBOARD)
+    navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
   }
 
   async function sendMagicLink(email) {
@@ -11201,7 +12766,8 @@ export default function App() {
       })
     }
     showToast(queuedOffline ? 'Perfil salvo offline. Vou sincronizar ao reconectar.' : options.successMessage ?? 'Cadastro salvo.')
-    navigate(options.redirectTo ?? (savedUser.publicVisible ? ROUTES.PUBLIC : ROUTES.DASHBOARD))
+    const nextRoute = loadOnboardingCompletion(savedUser) ? (savedUser.publicVisible ? ROUTES.PUBLIC : ROUTES.DASHBOARD) : ROUTES.ONBOARDING
+    navigate(options.redirectTo ?? nextRoute)
   }
 
   function logout() {
@@ -11211,6 +12777,36 @@ export default function App() {
     localStorage.removeItem(AUTH_STORAGE_KEY)
     showToast('Sessão encerrada.')
     navigate(ROUTES.LOGIN)
+  }
+
+  async function installApp() {
+    if (!installPrompt) {
+      showToast(isStandaloneApp ? 'O app já está instalado.' : 'A instalação ainda não está disponível neste navegador.')
+      return
+    }
+    installPrompt.prompt()
+    try {
+      const choice = await installPrompt.userChoice
+      showToast(choice?.outcome === 'accepted' ? 'Instalação iniciada.' : 'Instalação adiada.')
+    } finally {
+      setInstallPrompt(null)
+    }
+  }
+
+  async function enableNotifications() {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      showToast('Notificações não são suportadas neste navegador.')
+      return
+    }
+    const permission = await window.Notification.requestPermission()
+    setNotificationPermission(permission)
+    if (permission === 'granted') {
+      showToast('Notificações liberadas. Push real entra numa etapa posterior.')
+    } else if (permission === 'denied') {
+      showToast('Notificações bloqueadas pelo navegador.')
+    } else {
+      showToast('Permissão de notificações não foi concluída.')
+    }
   }
 
   const contactsWithCategory = useMemo(
@@ -11245,14 +12841,33 @@ export default function App() {
   }, [contactsWithCategory])
 
   const inferredCategory = form.service ? classifyService(form.service) : null
-  const isAuthRoute = !user && (route.page === 'login' || route.page === 'register')
+  const isAuthRoute = route.page === 'onboarding' || (!user && (route.page === 'login' || route.page === 'register'))
   const effectiveRoute = !user && !isAuthRoute ? { page: 'login', categoryId: null } : route
 
   let page
-  if (effectiveRoute.page === 'login') {
-    page = <LoginPage onLogin={loginUser} onGoogleLogin={loginWithGoogle} onMagicLink={sendMagicLink} supabaseAuthEnabled={SUPABASE_AUTH_ENABLED} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} />
+  if (effectiveRoute.page === 'onboarding') {
+    page = (
+      <OnboardingPage
+        user={user}
+        contacts={contactsWithCategory}
+        publicProfiles={publicProfilesWithCategory}
+        duplicateCount={duplicateSuggestions.length}
+        onNavigate={navigate}
+        onComplete={() => {
+          if (!user) return
+          storeOnboardingCompletion(user, true)
+          setOnboardingComplete(true)
+          showToast('Onboarding concluído.')
+          navigate(ROUTES.DASHBOARD)
+        }}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
+    )
+  } else if (effectiveRoute.page === 'login') {
+    page = <LoginPage theme={theme} onToggleTheme={toggleTheme} onLogin={loginUser} onGoogleLogin={loginWithGoogle} onMagicLink={sendMagicLink} supabaseAuthEnabled={SUPABASE_AUTH_ENABLED} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} />
   } else if (effectiveRoute.page === 'register') {
-    page = <RegisterPage user={user} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} onNavigate={navigate} />
+    page = <RegisterPage user={user} theme={theme} onToggleTheme={toggleTheme} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'publicProfile') {
     page = <PublicProfileSettingsPage user={user} onSaveUser={saveUser} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'dashboard') {
@@ -11275,6 +12890,8 @@ export default function App() {
         isImporting={isImporting}
       />
     )
+  } else if (effectiveRoute.page === 'graph') {
+    page = <GraphPage contacts={contactsWithCategory} publicProfiles={publicProfilesWithCategory} users={networkUsers} groups={sharedGroups} groupContactsById={groupContactsById} user={user} onNavigate={navigate} onOpenGroup={setSelectedGroup} />
   } else if (effectiveRoute.page === 'contact') {
     const selectedContact = contactsWithCategory.find((contact) => String(contact.id) === String(effectiveRoute.contactId))
     page = <ContactDetailPage contact={selectedContact} onEdit={setEditingContact} onNavigate={navigate} />
@@ -11360,7 +12977,23 @@ export default function App() {
   }
 
   return (
-    <Shell user={user} route={effectiveRoute} online={backendOnline} unread={newCount} pendingChanges={pendingMutations.length} onSyncPending={syncPendingNow} onNavigate={navigate} onLogout={logout}>
+    <Shell
+      user={user}
+      route={effectiveRoute}
+      online={backendOnline}
+      unread={newCount}
+      pendingChanges={pendingMutations.length}
+      onSyncPending={syncPendingNow}
+      onNavigate={navigate}
+      onLogout={logout}
+      theme={theme}
+      onToggleTheme={toggleTheme}
+      onInstallApp={installApp}
+      installReady={Boolean(installPrompt)}
+      installed={isStandaloneApp}
+      notificationPermission={notificationPermission}
+      onEnableNotifications={enableNotifications}
+    >
       <Toast message={toast} />
       {page}
       {editingContact ? <EditContactModal contact={editingContact} tagSuggestions={tagSuggestions} customFieldDefinitions={customFieldDefinitions} onClose={() => setEditingContact(null)} onSave={saveEditedContact} /> : null}

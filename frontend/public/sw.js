@@ -1,5 +1,5 @@
-const CACHE_NAME = 'network-agenda-v2'
-const APP_SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon.svg']
+const CACHE_NAME = 'network-intelligence-v4'
+const APP_SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png']
 
 function isSameOrigin(request) {
   return new URL(request.url).origin === self.location.origin
@@ -48,6 +48,9 @@ self.addEventListener('activate', (event) => {
       .keys()
       .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))),
   )
+  if (self.registration?.navigationPreload) {
+    event.waitUntil(self.registration.navigationPreload.enable().catch(() => {}))
+  }
   self.clients.claim()
 })
 
