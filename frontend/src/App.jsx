@@ -1,5 +1,6 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@supabase/supabase-js'
+import { Suspense, lazy } from 'react'
 import {
   Activity,
   ArrowLeft,
@@ -49,9 +50,7 @@ import {
 const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? 'https://network-agenda-api.onrender.com' : 'http://127.0.0.1:8006')
-const SUPABASE_URL =
-  import.meta.env.VITE_SUPABASE_URL ||
-  (import.meta.env.PROD ? 'https://qbqqfkvvbvsdpwsajkha.supabase.co' : '')
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || ''
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? ''
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? ''
@@ -60,12 +59,15 @@ const GOOGLE_CONTACTS_SCOPE = 'https://www.googleapis.com/auth/contacts.readonly
 const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
 const GOOGLE_PHOTOS_SCOPE = 'https://www.googleapis.com/auth/photoslibrary.readonly'
 const GOOGLE_ACCOUNT_PROFILE_SCOPE = `${GOOGLE_LOGIN_SCOPE} https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/user.birthday.read`
+const WEB_PUSH_PUBLIC_KEY = import.meta.env.VITE_WEB_PUSH_PUBLIC_KEY ?? ''
 const AUTH_STORAGE_KEY = 'network-agenda-user'
 const AUTH_TTL_MS = 24 * 60 * 60 * 1000
 const THEME_STORAGE_KEY = 'network-agenda-theme-v1'
 const ONBOARDING_STORAGE_KEY = 'network-agenda-onboarding-v1'
 const OFFLINE_DATA_STORAGE_KEY = 'network-agenda-offline-data-v1'
 const OFFLINE_MUTATION_STORAGE_KEY = 'network-agenda-offline-mutations-v1'
+const AUTO_PUSH_STATE_STORAGE_KEY = 'network-agenda-auto-push-v1'
+const AUTO_PUSH_COOLDOWN_MS = 15 * 60 * 1000
 const SUPABASE_AUTH_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
 const DEFAULT_THEME = 'dark'
 let supabaseClient = null
@@ -88,24 +90,34 @@ async function getSupabaseAccessToken() {
 const ROUTES = {
   DASHBOARD: '/dashboard',
   AGENDA: '/agenda',
+  SEARCH: '/buscar',
+  IMPORT: '/importar',
   GRAPH: '/grafo',
   MAP: '/mapa',
   PUBLIC: '/rede',
   FEED: '/feed',
   CHAT: '/chat',
   SETTINGS: '/configuracoes',
+  CUSTOM_FIELDS: '/campos-personalizados',
   DUPLICATES: '/duplicados',
   CRM: '/crm',
   PUBLIC_PROFILE: '/perfil-publico',
   CONTACT: '/contato',
   NEW: '/novo',
   GROUPS: '/grupos',
+  GROUP_ADMIN: '/grupos/admin',
   API_DOCS: '/api-docs',
   ONBOARDING: '/onboarding',
   LOGIN: '/login',
   REGISTER: '/cadastro',
   CONNECTIONS: '/admin/conexoes',
 }
+
+const LazyGraphWorkspaceSection = lazy(() => import('./networkVisuals.jsx').then((module) => ({ default: module.GraphWorkspaceSection })))
+const LazyNetworkGraphMapSection = lazy(() => import('./networkVisuals.jsx').then((module) => ({ default: module.NetworkGraphMapSection })))
+const LazyChatPageSection = lazy(() => import('./chatPage.jsx'))
+const LazySettingsPageSection = lazy(() => import('./settingsPage.jsx'))
+const LazyGroupsPageSection = lazy(() => import('./groupsPage.jsx'))
 
 const CATS = [
   { id: 'home', label: 'Casa', col: '#10b981' },
@@ -136,13 +148,6 @@ const CONTACTS_SEED = [
   { id: 'c3', name: 'Renato Lima', svc: 'contador para MEI', city: 'Rio de Janeiro', trust: 'Confiavel', src: 'Importado', note: 'Abertura de empresa e DAS mensal', cat: 'business' },
   { id: 'c4', name: 'Aline Prado', svc: 'designer de site', city: 'São Paulo', trust: 'Novo', src: 'Indicação', note: 'Landing pages e identidade visual', cat: 'tech' },
   { id: 'c5', name: 'Carlos Nogueira', svc: 'pintor e reformas', city: 'Osasco', trust: 'Recomendado', src: 'iCloud', note: 'Apartamento e acabamento', cat: 'home' },
-]
-
-const GROUPS_SEED = [
-  { id: 'g1', name: 'Eletricistas SP', svc: 'eletricista · manutenção', people: 42, resp: '18 min', score: 4.8, cat: 'home' },
-  { id: 'g2', name: 'Rede Jurídica PME', svc: 'jurídico · contratos', people: 28, resp: '1 h', score: 4.7, cat: 'legal' },
-  { id: 'g3', name: 'Casa e Reforma', svc: 'pintura · reforma', people: 67, resp: '25 min', score: 4.6, cat: 'home' },
-  { id: 'g4', name: 'Tech Negocios', svc: 'site · software · design', people: 35, resp: '45 min', score: 4.9, cat: 'tech' },
 ]
 
 const TRUST_COL = { Favorito: '#f59e0b', Recomendado: '#06b6d4', Confiavel: '#10b981', Novo: '#64748b' }
@@ -669,6 +674,22 @@ function formatPhoneForLink(phone) {
   return String(phone ?? '').replace(/\D/g, '')
 }
 
+function normalizeSocialLink(value) {
+  return normalize(String(value || '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/+$/g, ''))
+}
+
+function contactPhoneCandidates(contact) {
+  return uniqueImportValues([contact?.phone, contact?.whatsapp, ...(contact?.phones ?? []).map((item) => item?.phone)]).map(formatPhoneForLink).filter(Boolean)
+}
+
+function contactEmailCandidates(contact) {
+  return uniqueImportValues([contact?.email, ...(contact?.emails ?? []).map((item) => item?.email)]).map((value) => normalize(value)).filter(Boolean)
+}
+
+function contactLinkCandidates(contact) {
+  return uniqueImportValues([contact?.linkedin, contact?.instagram, contact?.custom_url]).map(normalizeSocialLink).filter(Boolean)
+}
+
 function initials(name) {
   return String(name ?? '')
     .split(' ')
@@ -1001,6 +1022,36 @@ function customFieldDisplayValue(field) {
   return normalized.value || '-'
 }
 
+function contactCustomFieldSearchValues(contact) {
+  const values = contact?.custom_field_values?.length ? contact.custom_field_values : parseCustomFields(contact?.custom_fields)
+  return values.flatMap((field) => [field?.label || field?.name || '', customFieldDisplayValue(field)])
+}
+
+function extractTermTokens(value) {
+  return [...new Set(
+    normalize(value)
+      .split(/[^a-z0-9]+/g)
+      .map((item) => item.trim())
+      .filter((item) => item.length >= 3),
+  )]
+}
+
+function contactComplementaritySignals(contact) {
+  return [
+    ...contactDemandTags(contact),
+    ...extractTermTokens(contact?.demand || ''),
+  ]
+}
+
+function contactOfferSignals(contact) {
+  return [
+    ...contactTags(contact),
+    ...extractTermTokens(contact?.service || ''),
+    ...extractTermTokens(contact?.solves || ''),
+    ...extractTermTokens(contact?.organization || ''),
+  ]
+}
+
 function tagList(value) {
   if (Array.isArray(value)) {
     return value
@@ -1018,6 +1069,10 @@ function contactTags(contact) {
   return tagList(contact?.tag_items?.length ? contact.tag_items : contact?.tags)
 }
 
+function contactDemandTags(contact) {
+  return tagList(contact?.demand_tags)
+}
+
 function contactPhones(contact) {
   const phones = Array.isArray(contact?.phones) ? contact.phones : []
   if (phones.length) return phones
@@ -1028,6 +1083,75 @@ function contactEmails(contact) {
   const emails = Array.isArray(contact?.emails) ? contact.emails : []
   if (emails.length) return emails
   return contact?.email ? [{ email: contact.email, label: 'Principal', is_primary: true }] : []
+}
+
+function buildAdditionalPhoneRows(contact) {
+  return contactPhones(contact)
+    .filter((item, index) => !(item?.is_primary || index === 0))
+    .filter((item) => normalize(item?.label) !== 'whatsapp')
+    .filter((item) => normalize(item?.phone) !== normalize(contact?.whatsapp))
+    .map((item) => ({ phone: item.phone || '', label: item.label || 'Telefone' }))
+}
+
+function buildAdditionalEmailRows(contact) {
+  return contactEmails(contact)
+    .filter((item, index) => !(item?.is_primary || index === 0))
+    .map((item) => ({ email: item.email || '', label: item.label || 'Email' }))
+}
+
+function normalizeLabeledValueRows(values, valueKey, fallbackLabel) {
+  return (Array.isArray(values) ? values : [])
+    .map((item) => (typeof item === 'string'
+      ? { [valueKey]: item, label: fallbackLabel }
+      : { [valueKey]: item?.[valueKey] || item?.value || '', label: item?.label || fallbackLabel }))
+    .filter((item) => String(item?.[valueKey] || '').trim())
+}
+
+function buildContactPhonePayload(primaryPhone, additionalPhones) {
+  return normalizeLabeledValueRows(additionalPhones, 'phone', 'Telefone')
+    .filter((item) => normalize(item.phone) !== normalize(primaryPhone))
+}
+
+function buildContactEmailPayload(primaryEmail, additionalEmails) {
+  return normalizeLabeledValueRows(additionalEmails, 'email', 'Email')
+    .filter((item) => normalize(item.email) !== normalize(primaryEmail))
+}
+
+function LabeledValueListEditor({ title, valueKey, items, onChange, addLabel, placeholder, fallbackLabel }) {
+  function addItem() {
+    onChange([...(items ?? []), { [valueKey]: '', label: fallbackLabel }])
+  }
+
+  function updateItem(index, field, nextValue) {
+    onChange((items ?? []).map((item, itemIndex) => (itemIndex === index ? { ...item, [field]: nextValue } : item)))
+  }
+
+  function removeItem(index) {
+    onChange((items ?? []).filter((_, itemIndex) => itemIndex !== index))
+  }
+
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-xs font-black uppercase tracking-widest text-slate-500">{title}</p>
+        <button type="button" onClick={addItem} className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-800 px-2 text-xs font-black text-cyan-300">
+          <Plus size={14} />
+          {addLabel}
+        </button>
+      </div>
+      <div className="space-y-2">
+        {(items ?? []).length ? (items ?? []).map((item, index) => (
+          <div key={`${title}-${index}`} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_160px_auto]">
+            <input value={item?.[valueKey] || ''} onChange={(event) => updateItem(index, valueKey, event.target.value)} className="field-input h-10" placeholder={placeholder} />
+            <input value={item?.label || fallbackLabel} onChange={(event) => updateItem(index, 'label', event.target.value)} className="field-input h-10" placeholder="Rótulo" />
+            <button type="button" onClick={() => removeItem(index)} className="h-10 rounded-lg border border-rose-500/25 px-3 text-rose-200">
+              Remover
+            </button>
+          </div>
+        )) : <p className="rounded-lg border border-dashed border-slate-800 p-3 text-xs font-semibold text-slate-500">Nenhum item adicional.</p>}
+      </div>
+    </div>
+  )
 }
 
 function followUpInputValue(value) {
@@ -1086,6 +1210,9 @@ function effectiveCrmStatus(contact) {
 
 function parsePath() {
   const path = window.location.pathname === '/' ? ROUTES.DASHBOARD : window.location.pathname
+  if (path.startsWith(`${ROUTES.GROUP_ADMIN}/`)) {
+    return { page: 'groupAdmin', groupId: decodeURIComponent(path.replace(`${ROUTES.GROUP_ADMIN}/`, '')) }
+  }
   if (path.startsWith('/categoria/')) {
     return { page: 'agenda', categoryId: decodeURIComponent(path.replace('/categoria/', '')) }
   }
@@ -1093,15 +1220,17 @@ function parsePath() {
     return { page: 'contact', contactId: decodeURIComponent(path.replace(`${ROUTES.CONTACT}/`, '')) }
   }
   const pageByPath = {
-    '/buscar': 'agenda',
+    [ROUTES.SEARCH]: 'search',
     [ROUTES.DASHBOARD]: 'dashboard',
     [ROUTES.AGENDA]: 'agenda',
+    [ROUTES.IMPORT]: 'import',
     [ROUTES.GRAPH]: 'graph',
     [ROUTES.MAP]: 'map',
     [ROUTES.PUBLIC]: 'public',
     [ROUTES.FEED]: 'feed',
     [ROUTES.CHAT]: 'chat',
     [ROUTES.SETTINGS]: 'settings',
+    [ROUTES.CUSTOM_FIELDS]: 'customFields',
     [ROUTES.DUPLICATES]: 'duplicates',
     [ROUTES.CRM]: 'crm',
     [ROUTES.PUBLIC_PROFILE]: 'publicProfile',
@@ -1135,16 +1264,21 @@ function loadStoredUser() {
   }
 }
 
-function storeSessionUser(user) {
+function storeSessionUser(user, expiresAt = 0) {
   const now = Date.now()
+  const sessionExpiry = Number(expiresAt || 0)
   localStorage.setItem(
     AUTH_STORAGE_KEY,
     JSON.stringify({
       user,
       savedAt: now,
-      expiresAt: now + AUTH_TTL_MS,
+      expiresAt: sessionExpiry > now ? sessionExpiry : now + AUTH_TTL_MS,
     }),
   )
+}
+
+function clearStoredSessionUser() {
+  localStorage.removeItem(AUTH_STORAGE_KEY)
 }
 
 function getStoredSessionExpiry() {
@@ -1264,6 +1398,23 @@ function normalizeUserDraft(user) {
 
 function hasGoogleConnection(user) {
   return Boolean(user?.googleConnected || user?.googleProfileSyncedAt || user?.googleContactsImportedAt)
+}
+
+function inferSupabaseAuthProvider(session) {
+  const provider =
+    session?.user?.app_metadata?.provider ||
+    session?.user?.identities?.[0]?.provider ||
+    session?.user?.user_metadata?.provider ||
+    ''
+  return String(provider || '').trim().toLowerCase()
+}
+
+function urlBase64ToUint8Array(value) {
+  const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/')
+  const padding = '='.repeat((4 - (normalized.length % 4 || 4)) % 4)
+  const encoded = normalized + padding
+  const rawData = window.atob(encoded)
+  return Uint8Array.from(rawData, (char) => char.charCodeAt(0))
 }
 
 function onlyDigits(value) {
@@ -1490,21 +1641,122 @@ function saveOfflineSnapshot(owner, payload) {
     groupMessagesById: payload.groupMessagesById ?? {},
     customFieldDefinitions: payload.customFieldDefinitions ?? [],
     groupCustomFieldsById: payload.groupCustomFieldsById ?? {},
+    chatThreads: payload.chatThreads ?? [],
+    chatMessages: payload.chatMessages ?? [],
+    currentChatThreadId: payload.currentChatThreadId ?? null,
+    importJobs: payload.importJobs ?? [],
     cachedAt: new Date().toISOString(),
   }
   writeStorageJson(OFFLINE_DATA_STORAGE_KEY, snapshots)
 }
 
+function defaultChatMessages() {
+  return [
+    {
+      id: 'welcome',
+      role: 'assistant',
+      text: 'Posso organizar contatos importados, sugerir categorias e encontrar pessoas por tema.',
+      provider: 'local',
+      suggestions: [],
+    },
+  ]
+}
+
+function normalizeOfflineMutation(mutation) {
+  return {
+    status: 'pending',
+    attemptCount: 0,
+    lastAttemptAt: '',
+    lastError: '',
+    ...mutation,
+  }
+}
+
+function resetOfflineMutationState(mutation, patch = {}) {
+  return {
+    ...normalizeOfflineMutation(mutation),
+    status: 'pending',
+    lastError: '',
+    ...patch,
+  }
+}
+
+function mutationContactKey(mutation) {
+  return String(mutation?.contactId ?? mutation?.payload?.id ?? '')
+}
+
+function compactOfflineMutationsQueue(queued, mutation) {
+  const nextMutation = resetOfflineMutationState(mutation)
+  const normalizedQueue = queued.map(normalizeOfflineMutation)
+
+  if (nextMutation.type === 'user:save') {
+    return [...normalizedQueue.filter((item) => item.type !== 'user:save'), nextMutation]
+  }
+
+  if (nextMutation.type === 'contact:create') {
+    const contactKey = mutationContactKey(nextMutation)
+    let replaced = false
+    const nextQueue = normalizedQueue.map((item) => {
+      if (item.type === 'contact:create' && mutationContactKey(item) === contactKey) {
+        replaced = true
+        return resetOfflineMutationState({
+          ...item,
+          ...nextMutation,
+          payload: { ...item.payload, ...nextMutation.payload },
+        })
+      }
+      return item
+    })
+    return replaced ? nextQueue : [...nextQueue, nextMutation]
+  }
+
+  if (nextMutation.type === 'contact:update') {
+    const contactKey = mutationContactKey(nextMutation)
+    let mergedIntoCreate = false
+    const filteredQueue = normalizedQueue
+      .map((item) => {
+        if (item.type === 'contact:create' && mutationContactKey(item) === contactKey) {
+          mergedIntoCreate = true
+          return resetOfflineMutationState({
+            ...item,
+            payload: { ...item.payload, ...nextMutation.payload, id: item.payload?.id ?? nextMutation.payload?.id ?? nextMutation.contactId },
+          })
+        }
+        return item
+      })
+      .filter((item) => !(item.type === 'contact:update' && mutationContactKey(item) === contactKey))
+
+    return mergedIntoCreate ? filteredQueue : [...filteredQueue, nextMutation]
+  }
+
+  if (nextMutation.type === 'contact:delete') {
+    const contactKey = mutationContactKey(nextMutation)
+    let cancelledPendingCreate = false
+    const filteredQueue = normalizedQueue.filter((item) => {
+      const sameContact = mutationContactKey(item) === contactKey
+      if (!sameContact) return true
+      if (item.type === 'contact:create') {
+        cancelledPendingCreate = true
+        return false
+      }
+      return item.type !== 'contact:update' && item.type !== 'contact:delete'
+    })
+    return cancelledPendingCreate ? filteredQueue : [...filteredQueue, nextMutation]
+  }
+
+  return [...normalizedQueue, nextMutation]
+}
+
 function loadOfflineMutations(owner) {
   const ownerKey = contactOwnerId(owner)
   const mutations = readStorageJson(OFFLINE_MUTATION_STORAGE_KEY, {})
-  return mutations[ownerKey] ?? []
+  return (mutations[ownerKey] ?? []).map(normalizeOfflineMutation)
 }
 
 function saveOfflineMutations(owner, mutations) {
   const ownerKey = contactOwnerId(owner)
   const allMutations = readStorageJson(OFFLINE_MUTATION_STORAGE_KEY, {})
-  allMutations[ownerKey] = mutations
+  allMutations[ownerKey] = mutations.map(normalizeOfflineMutation)
   writeStorageJson(OFFLINE_MUTATION_STORAGE_KEY, allMutations)
 }
 
@@ -1517,14 +1769,11 @@ function updateOfflineMutations(owner, updater) {
 
 function queueOfflineMutation(owner, mutation) {
   const queued = loadOfflineMutations(owner)
-  const nextMutations = [
-    ...queued,
-    {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      createdAt: new Date().toISOString(),
-      ...mutation,
-    },
-  ]
+  const nextMutations = compactOfflineMutationsQueue(queued, {
+    id: mutation.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    createdAt: mutation.createdAt || new Date().toISOString(),
+    ...mutation,
+  })
   saveOfflineMutations(owner, nextMutations)
   return nextMutations
 }
@@ -1535,6 +1784,37 @@ function removeOfflineMutations(owner, syncedIds) {
     owner,
     loadOfflineMutations(owner).filter((mutation) => !syncedIds.includes(mutation.id)),
   )
+}
+
+function patchOfflineMutation(owner, mutationId, patch) {
+  return updateOfflineMutations(owner, (current) =>
+    current.map((mutation) =>
+      mutation.id === mutationId
+        ? { ...normalizeOfflineMutation(mutation), ...patch }
+        : normalizeOfflineMutation(mutation),
+    ),
+  )
+}
+
+function removeOfflineMutation(owner, mutationId) {
+  return updateOfflineMutations(owner, (current) => current.filter((mutation) => mutation.id !== mutationId))
+}
+
+function loadAutoPushState(owner) {
+  const ownerKey = contactOwnerId(owner)
+  const state = readStorageJson(AUTO_PUSH_STATE_STORAGE_KEY, {})
+  return state[ownerKey] ?? { lastAttemptAt: 0, lastSuccessAt: 0, lastEvents: [] }
+}
+
+function saveAutoPushState(owner, patch) {
+  const ownerKey = contactOwnerId(owner)
+  const state = readStorageJson(AUTO_PUSH_STATE_STORAGE_KEY, {})
+  state[ownerKey] = {
+    ...loadAutoPushState(owner),
+    ...patch,
+  }
+  writeStorageJson(AUTO_PUSH_STATE_STORAGE_KEY, state)
+  return state[ownerKey]
 }
 
 function isOfflineRequestError(error) {
@@ -1561,29 +1841,325 @@ function offlineMutationTitle(mutation) {
   return titles[mutation.type] || 'Sincronizar alteração'
 }
 
-function parseImportedContacts(text) {
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const parts = line.split(/[;,|]/).map((part) => part.trim())
-      const base = {
-        name: parts[0] || 'Contato importado',
-        phone: parts[1] || '0000',
-        service: parts[2] || '',
-        city: parts[3] || 'Minha região',
-        address: parts[4] || '',
-        note: parts[5] || '',
-        source: 'CSV',
+function offlineMutationStatus(mutation) {
+  return mutation?.status || 'pending'
+}
+
+function offlineMutationStatusLabel(mutation) {
+  switch (offlineMutationStatus(mutation)) {
+    case 'syncing':
+      return 'Sincronizando'
+    case 'conflict':
+      return 'Conflito'
+    case 'failed':
+      return 'Falhou'
+    default:
+      return 'Na fila'
+  }
+}
+
+function offlineMutationStatusClass(mutation) {
+  switch (offlineMutationStatus(mutation)) {
+    case 'syncing':
+      return 'border-cyan-400/20 bg-cyan-500/10 text-cyan-100'
+    case 'conflict':
+      return 'border-rose-400/20 bg-rose-500/10 text-rose-100'
+    case 'failed':
+      return 'border-amber-400/20 bg-amber-500/10 text-amber-100'
+    default:
+      return 'border-slate-700 bg-slate-900/40 text-slate-300'
+  }
+}
+
+function offlineSyncSummaryLabel(summary) {
+  const parts = []
+  if (summary?.synced) parts.push(`${summary.synced} sincronizada${summary.synced === 1 ? '' : 's'}`)
+  if (summary?.conflicts) parts.push(`${summary.conflicts} com conflito`)
+  if (summary?.failed) parts.push(`${summary.failed} com falha`)
+  if (summary?.deferred && !summary?.synced && !summary?.conflicts && !summary?.failed) parts.push('sincronização adiada')
+  if (!parts.length) return 'Nenhuma alteração pendente.'
+  return parts.join(' · ')
+}
+
+function offlineMutationFailureMessage(mutation, error, conflict = false) {
+  const baseMessage = String(error?.message || '').trim()
+  if (conflict) {
+    if (/follow-up|hor[aá]rio/i.test(baseMessage)) {
+      return 'Conflito de follow-up: já existe outro contato nesse horário.'
+    }
+    if (mutation?.type === 'duplicate:merge' || mutation?.type === 'duplicate:ignore') {
+      return baseMessage || 'A sugestão de duplicado mudou e precisa ser revisada antes de sincronizar.'
+    }
+    return baseMessage || 'Conflito ao sincronizar alteração.'
+  }
+  return baseMessage || 'Falha ao sincronizar alteração.'
+}
+
+function offlineMutationReviewRoute(mutation) {
+  if (!mutation) return ROUTES.SETTINGS
+  if (mutation.type === 'duplicate:ignore' || mutation.type === 'duplicate:merge') return ROUTES.DUPLICATES
+  if (String(mutation.type || '').startsWith('group:') && mutation.groupId) return `${ROUTES.GROUP_ADMIN}/${mutation.groupId}`
+  if (mutation.type === 'contact:delete') return ROUTES.AGENDA
+  const contactId = mutation.contactId ?? mutation.payload?.id
+  if (contactId) return `${ROUTES.CONTACT}/${contactId}`
+  return ROUTES.SETTINGS
+}
+
+function offlineMutationRecoveryHint(mutation) {
+  const status = offlineMutationStatus(mutation)
+  if (status === 'conflict') {
+    if (/follow-up|hor[aá]rio/i.test(String(mutation?.lastError || ''))) {
+      return 'Abra o contato e ajuste o próximo follow-up antes de reenviar.'
+    }
+    if (String(mutation?.type || '').startsWith('group:')) {
+      return 'Revise o grupo para confirmar permissão e contexto antes de tentar novamente.'
+    }
+    if (mutation?.type === 'duplicate:ignore' || mutation?.type === 'duplicate:merge') {
+      return 'Confira a tela de duplicados: a sugestão pode ter mudado desde o envio offline.'
+    }
+    return 'Revise os dados dessa alteração antes de sincronizar novamente.'
+  }
+  if (status === 'failed') {
+    return 'A alteração segue salva neste dispositivo. Você pode tentar de novo ou descartar se ela não fizer mais sentido.'
+  }
+  return ''
+}
+
+function shouldAttemptOfflineMutation(mutation) {
+  const status = offlineMutationStatus(mutation)
+  return status === 'pending' || status === 'syncing'
+}
+
+function csvDelimiterScore(text, delimiter) {
+  return text.split(/\r?\n/).slice(0, 5).reduce((total, line) => total + (line.match(new RegExp(`\\${delimiter}`, 'g'))?.length ?? 0), 0)
+}
+
+function detectCsvDelimiter(text) {
+  const candidates = [',', ';', '\t', '|']
+  return candidates.sort((a, b) => csvDelimiterScore(text, b) - csvDelimiterScore(text, a))[0] || ','
+}
+
+function parseDelimitedRows(text, delimiter = ',') {
+  const rows = []
+  let current = ''
+  let row = []
+  let inQuotes = false
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    const next = text[index + 1]
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        current += '"'
+        index += 1
+      } else {
+        inQuotes = !inQuotes
       }
-      return {
-        ...base,
-        service: inferImportedService(base),
+      continue
+    }
+    if (!inQuotes && char === delimiter) {
+      row.push(current.trim())
+      current = ''
+      continue
+    }
+    if (!inQuotes && (char === '\n' || char === '\r')) {
+      if (char === '\r' && next === '\n') index += 1
+      row.push(current.trim())
+      if (row.some((value) => value)) rows.push(row)
+      row = []
+      current = ''
+      continue
+    }
+    current += char
+  }
+  row.push(current.trim())
+  if (row.some((value) => value)) rows.push(row)
+  return rows
+}
+
+const csvHeaderAliases = {
+  name: ['nome', 'name', 'full name', 'contato'],
+  first_name: ['first name', 'given name', 'primeiro nome'],
+  last_name: ['last name', 'family name', 'surname', 'sobrenome'],
+  phone: ['telefone', 'phone', 'celular', 'mobile', 'whatsapp', 'tel'],
+  phone_alt: ['business phone', 'home phone', 'other phone', 'phone 2', 'phone 3', 'mobile phone', 'mobile phone 2', 'business phone 2'],
+  email: ['email', 'e-mail', 'mail'],
+  email_alt: ['e-mail 2 address', 'e-mail 3 address', 'secondary email', 'other email', 'email 2', 'email 3'],
+  service: ['servico', 'serviço', 'cargo', 'ocupacao', 'ocupação', 'profissao', 'profissão', 'função', 'funcao', 'service', 'title'],
+  city: ['cidade', 'city', 'business city', 'home city'],
+  address: ['endereco', 'endereço', 'address', 'logradouro', 'business street', 'home street', 'street', 'business address'],
+  note: ['nota', 'notas', 'observacao', 'observação', 'note', 'notes', 'connected on'],
+  organization: ['empresa', 'organizacao', 'organização', 'organization', 'company'],
+  description: ['descricao', 'descrição', 'description', 'bio', 'summary'],
+  tags: ['tags', 'tag'],
+  demand: ['demanda', 'demand'],
+  solves: ['resolve', 'solucao', 'solução', 'solves'],
+  linkedin: ['linkedin', 'profile url', 'linkedin url'],
+  instagram: ['instagram'],
+  custom_url: ['url', 'site', 'website', 'link', 'web page'],
+}
+
+function normalizeCsvHeader(value) {
+  return normalize(String(value || '').replace(/[_-]+/g, ' ')).trim()
+}
+
+function findCsvHeaderKey(header) {
+  const normalizedHeader = normalizeCsvHeader(header)
+  return Object.entries(csvHeaderAliases).find(([, aliases]) => aliases.includes(normalizedHeader))?.[0] ?? ''
+}
+
+function looksLikeHeaderRow(row) {
+  const matches = row.filter((cell) => findCsvHeaderKey(cell)).length
+  return matches >= 2
+}
+
+function uniqueImportValues(values) {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))]
+}
+
+function detectImportedFileSource(filename = '', headerKeys = []) {
+  const normalizedFilename = normalize(filename)
+  const keySet = new Set(headerKeys.filter(Boolean))
+  if (normalizedFilename.endsWith('.vcf')) {
+    if (normalizedFilename.includes('icloud') || normalizedFilename.includes('apple') || normalizedFilename.includes('contatos')) {
+      return 'Apple Contacts (VCF)'
+    }
+    return 'VCF'
+  }
+  if (normalizedFilename.includes('linkedin') || keySet.has('first_name') || keySet.has('last_name')) {
+    if (keySet.has('organization') && keySet.has('service') && keySet.has('email')) return 'LinkedIn CSV'
+  }
+  if (normalizedFilename.includes('outlook') || keySet.has('phone_alt') || keySet.has('email_alt')) {
+    return 'Outlook CSV'
+  }
+  return 'CSV'
+}
+
+function contactFromImportedBase(base, source = 'CSV') {
+  const phones = uniqueImportValues([base.phone, base.phone_alt])
+  const emails = uniqueImportValues([base.email, base.email_alt])
+  const phone = phones[0] || ''
+  const email = emails[0] || ''
+  const composedName = [base.first_name, base.last_name].filter(Boolean).join(' ').trim()
+  const name = String(base.name || '').trim() || composedName || email || 'Contato importado'
+  if (!name || (!phone && !email)) return null
+  const noteParts = [
+    base.note,
+    email && !String(base.note || '').includes(email) ? `Email: ${email}` : '',
+    emails.length > 1 ? `Emails extras: ${emails.slice(1).join(', ')}` : '',
+    phones.length > 1 ? `Telefones extras: ${phones.slice(1).join(', ')}` : '',
+  ].filter(Boolean)
+  const address = String(base.address || '').trim()
+  const city = String(base.city || '').trim()
+  return {
+    name,
+    phone: phone || `sem-telefone-${normalize(name) || Date.now()}`,
+    service: inferImportedService(base),
+    city: city || 'Minha região',
+    address: address || city,
+    note: noteParts.join('\n'),
+    email,
+    phones: phones.map((value, index) => ({ phone: value, label: index === 0 ? 'Principal' : 'Telefone extra' })),
+    emails: emails.map((value, index) => ({ email: value, label: index === 0 ? 'Principal' : 'Email extra' })),
+    organization: String(base.organization || '').trim(),
+    description: String(base.description || '').trim(),
+    tags: String(base.tags || '').trim(),
+    demand: String(base.demand || '').trim(),
+    solves: String(base.solves || '').trim(),
+    linkedin: String(base.linkedin || '').trim(),
+    instagram: String(base.instagram || '').trim(),
+    custom_url: String(base.custom_url || '').trim(),
+    source,
+  }
+}
+
+function parseCsvContacts(text, filename = '') {
+  const delimiter = detectCsvDelimiter(text)
+  const rows = parseDelimitedRows(text, delimiter)
+  if (!rows.length) return []
+  const [firstRow, ...rest] = rows
+  const hasHeader = looksLikeHeaderRow(firstRow)
+  const headerMap = hasHeader ? firstRow.map(findCsvHeaderKey) : []
+  const dataRows = hasHeader ? rest : rows
+  const detectedSource = detectImportedFileSource(filename, headerMap)
+
+  return dataRows
+    .map((row) => {
+      if (hasHeader) {
+        const base = {}
+        headerMap.forEach((key, index) => {
+          if (key) base[key] = row[index] || ''
+        })
+        return contactFromImportedBase(base, detectedSource)
+      }
+      return contactFromImportedBase(
+        {
+          name: row[0] || '',
+          phone: row[1] || '',
+          service: row[2] || '',
+          city: row[3] || '',
+          address: row[4] || '',
+          note: row[5] || '',
+          email: row[6] || '',
+          organization: row[7] || '',
+        },
+        detectedSource,
+      )
+    })
+    .filter(Boolean)
+    .slice(0, 200)
+}
+
+function decodeVCardValue(value) {
+  return String(value || '').replace(/\\n/gi, '\n').replace(/\\,/g, ',').replace(/\\;/g, ';').trim()
+}
+
+function parseVCardContacts(text) {
+  const unfolded = text.replace(/\r?\n[ \t]/g, '')
+  const cards = unfolded.split(/BEGIN:VCARD/i).slice(1)
+  return cards
+    .map((card, index) => {
+      const lines = card.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+      const data = { source: 'VCF' }
+      lines.forEach((line) => {
+        const [rawKey, ...valueParts] = line.split(':')
+        if (!rawKey || !valueParts.length) return
+        const value = decodeVCardValue(valueParts.join(':'))
+        const key = normalize(rawKey.split(';')[0])
+        if (key === 'fn' && !data.name) data.name = value
+        if (key === 'tel' && !data.phone) data.phone = value
+        if (key === 'email' && !data.email) data.email = value
+        if (key === 'org' && !data.organization) data.organization = value.replace(/;/g, ' · ')
+        if (key === 'title' && !data.service) data.service = value
+        if (key === 'note' && !data.note) data.note = value
+        if (key === 'adr' && !data.address) data.address = value.replace(/;/g, ', ').replace(/,\s*,/g, ', ').trim()
+        if (key === 'url' && !data.custom_url) data.custom_url = value
+      })
+      if (!data.name && data.email) data.name = data.email
+      return contactFromImportedBase(data, 'VCF') ?? {
+        name: `Contato VCF ${index + 1}`,
+        phone: `vcf-${index + 1}`,
+        service: inferImportedService(data),
+        city: 'Minha região',
+        address: data.address || '',
+        note: data.note || '',
+        email: data.email || '',
+        organization: data.organization || '',
+        custom_url: data.custom_url || '',
+        source: 'VCF',
       }
     })
-    .filter((item) => item.name && item.phone)
+    .filter(Boolean)
     .slice(0, 200)
+}
+
+function parseImportedContacts(text, filename = '') {
+  const normalizedFilename = normalize(filename)
+  const trimmed = String(text || '').trim()
+  if (!trimmed) return []
+  if (normalizedFilename.endsWith('.vcf') || /BEGIN:VCARD/i.test(trimmed)) {
+    return parseVCardContacts(trimmed)
+  }
+  return parseCsvContacts(trimmed, filename)
 }
 
 function googlePersonToContact(person, index) {
@@ -1839,6 +2415,7 @@ function Shell({
   const primaryTabs = [
     { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: LayoutGrid, page: 'dashboard' },
     { label: 'Agenda', path: ROUTES.AGENDA, icon: ContactRound, page: 'agenda' },
+    { label: 'Busca', path: ROUTES.SEARCH, icon: Search, page: 'search' },
     { label: 'Grafo privado', path: ROUTES.GRAPH, icon: Route, page: 'graph' },
     { label: 'Feed', path: ROUTES.FEED, icon: Bell, page: 'feed' },
     { label: 'Grupos', path: ROUTES.GROUPS, icon: UsersRound, page: 'groups' },
@@ -1846,6 +2423,7 @@ function Shell({
   const menuTabs = [
     { label: 'Novo contato', path: ROUTES.NEW, icon: Plus, page: 'new' },
     { label: 'CRM', path: ROUTES.CRM, icon: Activity, page: 'crm' },
+    { label: 'Busca inteligente', path: ROUTES.SEARCH, icon: Search, page: 'search' },
     { label: 'Grafo privado', path: ROUTES.GRAPH, icon: Route, page: 'graph' },
     { label: 'Mapa', path: ROUTES.MAP, icon: Map, page: 'map' },
     { label: 'Chat', path: ROUTES.CHAT, icon: MessageCircle, page: 'chat' },
@@ -1860,8 +2438,13 @@ function Shell({
   if (isAdmin) {
     menuTabs.push({ label: 'Conexões', path: ROUTES.CONNECTIONS, icon: ShieldCheck, page: 'connections' })
   }
-  const activePage = route.page === 'duplicates' || (user && route.page === 'register') ? 'settings' : route.page
-  const menuPages = new Set(menuTabs.map((tab) => (tab.page === 'duplicates' || tab.page === 'register' ? 'settings' : tab.page)))
+  const normalizeMenuPage = (page) => {
+    if (page === 'duplicates' || (user && page === 'register') || page === 'import' || page === 'customFields') return 'settings'
+    if (page === 'groupAdmin') return 'groups'
+    return page
+  }
+  const activePage = normalizeMenuPage(route.page)
+  const menuPages = new Set(menuTabs.map((tab) => normalizeMenuPage(tab.page)))
   const menuActive = menuPages.has(activePage)
 
   function go(path) {
@@ -1906,6 +2489,7 @@ function Shell({
       items: [
         { label: 'Novo contato', path: ROUTES.NEW, icon: Plus, page: 'new', hint: 'Importar ou cadastrar' },
         { label: 'CRM', path: ROUTES.CRM, icon: Activity, page: 'crm', hint: 'Pipeline e follow-up' },
+        { label: 'Busca inteligente', path: ROUTES.SEARCH, icon: Search, page: 'search', hint: 'Leitura semântica' },
         { label: 'Grafo privado', path: ROUTES.GRAPH, icon: Route, page: 'graph', hint: 'Rede pessoal' },
         { label: 'Mapa', path: ROUTES.MAP, icon: Map, page: 'map', hint: 'Grafo privado' },
         { label: 'Chat', path: ROUTES.CHAT, icon: MessageCircle, page: 'chat', hint: 'Copiloto' },
@@ -1976,10 +2560,10 @@ function Shell({
               <p className="text-[10px] font-black uppercase tracking-widest text-cyan-300">Notificações</p>
               <p className="mt-1 text-xs font-semibold text-slate-400">
                 {notificationPermission === 'granted'
-                  ? 'Permissão ativa. Push real pode ser integrado depois.'
+                  ? 'Permissão ativa. Este dispositivo já tenta se registrar para push web.'
                   : notificationPermission === 'denied'
-                    ? 'Permissão bloqueada. A função ficará como preparação.'
-                    : 'Prepare a base para notificações futuras.'}
+                    ? 'Permissão bloqueada. Libere no navegador para registrar o dispositivo.'
+                    : 'Ative para registrar este dispositivo e preparar alertas.'}
               </p>
               <button type="button" onClick={onEnableNotifications} className="secondary-button mt-2 inline-flex h-8 w-full items-center justify-center rounded-lg px-2 text-xs font-black">
                 {notificationPermission === 'granted' ? 'Revisar permissão' : 'Ativar notificações'}
@@ -2320,7 +2904,7 @@ function SearchBox({ value, onChange, onSearch, recents, contacts, onFocusChange
   const typed = normalize(value).trim()
   const suggestedContacts = typed
     ? contacts
-        .filter((contact) => matchText(value, [contact.name, contact.phone, contact.service, contact.city]))
+        .filter((contact) => matchText(value, [contact.name, contact.phone, contact.service, contact.city, contact.organization, contact.demand, contact.demand_tags, contact.solves, ...contactCustomFieldSearchValues(contact)]))
         .sort((a, b) => a.name.localeCompare(b.name))
         .slice(0, 8)
     : contacts.slice(0, 4)
@@ -2443,6 +3027,82 @@ function PageTitle({ eyebrow, title, description, action }) {
   )
 }
 
+function GraphWorkspaceLoading({ title, description, contextLabel }) {
+  return (
+    <section className="glass-panel rounded-lg p-4">
+      <p className="text-xs font-black uppercase tracking-widest text-cyan-400">{contextLabel}</p>
+      <h2 className="mt-1 text-xl font-black text-slate-100">{title}</h2>
+      <p className="mt-1 text-sm font-semibold text-slate-500">{description}</p>
+      <div className="mt-4 rounded-lg border border-dashed border-slate-800 p-6 text-sm font-semibold text-slate-500">
+        Carregando visualização do grafo...
+      </div>
+    </section>
+  )
+}
+
+function NetworkGraphMapLoading() {
+  return (
+    <section className="glass-panel rounded-lg p-4">
+      <div className="rounded-lg border border-dashed border-slate-800 p-6 text-sm font-semibold text-slate-500">
+        Carregando mapa e grafo de proximidade...
+      </div>
+    </section>
+  )
+}
+
+function DeferredGraphWorkspace(props) {
+  return (
+    <Suspense fallback={<GraphWorkspaceLoading title={props.title} description={props.description} contextLabel={props.contextLabel} />}>
+      <LazyGraphWorkspaceSection {...props} />
+    </Suspense>
+  )
+}
+
+function DeferredNetworkGraphMap(props) {
+  return (
+    <Suspense fallback={<NetworkGraphMapLoading />}>
+      <LazyNetworkGraphMapSection {...props} apiRequest={apiRequest} googleMapsApiKey={GOOGLE_MAPS_API_KEY} />
+    </Suspense>
+  )
+}
+
+function RoutePageLoading({ eyebrow, title, description }) {
+  return (
+    <section className="glass-panel rounded-lg p-4">
+      {eyebrow ? <p className="text-xs font-black uppercase tracking-widest text-cyan-400">{eyebrow}</p> : null}
+      <h2 className="mt-1 text-xl font-black text-slate-100">{title}</h2>
+      <p className="mt-1 text-sm font-semibold text-slate-500">{description}</p>
+      <div className="mt-4 rounded-lg border border-dashed border-slate-800 p-6 text-sm font-semibold text-slate-500">
+        Carregando módulo...
+      </div>
+    </section>
+  )
+}
+
+function DeferredChatPage(props) {
+  return (
+    <Suspense fallback={<RoutePageLoading eyebrow="Copiloto" title="Carregando chat" description="Preparando conversa, sugestões e threads." />}>
+      <LazyChatPageSection {...props} />
+    </Suspense>
+  )
+}
+
+function DeferredSettingsPage(props) {
+  return (
+    <Suspense fallback={<RoutePageLoading eyebrow="Configurações" title="Carregando menu da conta" description="Abrindo preferências, estrutura e dados locais." />}>
+      <LazySettingsPageSection {...props} />
+    </Suspense>
+  )
+}
+
+function DeferredGroupsPage(props) {
+  return (
+    <Suspense fallback={<RoutePageLoading eyebrow="Grupos" title="Carregando grupos compartilhados" description="Preparando chat, grafo e contexto do grupo." />}>
+      <LazyGroupsPageSection {...props} />
+    </Suspense>
+  )
+}
+
 function CategoryButtons({ contacts, activeCategory = 'all', onNavigate, onSelect }) {
   const counts = useMemo(() => {
     const next = { all: contacts.length }
@@ -2510,8 +3170,21 @@ function ContactAvatar({ contact }) {
   )
 }
 
-function ContactRow({ contact, onDelete, onToast, onEdit, onOpen }) {
+function ContactRow({
+  contact,
+  onDelete,
+  onToast,
+  onEdit,
+  onOpen,
+  isSelected = false,
+  onToggleSelect = null,
+  duplicateLabel = '',
+}) {
   const phone = formatPhoneForLink(contact.phone)
+  const linkedPlatform = hasContactPlatformLink(contact)
+  const linkedPlatformLabel = contactPlatformLinkLabel(contact, 'Usuário da plataforma')
+  const publicProfileLabel = contactPublicProfileLabel(contact)
+  const matchCount = contactPotentialMatches(contact).length
 
   function openWhatsApp() {
     if (!phone) {
@@ -2530,18 +3203,39 @@ function ContactRow({ contact, onDelete, onToast, onEdit, onOpen }) {
   }
 
   return (
-    <article className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 border-b border-slate-800/70 bg-transparent px-3 py-3 transition hover:bg-cyan-500/[0.035] last:border-b-0 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:gap-3 sm:px-4">
+    <article className={['grid grid-cols-[auto_auto_minmax(0,1fr)] items-center gap-2 border-b px-3 py-3 transition last:border-b-0 sm:grid-cols-[auto_auto_minmax(0,1fr)_auto] sm:gap-3 sm:px-4', duplicateLabel ? 'border-amber-400/20 bg-amber-400/[0.045] hover:bg-amber-400/[0.08]' : 'border-slate-800/70 bg-transparent hover:bg-cyan-500/[0.035]'].join(' ')}>
+      {onToggleSelect ? (
+        <button
+          type="button"
+          onClick={() => onToggleSelect(contact)}
+          className={['flex h-8 w-8 items-center justify-center rounded-lg border transition', isSelected ? 'border-cyan-400 bg-cyan-500 text-slate-950' : 'border-slate-800 bg-slate-950/45 text-slate-500 hover:border-cyan-400/30 hover:text-cyan-100'].join(' ')}
+          aria-pressed={isSelected}
+          aria-label={`${isSelected ? 'Desmarcar' : 'Selecionar'} ${contact.name}`}
+        >
+          <Check size={14} />
+        </button>
+      ) : null}
       <ContactAvatar contact={contact} />
       <button type="button" onClick={() => (onOpen ? onOpen(contact) : onEdit(contact))} className="min-w-0 flex-1 text-left" aria-label={`Abrir ${contact.name}`}>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <h3 className="truncate text-[15px] font-black text-slate-100">{contact.name}</h3>
           {contact.trust === 'Favorito' ? <Sparkles size={15} className="shrink-0 text-amber-500" /> : null}
+          {duplicateLabel ? <span className="rounded-md border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-amber-200">{duplicateLabel}</span> : null}
         </div>
         <p className="truncate text-sm font-semibold text-slate-400">{contact.service}</p>
         <p className="truncate text-xs font-medium text-slate-500">{contact.phone} - {contact.city}</p>
-        <span className="mt-1 inline-flex max-w-full items-center gap-1 rounded-md bg-slate-950/60 px-2 py-0.5 text-[11px] font-black text-cyan-100/75">
-          {contact.crm_status ?? 'Novo'}{contact.next_follow_up_at ? ` · ${formatFollowUp(contact.next_follow_up_at)}` : ''}
-        </span>
+        <div className="mt-1 flex flex-wrap gap-1.5">
+          <span className="inline-flex max-w-full items-center gap-1 rounded-md bg-slate-950/60 px-2 py-0.5 text-[11px] font-black text-cyan-100/75">
+            {contact.crm_status ?? 'Novo'}{contact.next_follow_up_at ? ` · ${formatFollowUp(contact.next_follow_up_at)}` : ''}
+          </span>
+          {linkedPlatform ? <span title={linkedPlatformLabel} className="rounded-md border border-emerald-400/25 bg-emerald-400/10 px-2 py-0.5 text-[10px] font-black text-emerald-200">Na plataforma</span> : null}
+          {publicProfileLabel ? <span title={publicProfileLabel} className="rounded-md border border-fuchsia-400/25 bg-fuchsia-400/10 px-2 py-0.5 text-[10px] font-black text-fuchsia-100">Perfil público</span> : null}
+          {matchCount ? <span className="rounded-md border border-amber-400/25 bg-amber-400/10 px-2 py-0.5 text-[10px] font-black text-amber-100">{matchCount} match{matchCount === 1 ? '' : 'es'}</span> : null}
+          {contact.ddd ? <span className="rounded-md border border-slate-800 bg-slate-950/45 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-slate-400">DDD {contact.ddd}</span> : null}
+          {(contactTags(contact) || []).slice(0, 3).map((tag) => (
+            <span key={tag} className="rounded-md border border-slate-800 bg-slate-950/45 px-2 py-0.5 text-[10px] font-black text-slate-300">{tag}</span>
+          ))}
+        </div>
       </button>
       <div className="hidden shrink-0 items-center gap-1 sm:flex">
         <button type="button" onClick={() => onEdit(contact)} className="secondary-button rounded-lg p-2 text-slate-300" aria-label={`Editar ${contact.name}`}>
@@ -2561,8 +3255,20 @@ function ContactRow({ contact, onDelete, onToast, onEdit, onOpen }) {
   )
 }
 
-function ContactList({ contacts, onDelete, onToast, onEdit = () => {}, onOpen, emptyLabel = 'Nenhum contato encontrado.' }) {
-  const grouped = useMemo(() => {
+function ContactList({
+  contacts,
+  onDelete,
+  onToast,
+  onEdit = () => {},
+  onOpen,
+  emptyLabel = 'Nenhum contato encontrado.',
+  selectedIds = [],
+  onToggleSelect = null,
+  duplicateLabelsById = {},
+  useGroupedLayout = true,
+}) {
+  const selectedIdSet = useMemo(() => new Set(selectedIds.map((item) => String(item))), [selectedIds])
+  const groupedContacts = useMemo(() => {
     const byLetter = {}
     contacts
       .slice()
@@ -2575,12 +3281,32 @@ function ContactList({ contacts, onDelete, onToast, onEdit = () => {}, onOpen, e
     return byLetter
   }, [contacts])
 
-  const letters = Object.keys(grouped).sort()
-  if (!letters.length) {
+  const letters = Object.keys(groupedContacts).sort()
+  if (!contacts.length) {
     return (
       <div className="glass-panel rounded-lg border-dashed p-8 text-center">
         <ContactRound className="mx-auto text-slate-700" size={34} />
         <p className="mt-3 text-sm font-black text-slate-200">{emptyLabel}</p>
+      </div>
+    )
+  }
+
+  if (!useGroupedLayout) {
+    return (
+      <div className="glass-panel overflow-hidden rounded-lg">
+        {contacts.map((contact) => (
+          <ContactRow
+            key={contact.id}
+            contact={contact}
+            onDelete={onDelete}
+            onToast={onToast}
+            onEdit={onEdit}
+            onOpen={onOpen}
+            isSelected={selectedIdSet.has(String(contact.id))}
+            onToggleSelect={onToggleSelect}
+            duplicateLabel={duplicateLabelsById[String(contact.id)] || ''}
+          />
+        ))}
       </div>
     )
   }
@@ -2590,8 +3316,18 @@ function ContactList({ contacts, onDelete, onToast, onEdit = () => {}, onOpen, e
       {letters.map((letter) => (
         <section key={letter}>
           <div className="border-b border-slate-800/70 bg-slate-950/45 px-4 py-1.5 text-xs font-black text-slate-500">{letter}</div>
-          {grouped[letter].map((contact) => (
-            <ContactRow key={contact.id} contact={contact} onDelete={onDelete} onToast={onToast} onEdit={onEdit} onOpen={onOpen} />
+          {groupedContacts[letter].map((contact) => (
+            <ContactRow
+              key={contact.id}
+              contact={contact}
+              onDelete={onDelete}
+              onToast={onToast}
+              onEdit={onEdit}
+              onOpen={onOpen}
+              isSelected={selectedIdSet.has(String(contact.id))}
+              onToggleSelect={onToggleSelect}
+              duplicateLabel={duplicateLabelsById[String(contact.id)] || ''}
+            />
           ))}
         </section>
       ))}
@@ -2612,7 +3348,7 @@ function CrmPage({ contacts, onEdit, onCompleteFollowUp, onCancelFollowUp, onNav
     { id: 'untagged', label: 'Sem tags', description: 'Contatos para revisar', count: untaggedContacts.length },
   ]
   const scopedContacts = scope === 'active' ? activeCrmContacts : scope === 'tagged' ? taggedContacts : scope === 'untagged' ? untaggedContacts : contacts
-  const visibleContacts = scopedContacts.filter((contact) => !query.trim() || matchText(query, [contact.name, contact.phone, contact.service, contact.city, contact.address, contact.category?.label, contact.category?.group, contact.crm_status, contact.crm_priority, contact.crm_note]))
+  const visibleContacts = scopedContacts.filter((contact) => !query.trim() || matchText(query, [contact.name, contact.phone, contact.service, contact.city, contact.address, contact.category?.label, contact.category?.group, contact.crm_status, contact.crm_priority, contact.crm_note, contact.organization, contact.demand, contact.demand_tags, contact.solves, ...contactCustomFieldSearchValues(contact)]))
   const followUpContacts = visibleContacts.filter((contact) => contact.next_follow_up_at).sort((a, b) => followUpTimestamp(a.next_follow_up_at) - followUpTimestamp(b.next_follow_up_at))
   const dueContacts = followUpContacts.filter((contact) => isDue(contact.next_follow_up_at))
   const highPriority = visibleContacts.filter((contact) => contact.crm_priority === 'Alta')
@@ -3016,7 +3752,7 @@ function DashboardPage({ contacts, duplicateCount, backendOnline, onNavigate, on
             <div className="grid gap-2 p-3 sm:grid-cols-2">
               <DashboardAction icon={Activity} title="Abrir CRM ativo" description={`${activeCrm.length} contato${activeCrm.length === 1 ? '' : 's'} com movimento.`} onClick={() => onNavigate(ROUTES.CRM)} />
               <DashboardAction icon={CheckCircle} title="Revisar duplicados" description={`${duplicateCount} sugest${duplicateCount === 1 ? 'ão' : 'ões'} para aprovar ou ignorar.`} onClick={() => onNavigate(ROUTES.DUPLICATES)} />
-              <DashboardAction icon={Upload} title="Importar contatos" description="Google, CSV ou cadastro manual." onClick={() => onNavigate(ROUTES.SETTINGS)} />
+              <DashboardAction icon={Upload} title="Importar contatos" description="Google, CSV ou cadastro manual." onClick={() => onNavigate(ROUTES.IMPORT)} />
               <DashboardAction icon={MapPin} title="Ver mapa" description="Localização, DDD e proximidade." onClick={() => onNavigate(ROUTES.MAP)} />
               <DashboardAction icon={Bell} title="Abrir feed" description="Mural público e interação por oferta e demanda." onClick={() => onNavigate(ROUTES.FEED)} />
               <DashboardAction icon={UsersRound} title="Ver grupos" description="Chat, grafo e dados do grupo separados." onClick={() => onNavigate(ROUTES.GROUPS)} />
@@ -3246,10 +3982,15 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
 
   const category = contact.category ?? categoryDetails(null, contact.service)
   const tags = contactTags(contact)
+  const demandTags = contactDemandTags(contact)
   const phones = contactPhones(contact)
   const emails = contactEmails(contact)
   const ddd = contact.ddd || phones.find((item) => item.ddd)?.ddd || extractDdd(contact.phone)
   const fields = contact.custom_field_values?.length ? contact.custom_field_values : parseCustomFields(contact.custom_fields)
+  const linkedPlatform = hasContactPlatformLink(contact)
+  const linkedPlatformLabel = contactPlatformLinkLabel(contact, 'Usuário da plataforma')
+  const publicProfileLabel = contactPublicProfileLabel(contact)
+  const potentialMatches = contactPotentialMatches(contact)
   const socialLinks = [
     { label: 'WhatsApp', value: contact.whatsapp, icon: MessageCircle, href: formatPhoneForLink(contact.whatsapp) ? `https://wa.me/55${formatPhoneForLink(contact.whatsapp)}` : '' },
     { label: 'Instagram', value: contact.instagram, icon: ContactRound, href: contact.instagram ? `https://instagram.com/${String(contact.instagram).replace('@', '').replace(/^https?:\/\/(www\.)?instagram\.com\//, '')}` : '' },
@@ -3297,7 +4038,15 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
         <div className="space-y-4">
           <ContactInfoBlock title="Descrição" value={contact.description || contact.note || 'Sem descrição.'} />
           <div className="grid gap-4 md:grid-cols-2">
-            <ContactInfoBlock title="O que demanda atualmente" value={contact.demand || 'Sem demanda registrada.'} />
+            <div className="glass-panel rounded-lg p-4">
+              <h2 className="text-sm font-black text-slate-100">O que demanda atualmente</h2>
+              <p className="mt-2 whitespace-pre-wrap text-sm font-medium leading-relaxed text-slate-400">{contact.demand || 'Sem demanda registrada.'}</p>
+              {demandTags.length ? (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {demandTags.map((tag) => <span key={tag} className="rounded-md border border-amber-400/15 bg-amber-400/10 px-2 py-1 text-[11px] font-black text-amber-100">{tag}</span>)}
+                </div>
+              ) : null}
+            </div>
             <ContactInfoBlock title="Problema que resolve" value={contact.solves || 'Sem problema registrado.'} />
           </div>
           <div className="glass-panel rounded-lg p-4">
@@ -3339,6 +4088,7 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
                   <div className="mt-2 grid gap-1.5">
                     {phones.map((item, index) => (
                       <p key={`${item.phone}-${index}`} className="text-sm font-semibold text-slate-200">
+                        {item.label ? <span className="mr-2 rounded-md border border-slate-700 bg-slate-900/60 px-1.5 py-0.5 text-[10px] font-black uppercase tracking-widest text-slate-400">{item.label}</span> : null}
                         {item.phone}
                         {item.ddd ? <span className="ml-2 rounded-md bg-cyan-400/10 px-1.5 py-0.5 text-[11px] font-black text-cyan-200">DDD {item.ddd}</span> : null}
                       </p>
@@ -3350,7 +4100,12 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
                 <div className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
                   <p className="text-xs font-black uppercase tracking-widest text-slate-500">Emails</p>
                   <div className="mt-2 grid gap-1.5">
-                    {emails.map((item, index) => <p key={`${item.email}-${index}`} className="break-all text-sm font-semibold text-slate-200">{item.email}</p>)}
+                    {emails.map((item, index) => (
+                      <p key={`${item.email}-${index}`} className="break-all text-sm font-semibold text-slate-200">
+                        {item.label ? <span className="mr-2 rounded-md border border-slate-700 bg-slate-900/60 px-1.5 py-0.5 text-[10px] font-black uppercase tracking-widest text-slate-400">{item.label}</span> : null}
+                        {item.email}
+                      </p>
+                    ))}
                   </div>
                 </div>
               ) : null}
@@ -3370,8 +4125,34 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
             <h2 className="text-sm font-black text-slate-100">Origem</h2>
             <div className="mt-3 grid gap-2 text-sm">
               <DetailRow label="Fonte" value={contact.source || 'Manual'} />
+              <DetailRow label="Empresa" value={contact.organization || 'Não informada'} />
+              <DetailRow label="Plataforma" value={linkedPlatform ? linkedPlatformLabel : 'Sem vínculo'} />
+              <DetailRow label="Perfil público" value={publicProfileLabel || 'Sem vínculo'} />
               <DetailRow label="Endereço" value={contact.address || 'Não informado'} />
               <DetailRow label="Criado em" value={contact.created_at || '-'} />
+            </div>
+          </div>
+
+          <div className="glass-panel rounded-lg p-4">
+            <h2 className="text-sm font-black text-slate-100">Complementaridade</h2>
+            <div className="mt-3 grid gap-2">
+              {potentialMatches.length ? potentialMatches.map((match) => (
+                <div key={`${match.contact_id}-${match.name}`} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-black text-slate-100">{match.name}</p>
+                      <p className="mt-1 text-xs font-semibold text-slate-400">{match.service || 'Contato relacionado'}</p>
+                    </div>
+                    <span className="rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-amber-100">{match.score || 0}</span>
+                  </div>
+                  {Array.isArray(match.overlap) && match.overlap.length ? (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {match.overlap.map((item) => <span key={item} className="rounded-md border border-amber-400/15 bg-amber-400/10 px-2 py-1 text-[10px] font-black text-amber-100">{item}</span>)}
+                    </div>
+                  ) : null}
+                  {match.reason ? <p className="mt-2 text-xs font-medium text-slate-500">{match.reason}</p> : null}
+                </div>
+              )) : <p className="text-sm font-semibold text-slate-500">Nenhuma complementaridade forte detectada ainda.</p>}
             </div>
           </div>
         </aside>
@@ -3444,16 +4225,6 @@ function PublicNetworkPage({ publicProfiles, contacts, user, onNavigate, onOpenG
   const visibleGroups = groups.filter((profile) => matchText(query, [profile.name, profile.service, profile.area, profile.category?.label]))
   const userIsVisible = people.some((profile) => String(profile.source_user_id ?? profile.id) === currentUserId)
 
-  if (!hasGoogleConnection(user)) {
-    return (
-      <GoogleRequiredPanel
-        title="Rede pública bloqueada"
-        description="A rede pública usa dados conectados para evitar perfis soltos e manter sua conta salva corretamente."
-        onNavigate={onNavigate}
-      />
-    )
-  }
-
   return (
     <div className="space-y-4">
       <PageTitle
@@ -3489,7 +4260,7 @@ function PublicNetworkPage({ publicProfiles, contacts, user, onNavigate, onOpenG
         </div>
       ) : null}
 
-      <GraphWorkspace
+      <DeferredGraphWorkspace
         contextLabel="Grafo público"
         title="Rede visível em grafo"
         description="Cruze perfis públicos, serviços e vínculos com a sua agenda para encontrar oportunidades e complementaridades."
@@ -3704,15 +4475,290 @@ function PublicProfileText({ label, value }) {
 }
 
 function contactMatchesProfile(contact, profile) {
-  const samePhone = formatPhoneForLink(contact?.phone || contact?.whatsapp) && formatPhoneForLink(contact?.phone || contact?.whatsapp) === formatPhoneForLink(profile?.phone || profile?.whatsapp)
-  const sameEmail = contact?.email && profile?.email && normalize(contact.email) === normalize(profile.email)
-  return samePhone || sameEmail
+  const contactPhones = contactPhoneCandidates(contact)
+  const contactEmails = contactEmailCandidates(contact)
+  const contactLinks = contactLinkCandidates(contact)
+  const profilePhones = uniqueImportValues([profile?.phone, profile?.whatsapp]).map(formatPhoneForLink).filter(Boolean)
+  const profileEmails = uniqueImportValues([profile?.email]).map((value) => normalize(value)).filter(Boolean)
+  const profileLinks = uniqueImportValues([profile?.linkedin, profile?.instagram, profile?.custom_url]).map(normalizeSocialLink).filter(Boolean)
+  const samePhone = contactPhones.some((value) => profilePhones.includes(value))
+  const sameEmail = contactEmails.some((value) => profileEmails.includes(value))
+  const sameLink = contactLinks.some((value) => profileLinks.includes(value))
+  return samePhone || sameEmail || sameLink
 }
 
 function contactMatchesUser(contact, profile) {
-  const samePhone = formatPhoneForLink(contact?.phone || contact?.whatsapp) && formatPhoneForLink(contact?.phone || contact?.whatsapp) === formatPhoneForLink(profile?.phone)
-  const sameEmail = contact?.email && profile?.email && normalize(contact.email) === normalize(profile.email)
+  const contactPhones = contactPhoneCandidates(contact)
+  const contactEmails = contactEmailCandidates(contact)
+  const profilePhones = uniqueImportValues([profile?.phone]).map(formatPhoneForLink).filter(Boolean)
+  const profileEmails = uniqueImportValues([profile?.email]).map((value) => normalize(value)).filter(Boolean)
+  const samePhone = contactPhones.some((value) => profilePhones.includes(value))
+  const sameEmail = contactEmails.some((value) => profileEmails.includes(value))
   return samePhone || sameEmail
+}
+
+function hasContactPlatformLink(contact) {
+  return Boolean(contact?.platform_match || contact?.public_profile_match || contact?.linked_user_id || contact?.linked_user_email || contact?.linkedPlatform || contact?.linkedLabel)
+}
+
+function contactPlatformLinkLabel(contact, fallback = '') {
+  const label = String(
+    contact?.platform_match?.name
+    || contact?.linked_user_name
+    || contact?.linkedLabel
+    || contact?.platform_match?.email
+    || contact?.linked_user_email
+    || '',
+  ).trim()
+  return label || fallback
+}
+
+function contactPublicProfileLabel(contact, fallback = '') {
+  const label = String(contact?.public_profile_match?.name || '').trim()
+  return label || fallback
+}
+
+function contactPotentialMatches(contact) {
+  return Array.isArray(contact?.potential_matches) ? contact.potential_matches : []
+}
+
+function semanticSearchIntent(query) {
+  const normalized = normalize(query)
+  if (!normalized.trim()) return 'general'
+  if (/(demanda|precisa|precisando|procura|procurando|busca|buscando|quer|querendo)/.test(normalized)) return 'demand'
+  if (/(resolve|resolver|resolva|faz|fazer|presta|servico|oferece|ajuda|ajudar|especialista|trabalha)/.test(normalized)) return 'solve'
+  if (/(conecta|conectar|introdu|match|parceria|parceiro|complement|indica|indicacao)/.test(normalized)) return 'match'
+  return 'general'
+}
+
+function buildSemanticQueryState(query) {
+  const normalizedQuery = normalize(query).trim()
+  const terms = extractTermTokens(query)
+  return {
+    normalizedQuery,
+    terms: terms.length ? terms : (normalizedQuery ? [normalizedQuery] : []),
+    intent: semanticSearchIntent(query),
+  }
+}
+
+function scoreSemanticField(value, queryState, exactWeight = 10, tokenWeight = 3) {
+  const haystack = normalize(value).trim()
+  if (!haystack || !queryState.normalizedQuery) return 0
+  let score = haystack.includes(queryState.normalizedQuery) ? exactWeight : 0
+  queryState.terms.forEach((term) => {
+    if (term && haystack.includes(term)) score += tokenWeight
+  })
+  return score
+}
+
+function scoreLocalPrivateSearch(contact, queryState) {
+  if (!queryState.normalizedQuery) return 0
+
+  const tags = contactTags(contact)
+  const demandTags = contactDemandTags(contact)
+  const customValues = contactCustomFieldSearchValues(contact)
+  const socialLinks = contactLinkCandidates(contact)
+  const overlapSignals = contactPotentialMatches(contact).flatMap((item) => item?.overlap ?? [])
+
+  let score = 0
+  score += scoreSemanticField(contact.name, queryState, 24, 5)
+  score += scoreSemanticField(contact.service, queryState, 18, 4)
+  score += scoreSemanticField(contact.solves, queryState, 18, 4)
+  score += scoreSemanticField(contact.demand, queryState, 16, 4)
+  score += scoreSemanticField(contact.description, queryState, 12, 3)
+  score += scoreSemanticField(contact.note, queryState, 10, 3)
+  score += scoreSemanticField(contact.organization, queryState, 10, 3)
+  score += scoreSemanticField(contact.ddd, queryState, 10, 3)
+  tags.forEach((tag) => {
+    score += scoreSemanticField(tag, queryState, 14, 4)
+  })
+  demandTags.forEach((tag) => {
+    score += scoreSemanticField(tag, queryState, 13, 4)
+  })
+  customValues.forEach((value) => {
+    score += scoreSemanticField(value, queryState, 11, 3)
+  })
+  socialLinks.forEach((value) => {
+    score += scoreSemanticField(value, queryState, 9, 3)
+  })
+  contactEmailCandidates(contact).forEach((value) => {
+    score += scoreSemanticField(value, queryState, 9, 3)
+  })
+  overlapSignals.forEach((value) => {
+    score += scoreSemanticField(value, queryState, 12, 4)
+  })
+
+  if (queryState.intent === 'demand') {
+    score += scoreSemanticField([contact.demand, ...demandTags].join(' '), queryState, 12, 4)
+  }
+  if (queryState.intent === 'solve') {
+    score += scoreSemanticField([contact.service, contact.solves, ...tags].join(' '), queryState, 12, 4)
+  }
+  if (queryState.intent === 'match') {
+    score += contactPotentialMatches(contact).length ? 8 : 0
+    score += hasContactPlatformLink(contact) ? 4 : 0
+  }
+
+  if (hasContactPlatformLink(contact)) score += 2
+  if (contactPotentialMatches(contact).length) score += Math.min(6, contactPotentialMatches(contact).length * 2)
+
+  return score
+}
+
+function scoreLocalPublicSearch(profile, queryState) {
+  if (!queryState.normalizedQuery) return 0
+
+  const tags = tagList(profile?.tags)
+  let score = 0
+  score += scoreSemanticField(profile.name, queryState, 22, 5)
+  score += scoreSemanticField(profile.service, queryState, 18, 4)
+  score += scoreSemanticField(profile.area, queryState, 12, 3)
+  score += scoreSemanticField(profile.description, queryState, 12, 3)
+  score += scoreSemanticField(profile.demand, queryState, 14, 4)
+  score += scoreSemanticField(profile.solves, queryState, 16, 4)
+  score += scoreSemanticField(profile.category?.label || profile.category, queryState, 12, 3)
+  tags.forEach((tag) => {
+    score += scoreSemanticField(tag, queryState, 13, 4)
+  })
+
+  if (queryState.intent === 'demand') {
+    score += scoreSemanticField([profile.demand, ...tags].join(' '), queryState, 10, 3)
+  }
+  if (queryState.intent === 'solve') {
+    score += scoreSemanticField([profile.service, profile.solves, ...tags].join(' '), queryState, 10, 3)
+  }
+  if (String(profile.kind ?? 'group') === 'person' && profile.source_user_id) score += 2
+
+  return score
+}
+
+function buildLocalSearchInsights(query, privateResults, publicResults) {
+  const normalizedQuery = String(query || '').trim()
+  if (!normalizedQuery) return []
+
+  const insights = []
+  const linkedContacts = privateResults.filter((item) => hasContactPlatformLink(item))
+  const complementary = privateResults.filter((item) => contactPotentialMatches(item).length)
+  const publicPeople = publicResults.filter((profile) => (profile.kind ?? 'group') === 'person')
+  const publicGroups = publicResults.filter((profile) => (profile.kind ?? 'group') !== 'person')
+
+  if (linkedContacts.length) {
+    insights.push(`${linkedContacts.length} contato(s) privado(s) têm vínculo com usuário real ou perfil público da plataforma.`)
+  }
+  if (complementary.length) {
+    const top = complementary[0]
+    const preview = contactPotentialMatches(top).slice(0, 2).map((item) => item.name).join(', ')
+    insights.push(preview ? `${top.name} apareceu com complementaridade forte para ${preview}.` : `${complementary.length} contato(s) privados mostram potencial de match.`)
+  }
+  if (publicPeople.length) {
+    insights.push(`${publicPeople.length} perfil(is) público(s) pessoal(is) entraram no radar para "${normalizedQuery}".`)
+  } else if (publicGroups.length) {
+    insights.push(`${publicGroups.length} grupo(s) ou oferta(s) pública(s) combinam com esse tema.`)
+  }
+
+  return insights.slice(0, 3)
+}
+
+function normalizeSearchPayload(payload) {
+  const query = String(payload?.query || '').trim()
+  const privateResults = Array.isArray(payload?.private_results)
+    ? payload.private_results.map((contact) => ({ ...contact, category: categoryDetails(contact.category, contact.service) }))
+    : []
+  const publicResults = Array.isArray(payload?.public_results)
+    ? payload.public_results.map((profile) => ({ ...profile, category: categoryDetails(profile.category, profile.service) }))
+    : []
+  return {
+    query,
+    private_results: privateResults,
+    public_results: publicResults,
+    has_private_results: payload?.has_private_results ?? privateResults.length > 0,
+    insights: Array.isArray(payload?.insights) && payload.insights.length
+      ? payload.insights
+      : buildLocalSearchInsights(query, privateResults, publicResults),
+  }
+}
+
+function buildLocalSearchPayload({ query, contacts, publicProfiles }) {
+  const queryState = buildSemanticQueryState(query)
+  if (!queryState.normalizedQuery) {
+    return normalizeSearchPayload({
+      query: '',
+      private_results: [],
+      public_results: [],
+      has_private_results: false,
+      insights: [],
+    })
+  }
+
+  const privateResults = contacts
+    .map((contact) => ({ contact, score: scoreLocalPrivateSearch(contact, queryState) }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || String(a.contact.name || '').localeCompare(String(b.contact.name || ''), 'pt-BR', { sensitivity: 'base' }))
+    .map((item) => ({ ...item.contact, semantic_score: item.score }))
+
+  const publicResults = publicProfiles
+    .map((profile) => ({ profile, score: scoreLocalPublicSearch(profile, queryState) }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || String(a.profile.name || '').localeCompare(String(b.profile.name || ''), 'pt-BR', { sensitivity: 'base' }))
+    .map((item) => ({ ...item.profile, semantic_score: item.score }))
+
+  return normalizeSearchPayload({
+    query,
+    private_results: privateResults,
+    public_results: publicResults,
+    has_private_results: privateResults.length > 0,
+    insights: buildLocalSearchInsights(query, privateResults, publicResults),
+  })
+}
+
+function findPersistedLinkedUser(contact, users, currentUser = null) {
+  const linkedUserId = String(contact?.linked_user_id || '').trim()
+  const linkedUserEmail = normalize(contact?.linked_user_email || '')
+  const currentUserId = String(currentUser?.id || '').trim()
+  if (linkedUserId && linkedUserId === currentUserId) return null
+
+  let linkedUser = null
+  if (linkedUserId) {
+    linkedUser = users.find((profile) => String(profile.id) === linkedUserId) ?? null
+  }
+  if (!linkedUser && linkedUserEmail) {
+    linkedUser = users.find((profile) => normalize(profile.email) === linkedUserEmail) ?? null
+  }
+  if (linkedUser && String(linkedUser.id) === currentUserId) return null
+  return linkedUser
+}
+
+function resolveContactPlatformLink({ contact, publicProfiles = [], users = [], currentUser = null }) {
+  const currentEmail = normalize(currentUser?.email)
+  const currentPhone = formatPhoneForLink(currentUser?.phone)
+  const backendMatchedUser = contact?.platform_match
+    ? users.find((profile) => String(profile.id) === String(contact.platform_match.user_id) || normalize(profile.email) === normalize(contact.platform_match.email)) ?? null
+    : null
+  const persistedUser = backendMatchedUser ?? findPersistedLinkedUser(contact, users, currentUser)
+  const persistedPublicProfile = persistedUser
+    ? publicProfiles.find((profile) => (profile.kind ?? 'group') === 'person' && String(profile.source_user_id || '') === String(persistedUser.id)) ?? null
+    : null
+  const backendPublicMatch = contact?.public_profile_match
+    ? publicProfiles.find((profile) => String(profile.id) === String(contact.public_profile_match.profile_id)) ?? null
+    : null
+  const publicMatch = backendPublicMatch ?? persistedPublicProfile ?? publicProfiles.find((profile) => (profile.kind ?? 'group') === 'person' && contactMatchesProfile(contact, profile)) ?? null
+  const heuristicUser = users.find((profile) => normalize(profile.email) !== currentEmail && formatPhoneForLink(profile.phone) !== currentPhone && contactMatchesUser(contact, profile)) ?? null
+  const userMatch = persistedUser ?? heuristicUser
+  return {
+    publicMatch,
+    userMatch,
+    linkedPlatform: Boolean(publicMatch || userMatch || hasContactPlatformLink(contact)),
+    linkedLabel: contactPlatformLinkLabel(contact) || userMatch?.name || publicMatch?.name || userMatch?.email || '',
+  }
+}
+
+function contactMatchesPublicProfile(contact, profile) {
+  const linkedUserId = String(contact?.linked_user_id || '').trim()
+  const sourceUserId = String(profile?.source_user_id || '').trim()
+  const linkedUserEmail = normalize(contact?.linked_user_email || '')
+  if (linkedUserId && sourceUserId && linkedUserId === sourceUserId) return true
+  if (linkedUserEmail && profile?.email && linkedUserEmail === normalize(profile.email)) return true
+  return contactMatchesProfile(contact, profile)
 }
 
 function contactMatchesGroupArea(contact, group) {
@@ -3766,8 +4812,6 @@ function graphLocationCoords(person, fallbackAddress = '') {
 }
 
 function buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser, groups, groupContactsById }) {
-  const currentEmail = normalize(currentUser?.email)
-  const currentPhone = formatPhoneForLink(currentUser?.phone)
   const groupIndex = new globalThis.Map()
 
   groups.forEach((group) => {
@@ -3780,13 +4824,12 @@ function buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser
     })
   })
 
-  return contacts.map((contact) => {
-    const publicMatch = publicProfiles.find((profile) => (profile.kind ?? 'group') === 'person' && contactMatchesProfile(contact, profile))
-    const userMatch = users.find((profile) => normalize(profile.email) !== currentEmail && formatPhoneForLink(profile.phone) !== currentPhone && contactMatchesUser(contact, profile))
+  const baseRecords = contacts.map((contact) => {
+    const link = resolveContactPlatformLink({ contact, publicProfiles, users, currentUser })
     const groupsForContact = groupIndex.get(`${contact.owner_id}:${contact.id}`) ?? []
     const location = graphLocationCoords(contact, contact.address || contact.city || '')
     const graphPoint = graphPositionFromCoords(location.coords)
-    const scopes = ['interno', ...(groupsForContact.length ? ['grupo'] : []), ...(publicMatch ? ['publico'] : [])]
+    const scopes = ['interno', ...(groupsForContact.length ? ['grupo'] : []), ...(link.publicMatch ? ['publico'] : [])]
     return {
       id: `private-${contact.owner_id}-${contact.id}`,
       raw: contact,
@@ -3798,6 +4841,7 @@ function buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser
       ddd: contact.ddd || extractDdd(contact.phone),
       tags: contactTags(contact),
       demand: contact.demand || '',
+      demandTags: contactDemandTags(contact),
       solves: contact.solves || '',
       description: contact.description || contact.note || '',
       category: contact.category ?? classifyService(contact.service),
@@ -3805,8 +4849,8 @@ function buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser
       semanticTypes: graphContactSemanticTypes(contact),
       groupIds: groupsForContact.map((item) => item.id),
       groupNames: groupsForContact.map((item) => item.name),
-      linkedPlatform: Boolean(publicMatch || userMatch),
-      linkedLabel: publicMatch?.name || userMatch?.name || '',
+      linkedPlatform: link.linkedPlatform,
+      linkedLabel: link.linkedLabel,
       linkedInternal: false,
       contactId: contact.id,
       ownerId: contact.owner_id,
@@ -3820,12 +4864,39 @@ function buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser
       actionKind: 'contact',
     }
   })
+
+  const offerSignalsById = new Map(baseRecords.map((record) => [record.id, new Set(contactOfferSignals(record))]))
+  const demandSignalsById = new Map(baseRecords.map((record) => [record.id, new Set(contactComplementaritySignals(record))]))
+
+  return baseRecords.map((record) => {
+    const backendMatches = contactPotentialMatches(record.raw).map((match) => ({
+      id: `private-${record.ownerId}-${match.contact_id}`,
+      name: match.name,
+      overlap: Array.isArray(match.overlap) ? match.overlap : [],
+      score: match.score,
+      reason: match.reason,
+    }))
+    if (backendMatches.length) return { ...record, potentialMatches: backendMatches.slice(0, 4) }
+    const matches = []
+    const demandSignals = demandSignalsById.get(record.id) ?? new Set()
+    if (!demandSignals.size) return { ...record, potentialMatches: [] }
+    baseRecords.forEach((candidate) => {
+      if (candidate.id === record.id) return
+      const offerSignals = offerSignalsById.get(candidate.id) ?? new Set()
+      const overlap = [...demandSignals].filter((signal) => offerSignals.has(signal)).slice(0, 3)
+      if (!overlap.length) return
+      matches.push({ id: candidate.id, name: candidate.name, overlap })
+    })
+    return { ...record, potentialMatches: matches.slice(0, 4) }
+  })
 }
 
-function buildGroupGraphRecords({ group, members, users, currentUser }) {
+function buildGroupGraphRecords({ group, members, contacts, publicProfiles, users, currentUser }) {
   const currentLocation = graphLocationCoords(currentUser, currentUser?.serviceAddress || currentUser?.address || currentUser?.city || group?.area || '')
   const currentCoords = currentLocation.coords || null
-  return (members ?? []).map((member, index) => {
+  const ownerId = contactOwnerId(currentUser)
+
+  const memberRecords = (members ?? []).map((member, index) => {
     const memberUser = users.find((profile) => String(profile.id) === String(member.user_id) || normalize(profile.email) === normalize(member.email)) ?? null
     const fallbackLocation = graphLocationCoords(memberUser || member, memberUser?.serviceAddress || memberUser?.address || memberUser?.city || group?.area || member.email || '')
     const graphPoint = graphPositionFromCoords(fallbackLocation.coords, currentCoords)
@@ -3889,11 +4960,92 @@ function buildGroupGraphRecords({ group, members, users, currentUser }) {
       actionKind: 'member',
     }
   })
+
+  const sharedContactRecords = (contacts ?? []).map((contact) => {
+    const link = resolveContactPlatformLink({ contact, publicProfiles: publicProfiles ?? [], users, currentUser })
+    const location = graphLocationCoords(contact, contact.address || contact.city || group?.area || contact.name || '')
+    const graphPoint = graphPositionFromCoords(location.coords, currentCoords)
+    const distanceKm = currentCoords && location.coords ? distanceBetweenCoordinates(currentCoords, location.coords) : null
+    const tags = contactTags(contact)
+    const belongsToCurrentUser = String(contact.owner_id) === ownerId
+    const scopes = ['grupo', ...(belongsToCurrentUser ? ['interno'] : []), ...(link.publicMatch ? ['publico'] : [])]
+    const ddd = contact.ddd || extractDdd(contact.phone || contact.whatsapp || '')
+    return {
+      id: `group-${group.id}-contact-${contact.owner_id}-${contact.id}`,
+      raw: contact,
+      rawKind: 'contact',
+      memberId: null,
+      userId: link.userMatch?.id || '',
+      name: contact.name,
+      service: contact.service || contact.solves || contact.category?.label || group?.area || 'Contato compartilhado',
+      city: location.label || contact.city || contact.address || group.name,
+      address: location.query,
+      source: contact.source || 'Contato compartilhado',
+      ddd,
+      tags,
+      demand: contact.demand || '',
+      demandTags: contactDemandTags(contact),
+      solves: contact.solves || '',
+      description: contact.description || contact.note || '',
+      category: contact.category ?? classifyService([contact.service, contact.solves, contact.tags].filter(Boolean).join(' ')),
+      scopes,
+      semanticTypes: graphContactSemanticTypes({
+        ...contact,
+        source: contact.source || 'Contato compartilhado',
+        tags,
+        ddd,
+        linkedPlatform: link.linkedPlatform,
+        scopes,
+        organization: contact.organization || contact.company || contact.org || '',
+        company: contact.company || '',
+        org: contact.org || '',
+      }),
+      groupIds: [String(group.id)],
+      groupNames: [group.name],
+      linkedPlatform: link.linkedPlatform,
+      linkedLabel: link.linkedLabel,
+      linkedInternal: belongsToCurrentUser,
+      contactId: contact.id,
+      ownerId: contact.owner_id,
+      trust: distanceKm === null ? 'Contato compartilhado' : distanceKm < 10 ? 'Perto' : distanceKm < 50 ? 'Mesmo eixo' : 'Remoto',
+      role: 'shared_contact',
+      roleLabel: 'Contato compartilhado',
+      kind: 'contact',
+      locationQuery: location.query,
+      locationLabel: location.label,
+      locationSourceLabel: location.sourceLabel,
+      distanceKm,
+      distanceLabel: formatDistanceKm(distanceKm),
+      distanceSourceLabel: distanceKm === null ? 'sem localização' : location.source.startsWith('ddd') ? 'por DDD' : 'por endereço',
+      graphX: graphPoint?.x,
+      graphY: graphPoint?.y,
+      graphZ: distanceKm === null ? 0 : Math.max(0, 70 - Math.min(70, distanceKm / 2)),
+      actionLabel: 'Abrir contato',
+      actionKind: 'contact',
+    }
+  })
+  const allRecords = [...memberRecords, ...sharedContactRecords]
+  const offerSignalsById = new Map(allRecords.map((record) => [record.id, new Set(contactOfferSignals(record))]))
+  const demandSignalsById = new Map(allRecords.map((record) => [record.id, new Set(contactComplementaritySignals(record))]))
+
+  return allRecords.map((record) => {
+    const matches = []
+    const demandSignals = demandSignalsById.get(record.id) ?? new Set()
+    if (!demandSignals.size) return { ...record, potentialMatches: [] }
+    allRecords.forEach((candidate) => {
+      if (candidate.id === record.id) return
+      const offerSignals = offerSignalsById.get(candidate.id) ?? new Set()
+      const overlap = [...demandSignals].filter((signal) => offerSignals.has(signal)).slice(0, 3)
+      if (!overlap.length) return
+      matches.push({ id: candidate.id, name: candidate.name, overlap })
+    })
+    return { ...record, potentialMatches: matches.slice(0, 4) }
+  })
 }
 
 function buildPublicGraphRecords({ publicProfiles, contacts }) {
   return publicProfiles.map((profile) => {
-    const internalMatch = contacts.find((contact) => contactMatchesProfile(contact, profile))
+    const internalMatch = contacts.find((contact) => contactMatchesPublicProfile(contact, profile))
     const kind = (profile.kind ?? 'group') === 'person' ? 'person' : 'service'
     const location = graphLocationCoords(profile, profile.area || profile.service || profile.name || '')
     const graphPoint = graphPositionFromCoords(location.coords)
@@ -3922,7 +5074,7 @@ function buildPublicGraphRecords({ publicProfiles, contacts }) {
       groupIds: [],
       groupNames: [],
       linkedPlatform: true,
-      linkedLabel: internalMatch?.name || '',
+      linkedLabel: contactPlatformLinkLabel(internalMatch) || internalMatch?.name || '',
       linkedInternal: Boolean(internalMatch),
       internalMatch,
       locationQuery: location.query,
@@ -3973,7 +5125,7 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
 
   const visibleItems = useMemo(() => {
     return items.filter((item) => {
-      if (query.trim() && !matchText(query, [item.name, item.service, item.city, item.source, item.ddd, item.description, item.demand, item.solves, ...(item.tags ?? []), ...(item.groupNames ?? [])])) return false
+      if (query.trim() && !matchText(query, [item.name, item.service, item.city, item.source, item.ddd, item.description, item.demand, item.solves, ...(item.demandTags ?? []), ...(item.tags ?? []), ...(item.groupNames ?? [])])) return false
       if (scopeFilter !== 'all' && !(item.scopes ?? []).includes(scopeFilter)) return false
       if (tagFilter !== 'all' && !(item.tags ?? []).some((tag) => normalize(tag) === normalize(tagFilter))) return false
       if (sourceFilter !== 'all' && normalize(item.source) !== normalize(sourceFilter)) return false
@@ -4258,34 +5410,165 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
   )
 }
 
-function SearchPage({ queryDraft, setQueryDraft, onSearch, recents, contacts, publicProfiles, user, onNavigate, onOpenGroup }) {
-  const recommendedGroups = getRecommendedGroups(publicProfiles, user, '')
+function SearchPage({
+  queryDraft,
+  setQueryDraft,
+  onSearch,
+  recents,
+  contacts,
+  publicProfiles,
+  user,
+  onNavigate,
+  onOpenGroup,
+  searchResults,
+  isSearching,
+  searchError,
+}) {
+  const recommendedGroups = getRecommendedGroups(publicProfiles, user, queryDraft)
   const recentContacts = contacts.slice(0, 5)
+  const activeQuery = String(searchResults?.query || queryDraft || '').trim()
+  const privateResults = Array.isArray(searchResults?.private_results) ? searchResults.private_results : []
+  const publicResults = Array.isArray(searchResults?.public_results) ? searchResults.public_results : []
+  const insights = Array.isArray(searchResults?.insights) ? searchResults.insights : []
+  const visiblePeople = publicResults.filter((profile) => (profile.kind ?? 'group') === 'person')
+  const visibleGroups = publicResults.filter((profile) => (profile.kind ?? 'group') !== 'person')
+  const currentUserId = String(user?.id ?? '')
+
+  if (!activeQuery) {
+    return (
+      <div className="space-y-5">
+        <PageTitle eyebrow="Busca" title="Busca inteligente" description="Digite um serviço, demanda ou tema. O motor cruza agenda privada, vínculos públicos e sinais de complementaridade." />
+        <SearchBox value={queryDraft} onChange={setQueryDraft} onSearch={onSearch} recents={recents} contacts={contacts} />
+
+        <CategoryButtons contacts={contacts} activeCategory={null} onNavigate={onNavigate} />
+
+        <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <h2 className="text-base font-black text-slate-100">Recentes da agenda</h2>
+              <button type="button" onClick={() => onNavigate(ROUTES.AGENDA)} className="inline-flex items-center gap-1 text-sm font-black text-cyan-700">
+                Ver agenda <ArrowRight size={15} />
+              </button>
+            </div>
+            <ContactList contacts={recentContacts} onDelete={() => {}} onToast={() => {}} emptyLabel="Sua agenda ainda está vazia." />
+          </div>
+
+          <div>
+            <h2 className="mb-2 text-base font-black text-slate-100">Sugestões para você</h2>
+            <div className="grid gap-3">
+              {recommendedGroups.slice(0, 3).map((profile) => (
+                <PublicGroupCard key={profile.id} profile={profile} onOpen={onOpenGroup} />
+              ))}
+            </div>
+          </div>
+        </section>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-5">
-      <PageTitle eyebrow="Busca" title="Encontre quem resolve" description="Busca compacta por serviço, pessoa ou necessidade. Os recentes aparecem quando você toca no campo." />
+      <PageTitle
+        eyebrow="Busca"
+        title="Leitura semântica da rede"
+        description={`Resultados para "${activeQuery}". O ranking considera nome, tags, demanda, problema que resolve, campos customizados e complementaridade.`}
+        action={<button type="button" onClick={() => onNavigate(ROUTES.AGENDA)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black"><ArrowLeft size={16} />Voltar para agenda</button>}
+      />
+
       <SearchBox value={queryDraft} onChange={setQueryDraft} onSearch={onSearch} recents={recents} contacts={contacts} />
 
-      <CategoryButtons contacts={contacts} activeCategory={null} onNavigate={onNavigate} />
+      <section className="grid gap-3 sm:grid-cols-3">
+        <Metric value={privateResults.length} label="privados" />
+        <Metric value={publicResults.length} label="públicos" />
+        <Metric value={insights.length || 'sem'} label="insights" />
+      </section>
 
-      <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
-        <div>
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-base font-black text-slate-100">Recentes da agenda</h2>
-            <button type="button" onClick={() => onNavigate(ROUTES.AGENDA)} className="inline-flex items-center gap-1 text-sm font-black text-cyan-700">
-              Ver agenda <ArrowRight size={15} />
-            </button>
+      {searchError ? (
+        <section className="glass-panel rounded-lg border border-rose-400/20 p-4">
+          <p className="text-sm font-black text-rose-100">Não foi possível buscar agora.</p>
+          <p className="mt-1 text-sm font-semibold text-rose-100/70">{searchError}</p>
+        </section>
+      ) : null}
+
+      {isSearching ? (
+        <section className="glass-panel rounded-lg p-6 text-sm font-semibold text-slate-400">
+          Analisando agenda privada, perfis públicos e complementaridades...
+        </section>
+      ) : null}
+
+      {insights.length ? (
+        <section className="glass-panel rounded-lg p-4">
+          <div className="mb-3">
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Insights</p>
+            <h2 className="mt-1 text-base font-black text-slate-100">Leitura rápida da busca</h2>
           </div>
-          <ContactList contacts={recentContacts} onDelete={() => {}} onToast={() => {}} emptyLabel="Sua agenda ainda está vazia." />
+          <div className="grid gap-3 md:grid-cols-3">
+            {insights.map((insight) => (
+              <article key={insight} className="rounded-lg border border-cyan-400/10 bg-cyan-500/5 p-3">
+                <p className="text-sm font-semibold leading-6 text-slate-200">{insight}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {!isSearching && !searchError && !privateResults.length && !publicResults.length ? (
+        <section className="glass-panel rounded-lg border-dashed p-8 text-center">
+          <Search className="mx-auto text-slate-600" size={34} />
+          <p className="mt-3 text-sm font-black text-slate-100">Nenhum resultado relevante encontrado.</p>
+          <p className="mt-1 text-sm font-semibold text-slate-500">Tente descrever a demanda de outro jeito, usar uma tag ou buscar por problema que a pessoa resolve.</p>
+        </section>
+      ) : null}
+
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-black text-slate-100">Agenda privada</h2>
+              <p className="text-sm font-semibold text-slate-500">Resultados ranqueados para operação direta na sua base.</p>
+            </div>
+            <button type="button" onClick={() => onNavigate(ROUTES.AGENDA)} className="text-xs font-black text-cyan-300">Abrir agenda</button>
+          </div>
+          <ContactList
+            contacts={privateResults}
+            onDelete={() => {}}
+            onToast={() => {}}
+            onOpen={(contact) => onNavigate(`${ROUTES.CONTACT}/${contact.id}`)}
+            emptyLabel="Nenhum contato privado ficou forte o suficiente para essa busca."
+            useGroupedLayout={false}
+          />
         </div>
 
-        <div>
-          <h2 className="mb-2 text-base font-black text-slate-100">Sugestões para você</h2>
-          <div className="grid gap-3">
-            {recommendedGroups.slice(0, 3).map((profile) => (
-              <PublicGroupCard key={profile.id} profile={profile} onOpen={onOpenGroup} />
-            ))}
+        <div className="space-y-4">
+          <div>
+            <h2 className="text-base font-black text-slate-100">Rede pública</h2>
+            <p className="text-sm font-semibold text-slate-500">Perfis e grupos externos que combinam com o tema pesquisado.</p>
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h3 className="text-sm font-black text-slate-100">Pessoas</h3>
+                <span className="text-[11px] font-black uppercase tracking-widest text-slate-500">{visiblePeople.length}</span>
+              </div>
+              <div className="grid gap-3">
+                {visiblePeople.length ? visiblePeople.map((profile) => (
+                  <PublicPersonCard key={`search-person-${profile.id}`} profile={profile} contacts={contacts} currentUserId={currentUserId} />
+                )) : <div className="glass-panel rounded-lg border-dashed p-4 text-sm font-semibold text-slate-500">Nenhum perfil público pessoal relevante para essa busca.</div>}
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h3 className="text-sm font-black text-slate-100">Grupos e ofertas</h3>
+                <span className="text-[11px] font-black uppercase tracking-widest text-slate-500">{visibleGroups.length}</span>
+              </div>
+              <div className="grid gap-3">
+                {visibleGroups.length ? visibleGroups.map((profile) => (
+                  <PublicGroupCard key={`search-group-${profile.id}`} profile={profile} onOpen={onOpenGroup} />
+                )) : <div className="glass-panel rounded-lg border-dashed p-4 text-sm font-semibold text-slate-500">Nenhum grupo público relevante para essa busca.</div>}
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -4441,23 +5724,163 @@ function ChatSuggestionReviewModal({ suggestion, contact, onClose, onConfirm, is
   )
 }
 
-function AgendaPage({ contacts, activeCategory, queryDraft, setQueryDraft, onSearch, recents, onDelete, onToast, onEdit, onOpenContact, onNavigate, onImport, isImporting }) {
+function AgendaPage({
+  contacts,
+  activeCategory,
+  queryDraft,
+  setQueryDraft,
+  onSearch,
+  recents,
+  onDelete,
+  onToast,
+  onEdit,
+  onOpenContact,
+  onNavigate,
+  onImport,
+  isImporting,
+  duplicateSuggestions = [],
+  onBulkUpdateStatus,
+  onBulkUpdatePriority,
+  onBulkDelete,
+}) {
+  const fileInputRef = useRef(null)
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [sortBy, setSortBy] = useState('name-asc')
+  const [selectedTag, setSelectedTag] = useState('all')
+  const [selectedSource, setSelectedSource] = useState('all')
+  const [selectedDdd, setSelectedDdd] = useState('all')
+  const [selectedCrmStatus, setSelectedCrmStatus] = useState('all')
+  const [duplicateOnly, setDuplicateOnly] = useState(false)
+  const [selectedIds, setSelectedIds] = useState([])
+  const [bulkStatus, setBulkStatus] = useState('Ativo')
+  const [bulkPriority, setBulkPriority] = useState('Média')
+  const [isBulkApplying, setIsBulkApplying] = useState(false)
+  const selectedCategory = getCategory(activeCategory)
+  const duplicateLabelsById = useMemo(() => {
+    const labels = {}
+    duplicateSuggestions.forEach((suggestion) => {
+      const reason = suggestion.match_type === 'email' ? 'Duplicado por email' : suggestion.match_type === 'phone' ? 'Duplicado por telefone' : 'Possível duplicado'
+      ;[suggestion.primary_contact?.id, suggestion.duplicate_contact?.id].filter(Boolean).forEach((id) => {
+        const key = String(id)
+        const current = labels[key] ?? []
+        if (!current.includes(reason)) current.push(reason)
+        labels[key] = current
+      })
+    })
+    return Object.fromEntries(Object.entries(labels).map(([key, values]) => [key, values.join(' · ')]))
+  }, [duplicateSuggestions])
+  const tagOptions = useMemo(() => uniqueTextOptions(contacts.flatMap((contact) => contactTags(contact))), [contacts])
+  const sourceOptions = useMemo(() => uniqueTextOptions(contacts.map((contact) => contact.source || '')), [contacts])
+  const dddOptions = useMemo(() => uniqueTextOptions(contacts.map((contact) => contact.ddd || extractDdd(contact.phone || ''))), [contacts])
+  const crmStatusOptions = useMemo(() => uniqueTextOptions(contacts.map((contact) => effectiveCrmStatus(contact))), [contacts])
+  const topTagOptions = tagOptions.slice(0, 8)
   const filtered = useMemo(() => {
-    return contacts.filter((contact) => {
+    const results = contacts.filter((contact) => {
       const categoryId = contact.category?.id ?? classifyService(contact.service).id
       const categoryMatch = activeCategory === 'all' || categoryId === activeCategory
-      return categoryMatch && matchText(queryDraft, [contact.name, contact.phone, contact.service, contact.city, contact.address])
+      const ddd = contact.ddd || extractDdd(contact.phone || '')
+      const tags = contactTags(contact)
+      const crmStatus = effectiveCrmStatus(contact)
+      const duplicateMatch = !duplicateOnly || Boolean(duplicateLabelsById[String(contact.id)])
+      const tagMatch = selectedTag === 'all' || tags.includes(selectedTag)
+      const sourceMatch = selectedSource === 'all' || (contact.source || '') === selectedSource
+      const dddMatch = selectedDdd === 'all' || ddd === selectedDdd
+      const crmMatch = selectedCrmStatus === 'all' || crmStatus === selectedCrmStatus
+      const queryMatch = matchText(queryDraft, [
+        contact.name,
+        contact.phone,
+        contact.email,
+        contact.service,
+        contact.city,
+        contact.address,
+        contact.source,
+        contact.organization,
+        ddd,
+        crmStatus,
+        contact.crm_priority,
+        ...(tags ?? []),
+        ...contactCustomFieldSearchValues(contact),
+      ])
+      return categoryMatch && duplicateMatch && tagMatch && sourceMatch && dddMatch && crmMatch && queryMatch
     })
-  }, [contacts, activeCategory, queryDraft])
-  const fileInputRef = useRef(null)
-  const selectedCategory = getCategory(activeCategory)
+
+    const sorted = results.slice()
+    sorted.sort((a, b) => {
+      if (sortBy === 'recent') return new Date(b.created_at || 0) - new Date(a.created_at || 0)
+      if (sortBy === 'service') return String(a.service || '').localeCompare(String(b.service || ''), 'pt-BR', { sensitivity: 'base' }) || String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR', { sensitivity: 'base' })
+      if (sortBy === 'city') return String(a.city || '').localeCompare(String(b.city || ''), 'pt-BR', { sensitivity: 'base' }) || String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR', { sensitivity: 'base' })
+      if (sortBy === 'crm') return String(effectiveCrmStatus(a) || '').localeCompare(String(effectiveCrmStatus(b) || ''), 'pt-BR', { sensitivity: 'base' }) || String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR', { sensitivity: 'base' })
+      return String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR', { sensitivity: 'base' })
+    })
+    return sorted
+  }, [contacts, activeCategory, queryDraft, selectedTag, selectedSource, selectedDdd, selectedCrmStatus, duplicateOnly, sortBy, duplicateLabelsById])
+  const duplicateCount = filtered.filter((contact) => duplicateLabelsById[String(contact.id)]).length
+  const selectedCount = selectedIds.length
+  const selectedVisibleCount = filtered.filter((contact) => selectedIds.includes(String(contact.id))).length
+
+  useEffect(() => {
+    setSelectedIds((current) => current.filter((id) => filtered.some((contact) => String(contact.id) === String(id))))
+  }, [filtered])
+
+  function toggleSelect(contact) {
+    const nextId = String(contact.id)
+    setSelectedIds((current) => (current.includes(nextId) ? current.filter((id) => id !== nextId) : [...current, nextId]))
+  }
+
+  function selectVisible() {
+    setSelectedIds(filtered.map((contact) => String(contact.id)))
+  }
+
+  function clearAgendaFilters() {
+    setSelectedTag('all')
+    setSelectedSource('all')
+    setSelectedDdd('all')
+    setSelectedCrmStatus('all')
+    setDuplicateOnly(false)
+    setSortBy('name-asc')
+  }
+
+  async function applyBulkStatus() {
+    if (!selectedIds.length || !onBulkUpdateStatus || isBulkApplying) return
+    setIsBulkApplying(true)
+    try {
+      const result = await onBulkUpdateStatus(selectedIds, bulkStatus)
+      if (result?.updated) setSelectedIds([])
+    } finally {
+      setIsBulkApplying(false)
+    }
+  }
+
+  async function applyBulkPriority() {
+    if (!selectedIds.length || !onBulkUpdatePriority || isBulkApplying) return
+    setIsBulkApplying(true)
+    try {
+      const result = await onBulkUpdatePriority(selectedIds, bulkPriority)
+      if (result?.updated) setSelectedIds([])
+    } finally {
+      setIsBulkApplying(false)
+    }
+  }
+
+  async function removeSelectedContacts() {
+    if (!selectedIds.length || !onBulkDelete || isBulkApplying) return
+    const confirmed = window.confirm(`Remover ${selectedIds.length} contato(s) selecionado(s)?`)
+    if (!confirmed) return
+    setIsBulkApplying(true)
+    try {
+      const result = await onBulkDelete(selectedIds)
+      if (result?.deleted) setSelectedIds([])
+    } finally {
+      setIsBulkApplying(false)
+    }
+  }
 
   return (
     <div className="space-y-4">
       <PageTitle
         eyebrow="Agenda"
         title="Contatos"
-        description="Lista simples, alfabética e rápida, com ações diretas de chamada e WhatsApp."
+        description="Lista operacional com busca, filtros rápidos, ordenação, seleção múltipla e destaque de possíveis duplicados."
         action={
           <div className="flex gap-2">
             <button type="button" onClick={() => onNavigate(ROUTES.CRM)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
@@ -4476,14 +5899,158 @@ function AgendaPage({ contacts, activeCategory, queryDraft, setQueryDraft, onSea
           </div>
         }
       />
+      <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <CrmMetric label="Exibidos" value={`${filtered.length}/${contacts.length}`} />
+        <CrmMetric label="Selecionados" value={selectedCount} tone={selectedCount ? 'text-cyan-200' : 'text-slate-100'} />
+        <CrmMetric label="Duplicados visíveis" value={duplicateCount} tone={duplicateCount ? 'text-amber-200' : 'text-slate-100'} />
+        <CrmMetric label="Tags rápidas" value={topTagOptions.length} />
+      </section>
       <CategoryButtons contacts={contacts} activeCategory={activeCategory} onNavigate={onNavigate} onSelect={(id) => onNavigate(`/categoria/${id}`)} />
       <SearchBox value={queryDraft} onChange={setQueryDraft} onSearch={onSearch} recents={recents} contacts={contacts} />
-      <ContactList contacts={filtered} onDelete={onDelete} onToast={onToast} onEdit={onEdit} onOpen={onOpenContact} emptyLabel={selectedCategory ? `Nenhum contato em ${selectedCategory.label}.` : 'Nenhum contato encontrado.'} />
+
+      <section className="glass-panel rounded-lg p-3">
+        <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_220px_auto]">
+          <div className="flex flex-wrap gap-2">
+            {duplicateSuggestions.length ? (
+              <button
+                type="button"
+                onClick={() => setDuplicateOnly((current) => !current)}
+                className={['rounded-lg border px-3 py-2 text-xs font-black transition', duplicateOnly ? 'border-amber-300/40 bg-amber-400/15 text-amber-100' : 'border-slate-800 bg-slate-950/40 text-slate-300 hover:border-amber-400/20'].join(' ')}
+              >
+                {duplicateOnly ? 'Mostrando duplicados' : `${duplicateSuggestions.length} duplicado${duplicateSuggestions.length === 1 ? '' : 's'} sugerido${duplicateSuggestions.length === 1 ? '' : 's'}`}
+              </button>
+            ) : null}
+            {topTagOptions.map((tag) => (
+              <button
+                key={tag}
+                type="button"
+                onClick={() => setSelectedTag((current) => (current === tag ? 'all' : tag))}
+                className={['rounded-lg border px-3 py-2 text-xs font-black transition', selectedTag === tag ? 'border-cyan-400/40 bg-cyan-500/15 text-cyan-100' : 'border-slate-800 bg-slate-950/40 text-slate-300 hover:border-cyan-400/20'].join(' ')}
+              >
+                #{tag}
+              </button>
+            ))}
+          </div>
+          <label className="rounded-lg border border-slate-800 bg-slate-950/40 px-3">
+            <span className="block pt-2 text-[10px] font-black uppercase tracking-widest text-slate-500">Ordenar</span>
+            <select value={sortBy} onChange={(event) => setSortBy(event.target.value)} className="h-10 w-full bg-transparent text-sm font-black text-slate-100 outline-none">
+              <option value="name-asc">Nome A-Z</option>
+              <option value="recent">Mais recentes</option>
+              <option value="service">Serviço</option>
+              <option value="city">Cidade</option>
+              <option value="crm">Status CRM</option>
+            </select>
+          </label>
+          <button type="button" onClick={() => setFiltersOpen((current) => !current)} className="secondary-button inline-flex h-full min-h-14 items-center justify-center gap-2 rounded-lg px-3 text-sm font-black">
+            <SlidersHorizontal size={16} />
+            {filtersOpen ? 'Ocultar filtros' : 'Filtros avançados'}
+          </button>
+        </div>
+
+        {filtersOpen ? (
+          <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+            <label className="rounded-lg border border-slate-800 bg-slate-950/40 px-3">
+              <span className="block pt-2 text-[10px] font-black uppercase tracking-widest text-slate-500">Tag</span>
+              <select value={selectedTag} onChange={(event) => setSelectedTag(event.target.value)} className="h-10 w-full bg-transparent text-sm font-black text-slate-100 outline-none">
+                <option value="all">Todas</option>
+                {tagOptions.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
+              </select>
+            </label>
+            <label className="rounded-lg border border-slate-800 bg-slate-950/40 px-3">
+              <span className="block pt-2 text-[10px] font-black uppercase tracking-widest text-slate-500">Fonte</span>
+              <select value={selectedSource} onChange={(event) => setSelectedSource(event.target.value)} className="h-10 w-full bg-transparent text-sm font-black text-slate-100 outline-none">
+                <option value="all">Todas</option>
+                {sourceOptions.map((source) => <option key={source} value={source}>{source}</option>)}
+              </select>
+            </label>
+            <label className="rounded-lg border border-slate-800 bg-slate-950/40 px-3">
+              <span className="block pt-2 text-[10px] font-black uppercase tracking-widest text-slate-500">DDD</span>
+              <select value={selectedDdd} onChange={(event) => setSelectedDdd(event.target.value)} className="h-10 w-full bg-transparent text-sm font-black text-slate-100 outline-none">
+                <option value="all">Todos</option>
+                {dddOptions.map((ddd) => <option key={ddd} value={ddd}>{ddd}</option>)}
+              </select>
+            </label>
+            <label className="rounded-lg border border-slate-800 bg-slate-950/40 px-3">
+              <span className="block pt-2 text-[10px] font-black uppercase tracking-widest text-slate-500">CRM</span>
+              <select value={selectedCrmStatus} onChange={(event) => setSelectedCrmStatus(event.target.value)} className="h-10 w-full bg-transparent text-sm font-black text-slate-100 outline-none">
+                <option value="all">Todos</option>
+                {crmStatusOptions.map((status) => <option key={status} value={status}>{status}</option>)}
+              </select>
+            </label>
+            <div className="flex items-end gap-2">
+              <button type="button" onClick={clearAgendaFilters} className="secondary-button inline-flex h-12 flex-1 items-center justify-center rounded-lg px-3 text-sm font-black">
+                Limpar filtros
+              </button>
+              <button type="button" onClick={() => onNavigate(ROUTES.DUPLICATES)} className="inline-flex h-12 flex-1 items-center justify-center rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 text-sm font-black text-amber-100">
+                Ver duplicados
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </section>
+
+      {selectedCount ? (
+        <section className="glass-panel-soft flex flex-wrap items-center justify-between gap-2 rounded-lg p-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm font-black text-slate-200">
+            <span>{selectedCount} selecionado{selectedCount === 1 ? '' : 's'}</span>
+            <span className="text-slate-500">·</span>
+            <span>{selectedVisibleCount} visível{selectedVisibleCount === 1 ? '' : 'eis'} nos filtros atuais</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <label className="rounded-lg border border-slate-800 bg-slate-950/45 px-3">
+              <span className="block pt-2 text-[10px] font-black uppercase tracking-widest text-slate-500">Status</span>
+              <select value={bulkStatus} onChange={(event) => setBulkStatus(event.target.value)} className="h-9 bg-transparent text-xs font-black text-slate-100 outline-none">
+                <option value="Novo">Novo</option>
+                <option value="Ativo">Ativo</option>
+                <option value="Conversa iniciada">Conversa iniciada</option>
+                <option value="Oportunidade">Oportunidade</option>
+                <option value="Pausado">Pausado</option>
+              </select>
+            </label>
+            <button type="button" onClick={applyBulkStatus} disabled={isBulkApplying} className="secondary-button inline-flex h-9 items-center justify-center rounded-lg px-3 text-xs font-black disabled:cursor-not-allowed disabled:opacity-50">
+              Aplicar status
+            </button>
+            <label className="rounded-lg border border-slate-800 bg-slate-950/45 px-3">
+              <span className="block pt-2 text-[10px] font-black uppercase tracking-widest text-slate-500">Prioridade</span>
+              <select value={bulkPriority} onChange={(event) => setBulkPriority(event.target.value)} className="h-9 bg-transparent text-xs font-black text-slate-100 outline-none">
+                <option value="Alta">Alta</option>
+                <option value="Média">Média</option>
+                <option value="Baixa">Baixa</option>
+              </select>
+            </label>
+            <button type="button" onClick={applyBulkPriority} disabled={isBulkApplying} className="secondary-button inline-flex h-9 items-center justify-center rounded-lg px-3 text-xs font-black disabled:cursor-not-allowed disabled:opacity-50">
+              Aplicar prioridade
+            </button>
+            <button type="button" onClick={selectVisible} className="secondary-button inline-flex h-9 items-center justify-center rounded-lg px-3 text-xs font-black">
+              Selecionar exibidos
+            </button>
+            <button type="button" onClick={() => setSelectedIds([])} className="secondary-button inline-flex h-9 items-center justify-center rounded-lg px-3 text-xs font-black">
+              Limpar seleção
+            </button>
+            <button type="button" onClick={removeSelectedContacts} disabled={isBulkApplying} className="inline-flex h-9 items-center justify-center rounded-lg border border-rose-400/20 bg-rose-400/10 px-3 text-xs font-black text-rose-100 disabled:cursor-not-allowed disabled:opacity-50">
+              Excluir selecionados
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      <ContactList
+        contacts={filtered}
+        onDelete={onDelete}
+        onToast={onToast}
+        onEdit={onEdit}
+        onOpen={onOpenContact}
+        emptyLabel={selectedCategory ? `Nenhum contato em ${selectedCategory.label}.` : 'Nenhum contato encontrado.'}
+        selectedIds={selectedIds}
+        onToggleSelect={toggleSelect}
+        duplicateLabelsById={duplicateLabelsById}
+        useGroupedLayout={sortBy === 'name-asc'}
+      />
     </div>
   )
 }
 
-function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, isThinking }) {
+function ChatPage({ contacts, messages, threads, activeThreadId, onSelectThread, onCreateThread, onAsk, onApplySuggestion, onNavigate, isThinking }) {
   const [draft, setDraft] = useState('')
   const [selectedContactId, setSelectedContactId] = useState('')
   const [targetInput, setTargetInput] = useState('')
@@ -4504,7 +6071,7 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
       .filter((contact) => {
         if (!normalizedSearch) return true
         const label = targetContactServiceLabel(contact)
-        return matchText(normalizedSearch, [contact.name, contact.service, label, contact.phone, contact.city, targetContactOptionValue(contact)])
+        return matchText(normalizedSearch, [contact.name, contact.service, label, contact.phone, contact.city, contact.organization, targetContactOptionValue(contact), ...contactCustomFieldSearchValues(contact)])
       })
       .sort((a, b) => {
         const aLabel = targetContactServiceLabel(a)
@@ -4567,6 +6134,12 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
         eyebrow="Copiloto"
         title="Chat de organização"
         description={`${reviewCount} contato${reviewCount === 1 ? '' : 's'} precisam de revisão. Peça ajuda para categorizar, buscar serviços ou organizar importações do Google.`}
+        action={
+          <button type="button" onClick={() => onCreateThread?.('')} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+            <Plus size={16} />
+            Nova conversa
+          </button>
+        }
       />
 
       <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
@@ -4649,6 +6222,31 @@ function ChatPage({ contacts, messages, onAsk, onApplySuggestion, onNavigate, is
         </div>
 
         <aside className="min-h-0 space-y-3 lg:overflow-auto">
+          <div className="glass-panel rounded-lg p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-black text-slate-100">Conversas</h2>
+                <p className="text-xs font-semibold text-slate-500">{threads?.length || 0} thread{threads?.length === 1 ? '' : 's'} salva{threads?.length === 1 ? '' : 's'}</p>
+              </div>
+              <button type="button" onClick={() => onCreateThread?.('')} className="secondary-button inline-flex h-8 items-center justify-center rounded-lg px-2 text-xs font-black">
+                Nova
+              </button>
+            </div>
+            <div className="mt-3 space-y-2">
+              {threads?.length ? threads.slice(0, 8).map((thread) => (
+                <button
+                  key={thread.id}
+                  type="button"
+                  onClick={() => onSelectThread?.(thread.id)}
+                  className={['w-full rounded-lg border px-3 py-2 text-left transition', String(thread.id) === String(activeThreadId) ? 'border-cyan-400/40 bg-cyan-500/10' : 'border-slate-800 bg-slate-950/40 hover:border-slate-700'].join(' ')}
+                >
+                  <p className="truncate text-sm font-black text-slate-100">{thread.title || 'Nova conversa'}</p>
+                  <p className="mt-1 line-clamp-2 text-xs font-semibold text-slate-500">{thread.last_message_preview || 'Ainda sem mensagens.'}</p>
+                </button>
+              )) : <p className="rounded-lg border border-dashed border-slate-800 p-3 text-xs font-semibold text-slate-500">A primeira pergunta já cria uma conversa persistente.</p>}
+            </div>
+          </div>
+
           <div className="glass-panel rounded-lg p-4">
             <div className="flex items-center gap-2">
               <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-300">
@@ -4814,9 +6412,12 @@ function ApiDocsPage({ onNavigate }) {
   const swaggerUrl = `${API_BASE_URL}/docs`
   const openApiUrl = `${API_BASE_URL}/openapi.json`
   const endpointGroups = [
+    { title: 'Saúde e autenticação', endpoints: ['GET /api/health', 'GET /api/auth/status', 'POST /api/auth/session'] },
     { title: 'Contatos', endpoints: ['GET /api/contacts', 'POST /api/contacts', 'PUT /api/contacts/{id}', 'DELETE /api/contacts/{id}'] },
-    { title: 'Networking', endpoints: ['GET /api/search', 'GET /api/public-profiles', 'POST /api/ai/chat'] },
+    { title: 'Networking', endpoints: ['GET /api/search', 'GET /api/graph?scope=private|public|group', 'GET /api/public-profiles', 'POST /api/ai/chat', 'GET /api/chat/threads', 'GET /api/chat/threads/{id}/messages'] },
     { title: 'Grupos', endpoints: ['GET /api/groups', 'POST /api/groups', 'POST /api/groups/{id}/members', 'GET /api/groups/{id}/contacts', 'GET /api/groups/{id}/messages', 'POST /api/groups/{id}/messages'] },
+    { title: 'Importações', endpoints: ['GET /api/import-jobs', 'POST /api/import-jobs', 'GET /api/import-integrations'] },
+    { title: 'Notificações', endpoints: ['GET /api/push-subscriptions', 'POST /api/push-subscriptions', 'DELETE /api/push-subscriptions/{id}', 'POST /api/push-subscriptions/test', 'POST /api/push-subscriptions/dispatch'] },
     { title: 'Plataforma', endpoints: ['POST /api/login', 'POST /api/google-login', 'POST /api/users', 'GET /api/custom-fields'] },
   ]
 
@@ -4829,11 +6430,17 @@ function ApiDocsPage({ onNavigate }) {
       <PageTitle
         eyebrow="OpenAPI"
         title="Documentação da plataforma"
-        description="Base preparada para integrações futuras. O Swagger é gerado automaticamente pelo backend FastAPI."
+        description="Base preparada para integrações futuras. O Swagger é gerado automaticamente pelo FastAPI e o endpoint de grafo expõe nós, arestas e filtros para integrações."
         action={<button type="button" onClick={() => onNavigate(ROUTES.SETTINGS)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black"><ArrowLeft size={17} />Configurações</button>}
       />
 
       <section className="glass-panel rounded-lg p-4">
+        <div className="mb-4 rounded-lg border border-cyan-400/15 bg-cyan-400/10 p-3">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-300">Notas de produção</p>
+          <p className="mt-1 text-sm font-semibold text-slate-400">
+            Use Bearer token do Supabase nas rotas privadas. Em produção, configure `APP_ENV=production` com `SUPABASE_URL` ou `SUPABASE_JWT_SECRET`; sem isso, o backend bloqueia fallback local.
+          </p>
+        </div>
         <div className="grid gap-3 md:grid-cols-2">
           <button type="button" onClick={() => openExternal(swaggerUrl)} className="action-card rounded-lg p-4 text-left">
             <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Swagger UI</p>
@@ -4864,7 +6471,290 @@ function ApiDocsPage({ onNavigate }) {
   )
 }
 
-function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, customFieldDefinitions, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onExportContacts, onClearRecents, onSaveCustomField, onDeleteCustomField, onSaveUser, onLogout }) {
+function ImportContactsPage({ user, contacts, importJobs, isImporting, onImportGoogleContacts, onImportFile, onNavigate }) {
+  const fileInputRef = useRef(null)
+  const googleConnected = hasGoogleConnection(user)
+  const recentJobs = Array.isArray(importJobs) ? importJobs.slice(0, 6) : []
+
+  return (
+    <div className="space-y-4">
+      <PageTitle
+        eyebrow="Importação"
+        title="Importar contatos"
+        description="Central única para trazer contatos do Google, CSV e cadastro manual sem depender da tela de configurações."
+        action={<button type="button" onClick={() => onNavigate(ROUTES.AGENDA)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black"><ArrowLeft size={17} />Agenda</button>}
+      />
+
+      <section className="grid gap-3 md:grid-cols-3">
+        <Metric value={contacts.length} label="na agenda" />
+        <Metric value={googleConnected ? 'Google ok' : 'pendente'} label="conexão" />
+        <Metric value={isImporting ? 'importando' : recentJobs.length || 'pronto'} label={isImporting ? 'status' : 'jobs recentes'} />
+      </section>
+
+      <input ref={fileInputRef} type="file" accept=".csv,.txt,.vcf" onChange={onImportFile} className="hidden" />
+
+      <section className="grid gap-3 lg:grid-cols-3">
+        <article className="glass-panel rounded-lg p-4">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Google Contacts</p>
+          <h2 className="mt-2 text-lg font-black text-slate-100">Importação real</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">Puxa contatos da conta Google conectada e já alimenta DDD, emails e metadados básicos.</p>
+          <button type="button" onClick={onImportGoogleContacts} className="primary-button mt-4 inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+            <Cloud size={16} />
+            Importar do Google
+          </button>
+        </article>
+
+        <article className="glass-panel rounded-lg p-4">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">CSV / VCF</p>
+          <h2 className="mt-2 text-lg font-black text-slate-100">Arquivo local</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">Use exportações em CSV, TXT ou VCF para trazer listas externas e revisar depois na agenda.</p>
+          <button type="button" onClick={() => fileInputRef.current?.click()} className="secondary-button mt-4 inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+            <Upload size={16} />
+            {isImporting ? 'Importando...' : 'Escolher arquivo'}
+          </button>
+        </article>
+
+        <article className="glass-panel rounded-lg p-4">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Manual</p>
+          <h2 className="mt-2 text-lg font-black text-slate-100">Cadastro rápido</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">Quando o contato ainda não existe em outra fonte, salve manualmente com contexto de networking desde o início.</p>
+          <button type="button" onClick={() => onNavigate(ROUTES.NEW)} className="secondary-button mt-4 inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+            <Plus size={16} />
+            Novo contato
+          </button>
+        </article>
+      </section>
+
+      <section className="glass-panel rounded-lg p-4">
+        <div className="mb-4">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Histórico</p>
+          <h2 className="mt-1 text-base font-black text-slate-100">Últimos imports</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">Cada importação concluída fica registrada com origem, contagem e resumo.</p>
+        </div>
+        <div className="grid gap-2 md:grid-cols-2">
+          {recentJobs.length ? recentJobs.map((job) => (
+            <article key={job.id} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-black text-slate-100">{job.source}</p>
+                <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-cyan-100">{job.status || 'completed'}</span>
+              </div>
+              <p className="mt-1 text-xs font-semibold text-slate-500">{job.filename || 'sem arquivo'}</p>
+              <p className="mt-2 text-xs font-bold text-slate-400">{job.imported_count || 0} importado(s) · {job.skipped_count || 0} ignorado(s) · {job.failed_count || 0} falha(s)</p>
+              {job.details ? <p className="mt-2 text-xs font-semibold text-slate-500">{job.details}</p> : null}
+            </article>
+          )) : <p className="rounded-lg border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500 md:col-span-2">Nenhum job registrado ainda. O histórico aparece aqui após Google, CSV/VCF ou cadastro manual.</p>}
+        </div>
+      </section>
+
+      <section className="glass-panel rounded-lg p-4">
+        <div className="mb-3">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Exports suportados</p>
+          <h2 className="mt-1 text-base font-black text-slate-100">Arquivos aceitos além do CSV genérico</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">O parser já reconhece VCF e cabeçalhos comuns de exportação para reduzir trabalho manual na entrada.</p>
+        </div>
+        <div className="grid gap-3 md:grid-cols-3">
+          <SettingsAction icon={Upload} title="Apple Contacts / iCloud" description="Aceita `.vcf` exportado do app Contatos ou iCloud e preserva telefone, email, organização e links." actionLabel="Usar arquivo" onAction={() => fileInputRef.current?.click()} />
+          <SettingsAction icon={Upload} title="Outlook CSV" description="Reconhece colunas comuns do Outlook, incluindo emails e telefones alternativos quando presentes." actionLabel="Usar arquivo" onAction={() => fileInputRef.current?.click()} />
+          <SettingsAction icon={Upload} title="LinkedIn export" description="Processa exportações CSV compatíveis do LinkedIn sem depender de scraping ou credenciais extras." actionLabel="Usar arquivo" onAction={() => fileInputRef.current?.click()} />
+        </div>
+      </section>
+
+      <section className="glass-panel rounded-lg p-4">
+        <div className="mb-3">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Conectores nativos</p>
+          <h2 className="mt-1 text-base font-black text-slate-100">Roadmap já preparado</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">Os conectores OAuth diretos ainda dependem de credenciais e ativação por provedor. O app já deixa isso explícito em vez de mascarar como import pronto.</p>
+        </div>
+        <div className="grid gap-3 md:grid-cols-3">
+          <article className="action-card rounded-lg p-4">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-sm font-black text-slate-100">Apple Contacts nativo</h3>
+              <span className="rounded-md border border-slate-700 bg-slate-950/60 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">Coming soon</span>
+            </div>
+            <p className="mt-2 text-sm font-semibold text-slate-500">Quando o conector OAuth entrar, o fluxo parte daqui. Até lá, use `.vcf` do iPhone ou iCloud.</p>
+          </article>
+          <article className="action-card rounded-lg p-4">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-sm font-black text-slate-100">Outlook nativo</h3>
+              <span className="rounded-md border border-slate-700 bg-slate-950/60 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">Coming soon</span>
+            </div>
+            <p className="mt-2 text-sm font-semibold text-slate-500">O parser CSV já cobre o MVP. O conector direto ficará aqui quando as credenciais Microsoft estiverem habilitadas.</p>
+          </article>
+          <article className="action-card rounded-lg p-4">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-sm font-black text-slate-100">LinkedIn guiado</h3>
+              <span className="rounded-md border border-slate-700 bg-slate-950/60 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">Coming soon</span>
+            </div>
+            <p className="mt-2 text-sm font-semibold text-slate-500">A base já aceita export compatível. O próximo passo é um fluxo guiado dedicado para reduzir revisão manual.</p>
+          </article>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function CustomFieldsPage({ definitions, groups, groupCustomFieldsById, onNavigate, onSaveCustomField, onDeleteCustomField }) {
+  const configuredGroups = groups.filter((group) => (groupCustomFieldsById[group.id] ?? []).length > 0)
+
+  return (
+    <div className="space-y-4">
+      <PageTitle
+        eyebrow="Estrutura"
+        title="Campos personalizados"
+        description="Página dedicada para manter os campos da agenda sob controle e localizar rapidamente grupos com estrutura própria."
+        action={<button type="button" onClick={() => onNavigate(ROUTES.SETTINGS)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black"><ArrowLeft size={17} />Configurações</button>}
+      />
+
+      <section className="grid gap-3 md:grid-cols-3">
+        <Metric value={definitions.length} label="agenda" />
+        <Metric value={configuredGroups.length} label="grupos com campos" />
+        <Metric value={groups.length} label="grupos visíveis" />
+      </section>
+
+      <CustomFieldDefinitionsManager
+        managerKey="custom-fields-page"
+        title="Campos da agenda privada"
+        description="Esses campos aparecem no cadastro, edição e detalhe dos seus contatos privados."
+        definitions={definitions}
+        onSave={(payload) => onSaveCustomField({ ...payload, scope_type: 'user', scope_id: '' }, payload.id)}
+        onDelete={onDeleteCustomField}
+      />
+
+      <section className="glass-panel rounded-lg p-4">
+        <div className="mb-3">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Campos por grupo</p>
+          <h2 className="mt-1 text-base font-black text-slate-100">Administração contextual</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">Os campos de grupo continuam separados. Abra a ficha administrativa do grupo para editar membros, contatos compartilhados e campos do contexto.</p>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2">
+          {groups.length ? groups.map((group) => {
+            const fieldCount = (groupCustomFieldsById[group.id] ?? []).length
+            return (
+              <button key={group.id} type="button" onClick={() => onNavigate(`${ROUTES.GROUP_ADMIN}/${group.id}`)} className="action-card rounded-lg p-4 text-left">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="truncate text-sm font-black text-slate-100">{group.name}</h3>
+                    <p className="mt-1 text-xs font-semibold text-slate-500">{group.area || 'Área não informada'}</p>
+                  </div>
+                  <span className="rounded-md border border-slate-800 bg-slate-950/60 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-cyan-200">{fieldCount} campo{fieldCount === 1 ? '' : 's'}</span>
+                </div>
+                <p className="mt-3 text-xs font-black text-cyan-300">Abrir administração</p>
+              </button>
+            )
+          }) : <p className="rounded-lg border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">Nenhum grupo disponível para configurar campos de contexto.</p>}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function GroupAdminPage({
+  user,
+  groupId,
+  groups,
+  contacts,
+  groupContactsById,
+  groupCustomFieldsById,
+  users,
+  onNavigate,
+  onLoadContacts,
+  onLoadCustomFields,
+  onUpdateGroup,
+  onAddMember,
+  onRemoveMember,
+  onAddContact,
+  onRemoveContact,
+  onSendMessage,
+  onSaveCustomField,
+  onDeleteCustomField,
+  onUpdateContactCustomFields,
+}) {
+  const [editingGroupContact, setEditingGroupContact] = useState(null)
+  const currentUserId = contactOwnerId(user)
+  const isAdmin = user?.role === 'admin'
+  const selectedGroup = groups.find((group) => String(group.id) === String(groupId)) ?? null
+
+  useEffect(() => {
+    if (!selectedGroup?.id) return
+    onLoadContacts(selectedGroup.id)
+    onLoadCustomFields(selectedGroup.id)
+  }, [selectedGroup?.id, onLoadContacts, onLoadCustomFields])
+
+  if (!selectedGroup) {
+    return (
+      <div className="space-y-4">
+        <PageTitle
+          eyebrow="Grupos"
+          title="Administração do grupo"
+          description="Selecione um grupo válido para abrir a ficha administrativa."
+          action={<button type="button" onClick={() => onNavigate(ROUTES.GROUPS)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black"><ArrowLeft size={17} />Grupos</button>}
+        />
+        <div className="glass-panel rounded-lg p-5 text-sm font-semibold text-slate-500">Grupo não encontrado ou ainda não carregado.</div>
+      </div>
+    )
+  }
+
+  const members = selectedGroup.members ?? []
+  const selectedContacts = groupContactsById[selectedGroup.id] ?? []
+  const selectedGroupFields = groupCustomFieldsById[selectedGroup.id] ?? []
+  const membership = members.find((member) => String(member.user_id) === currentUserId || normalize(member.email) === normalize(user?.email))
+  const role = String(selectedGroup.owner_id) === currentUserId ? 'owner' : membership?.role || (isAdmin ? 'admin_global' : '')
+  const roleLabel = role === 'owner' ? 'Owner' : role === 'admin' ? 'Admin' : role === 'admin_global' ? 'Admin global' : role === 'member' ? 'Member' : 'Leitura'
+  const canManage = ['owner', 'admin', 'admin_global'].includes(role)
+  const availableContacts = contacts.filter((contact) => !selectedContacts.some((item) => String(item.id) === String(contact.id)) && contactMatchesGroupArea(contact, selectedGroup))
+
+  return (
+    <div className="space-y-4">
+      <PageTitle
+        eyebrow="Administração"
+        title={selectedGroup.name}
+        description="Ficha dedicada do grupo para editar dados, membros, contatos compartilhados e campos do contexto sem depender do modal."
+        action={<button type="button" onClick={() => onNavigate(ROUTES.GROUPS)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black"><ArrowLeft size={17} />Grupos</button>}
+      />
+
+      <GroupDetailsModal
+        group={selectedGroup}
+        currentUser={user}
+        roleLabel={roleLabel}
+        canManage={canManage}
+        members={members}
+        contacts={selectedContacts}
+        availableContacts={availableContacts}
+        selectedGroupFields={selectedGroupFields}
+        users={users}
+        onClose={() => onNavigate(ROUTES.GROUPS)}
+        onUpdateGroup={onUpdateGroup}
+        onAddMember={onAddMember}
+        onRemoveMember={onRemoveMember}
+        onAddContact={onAddContact}
+        onRemoveContact={onRemoveContact}
+        onSendMessage={onSendMessage}
+        onSaveCustomField={onSaveCustomField}
+        onDeleteCustomField={onDeleteCustomField}
+        onUpdateContactCustomFields={onUpdateContactCustomFields}
+        onEditContact={setEditingGroupContact}
+        onNavigate={onNavigate}
+        embedded
+      />
+
+      {editingGroupContact ? (
+        <GroupContactCustomFieldsModal
+          group={selectedGroup}
+          contact={editingGroupContact}
+          definitions={selectedGroupFields}
+          canManage={canManage}
+          onClose={() => setEditingGroupContact(null)}
+          onSave={async (nextValues) => {
+            const updated = await onUpdateContactCustomFields(selectedGroup.id, editingGroupContact, nextValues)
+            if (updated) setEditingGroupContact(updated)
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, customFieldDefinitions, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onRetryPendingMutation, onDismissPendingMutation, onExportContacts, onClearRecents, onSaveCustomField, onDeleteCustomField, onSaveUser, onSendPushTest, onLogout }) {
   const visibleName = user?.name || 'Perfil'
   const googleContactsImported = Boolean(user?.googleContactsImportedAt)
   const [notificationPreference, setNotificationPreference] = useState(user?.notificationPreference || 'relevant')
@@ -4905,8 +6795,35 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMu
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
             {pendingMutations.slice(0, 6).map((mutation) => (
               <div key={mutation.id} className="rounded-lg border border-slate-800 bg-slate-950/35 px-3 py-2">
-                <p className="text-sm font-black text-slate-200">{offlineMutationTitle(mutation)}</p>
-                <p className="mt-0.5 text-xs font-semibold text-slate-500">{formatDateTime(mutation.createdAt)}</p>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-black text-slate-200">{offlineMutationTitle(mutation)}</p>
+                    <p className="mt-0.5 text-xs font-semibold text-slate-500">{formatDateTime(mutation.createdAt)}</p>
+                  </div>
+                  <span className={['rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-widest', offlineMutationStatusClass(mutation)].join(' ')}>
+                    {offlineMutationStatusLabel(mutation)}
+                  </span>
+                </div>
+                {mutation.attemptCount ? <p className="mt-1 text-[11px] font-semibold text-slate-500">{mutation.attemptCount} tentativa{mutation.attemptCount === 1 ? '' : 's'}</p> : null}
+                {mutation.lastError ? <p className="mt-1 text-xs font-semibold text-amber-200">{mutation.lastError}</p> : null}
+                {offlineMutationRecoveryHint(mutation) ? <p className="mt-1 text-[11px] font-semibold text-slate-400">{offlineMutationRecoveryHint(mutation)}</p> : null}
+                {offlineMutationStatus(mutation) !== 'syncing' ? (
+                  <div className="mt-2 flex flex-wrap gap-3">
+                    {(offlineMutationStatus(mutation) === 'conflict' || offlineMutationStatus(mutation) === 'failed') ? (
+                      <button type="button" onClick={() => onRetryPendingMutation?.(mutation)} className="text-xs font-black text-cyan-300 underline-offset-4 hover:text-cyan-200 hover:underline">
+                        Tentar novamente
+                      </button>
+                    ) : null}
+                    {offlineMutationReviewRoute(mutation) !== ROUTES.SETTINGS ? (
+                      <button type="button" onClick={() => onNavigate?.(offlineMutationReviewRoute(mutation))} className="text-xs font-black text-slate-300 underline-offset-4 hover:text-slate-100 hover:underline">
+                        Revisar contexto
+                      </button>
+                    ) : null}
+                    <button type="button" onClick={() => onDismissPendingMutation?.(mutation)} className="text-xs font-black text-slate-400 underline-offset-4 hover:text-slate-200 hover:underline">
+                      Descartar desta fila
+                    </button>
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>
@@ -4946,6 +6863,7 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMu
               {NOTIFICATION_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
             </select>
             <button type="button" onClick={saveNotificationPreference} className="primary-button h-10 rounded-lg px-3 text-sm font-black">Salvar</button>
+            <button type="button" onClick={onSendPushTest} className="secondary-button h-10 rounded-lg px-3 text-sm font-black">Enviar push teste</button>
           </div>
         </div>
       </section>
@@ -4983,6 +6901,20 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMu
           onAction={() => onNavigate(ROUTES.CHAT)}
         />
         <SettingsAction
+          icon={Upload}
+          title="Central de importação"
+          description="Abra a tela dedicada para Google Contacts, CSV/VCF e cadastro manual."
+          actionLabel="Abrir"
+          onAction={() => onNavigate(ROUTES.IMPORT)}
+        />
+        <SettingsAction
+          icon={Pencil}
+          title="Campos personalizados"
+          description="Gerencie a estrutura da agenda e acesse os grupos com campos próprios."
+          actionLabel="Abrir"
+          onAction={() => onNavigate(ROUTES.CUSTOM_FIELDS)}
+        />
+        <SettingsAction
           icon={Compass}
           title="Rede pública"
           description={user?.publicVisible ? 'Seu perfil está visível para exploração dentro da plataforma.' : 'A visibilidade pública será configurada fora da tela de perfil.'}
@@ -5014,31 +6946,31 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMu
 
       <section className="glass-panel rounded-lg p-4">
         <div className="mb-3">
-          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Integrações futuras</p>
-          <h2 className="mt-1 text-base font-black text-slate-100">Importações em preparação</h2>
-          <p className="mt-1 text-sm font-semibold text-slate-500">O MVP já cobre Google, CSV e manual. Estes conectores ficam sinalizados para evolução sem criar expectativa de uso imediato.</p>
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Imports compatíveis</p>
+          <h2 className="mt-1 text-base font-black text-slate-100">Centrais já cobertas pelo parser</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">Use a central de importação para subir VCF do Apple Contacts/iCloud e CSVs compatíveis de Outlook ou LinkedIn.</p>
         </div>
         <div className="grid gap-3 md:grid-cols-3">
           <SettingsAction
-            icon={Lock}
+            icon={Upload}
             title="Apple Contacts"
-            description="Importação direta do iCloud/Apple Contacts será adicionada em etapa posterior."
-            actionLabel="Em breve"
-            disabled
+            description="VCF exportado do app Contatos ou iCloud já entra pelo importador atual."
+            actionLabel="Abrir central"
+            onAction={() => onNavigate(ROUTES.IMPORT)}
           />
           <SettingsAction
-            icon={Lock}
+            icon={Upload}
             title="Outlook"
-            description="Conector Microsoft/Outlook está previsto para importar contatos corporativos."
-            actionLabel="Em breve"
-            disabled
+            description="CSV compatível do Outlook pode ser carregado agora pela central de importação."
+            actionLabel="Abrir central"
+            onAction={() => onNavigate(ROUTES.IMPORT)}
           />
           <SettingsAction
-            icon={Lock}
+            icon={Upload}
             title="LinkedIn export"
-            description="Fluxo para processar exportações do LinkedIn sem violar permissões da plataforma."
-            actionLabel="Em breve"
-            disabled
+            description="Exportações CSV compatíveis do LinkedIn são processadas pelo parser local."
+            actionLabel="Abrir central"
+            onAction={() => onNavigate(ROUTES.IMPORT)}
           />
         </div>
       </section>
@@ -5069,16 +7001,6 @@ function PublicProfileSettingsPage({ user, onSaveUser, onNavigate }) {
   const [errors, setErrors] = useState({})
   const [cepStatus, setCepStatus] = useState('')
   const [status, setStatus] = useState('')
-
-  if (!hasGoogleConnection(user)) {
-    return (
-      <GoogleRequiredPanel
-        title="Perfil público bloqueado"
-        description="Conecte sua conta Google antes de configurar a visibilidade pública."
-        onNavigate={onNavigate}
-      />
-    )
-  }
 
   function updateDraft(field, value) {
     setDraft((current) => {
@@ -5501,10 +7423,10 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSug
       </button>
       <PageTitle eyebrow="Novo contato" title="Salvar contato" description="Informe o serviço para a categoria ser definida automaticamente." />
       <form onSubmit={submit} noValidate className="glass-panel rounded-lg p-4 sm:p-5">
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Nome" required error={errors.name}>
-          <input value={form.name} onChange={(event) => updateForm('name', event.target.value)} className={inputClass(errors.name)} placeholder="Nome do contato" />
-        </Field>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Nome" required error={errors.name}>
+            <input value={form.name} onChange={(event) => updateForm('name', event.target.value)} className={inputClass(errors.name)} placeholder="Nome do contato" />
+          </Field>
           <Field label="Telefone" required error={errors.phone}>
             <input value={form.phone} onChange={(event) => updateForm('phone', event.target.value)} className={inputClass(errors.phone)} placeholder="WhatsApp ou número" />
           </Field>
@@ -5513,6 +7435,9 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSug
           </Field>
           <Field label="Cidade">
             <input value={form.city} onChange={(event) => updateForm('city', event.target.value)} className="field-input" placeholder="São Paulo" />
+          </Field>
+          <Field label="Empresa / organização">
+            <input value={form.organization} onChange={(event) => updateForm('organization', event.target.value)} className="field-input" placeholder="Empresa, comunidade ou organização" />
           </Field>
         </div>
 
@@ -5576,18 +7501,63 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSug
               <textarea value={form.description} onChange={(event) => updateForm('description', event.target.value)} className="field-input min-h-20 resize-y" placeholder="Quem é, contexto, relação ou observações úteis." />
             </Field>
             <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="O que demanda atualmente">
-                <textarea value={form.demand} onChange={(event) => updateForm('demand', event.target.value)} className="field-input min-h-20 resize-y" placeholder="O que essa pessoa busca, precisa ou está tentando resolver." />
-              </Field>
-              <Field label="Problema que resolve">
-                <textarea value={form.solves} onChange={(event) => updateForm('solves', event.target.value)} className="field-input min-h-20 resize-y" placeholder="Que tipo de problema, serviço ou oportunidade essa pessoa resolve." />
-              </Field>
-            </div>
-            <Field label="Tags">
-              <input value={form.tags} onChange={(event) => updateForm('tags', event.target.value)} className="field-input" placeholder="limpeza, evento, indicação, urgente" list="network-agenda-tag-suggestions" />
-              <TagSuggestionDatalist id="network-agenda-tag-suggestions" tags={tagSuggestions} />
+            <Field label="O que demanda atualmente">
+              <textarea value={form.demand} onChange={(event) => updateForm('demand', event.target.value)} className="field-input min-h-20 resize-y" placeholder="O que essa pessoa busca, precisa ou está tentando resolver." />
+            </Field>
+            <Field label="Problema que resolve">
+              <textarea value={form.solves} onChange={(event) => updateForm('solves', event.target.value)} className="field-input min-h-20 resize-y" placeholder="Que tipo de problema, serviço ou oportunidade essa pessoa resolve." />
             </Field>
           </div>
+          <Field label="Tags da demanda">
+            <input value={form.demand_tags} onChange={(event) => updateForm('demand_tags', event.target.value)} className="field-input" placeholder="limpeza, reforma, jurídico..." list="network-agenda-demand-tag-suggestions" />
+            <TagSuggestionDatalist id="network-agenda-demand-tag-suggestions" tags={tagSuggestions} />
+          </Field>
+          <Field label="Tags">
+            <input value={form.tags} onChange={(event) => updateForm('tags', event.target.value)} className="field-input" placeholder="limpeza, evento, indicação, urgente" list="network-agenda-tag-suggestions" />
+            <TagSuggestionDatalist id="network-agenda-tag-suggestions" tags={tagSuggestions} />
+          </Field>
+        </div>
+
+        <div className="glass-panel-soft mt-4 rounded-lg p-3">
+          <p className="mb-3 text-xs font-black uppercase tracking-widest text-slate-500">Contato e links</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Email principal">
+              <input value={form.email} onChange={(event) => updateForm('email', event.target.value)} className="field-input" placeholder="email@exemplo.com" type="email" />
+            </Field>
+            <Field label="WhatsApp">
+              <input value={form.whatsapp} onChange={(event) => updateForm('whatsapp', event.target.value)} className="field-input" placeholder="Número do WhatsApp" />
+            </Field>
+            <Field label="Instagram">
+              <input value={form.instagram} onChange={(event) => updateForm('instagram', event.target.value)} className="field-input" placeholder="@perfil ou URL" />
+            </Field>
+            <Field label="LinkedIn">
+              <input value={form.linkedin} onChange={(event) => updateForm('linkedin', event.target.value)} className="field-input" placeholder="URL do LinkedIn" />
+            </Field>
+            <Field label="URL customizada" className="sm:col-span-2">
+              <input value={form.custom_url} onChange={(event) => updateForm('custom_url', event.target.value)} className="field-input" placeholder="Site, portfólio ou página pessoal" />
+            </Field>
+          </div>
+          <div className="mt-3 grid gap-3">
+            <LabeledValueListEditor
+              title="Telefones adicionais"
+              valueKey="phone"
+              items={form.additionalPhones}
+              onChange={(nextValue) => updateForm('additionalPhones', nextValue)}
+              addLabel="Adicionar telefone"
+              placeholder="Telefone adicional"
+              fallbackLabel="Telefone"
+            />
+            <LabeledValueListEditor
+              title="Emails adicionais"
+              valueKey="email"
+              items={form.additionalEmails}
+              onChange={(nextValue) => updateForm('additionalEmails', nextValue)}
+              addLabel="Adicionar email"
+              placeholder="email@exemplo.com"
+              fallbackLabel="Email"
+            />
+          </div>
+        </div>
         </div>
 
         <input
@@ -5725,10 +7695,12 @@ function NewContactPage({ form, updateForm, addContact, inferredCategory, tagSug
 }
 
 function contactToEditForm(contact) {
+  const phones = contactPhones(contact)
+  const emails = contactEmails(contact)
   return {
     id: contact.id,
     name: contact.name ?? '',
-    phone: contact.phone ?? '',
+    phone: phones[0]?.phone ?? contact.phone ?? '',
     service: contact.service ?? '',
     note: contact.note ?? '',
     city: contact.city ?? '',
@@ -5737,14 +7709,18 @@ function contactToEditForm(contact) {
     source: contact.source ?? 'Manual',
     description: contact.description ?? '',
     demand: contact.demand ?? '',
+    demand_tags: contact.demand_tags ?? '',
     solves: contact.solves ?? '',
     tags: contact.tags ?? '',
-    email: contact.email ?? '',
+    email: emails[0]?.email ?? contact.email ?? '',
     whatsapp: contact.whatsapp ?? '',
     instagram: contact.instagram ?? '',
     linkedin: contact.linkedin ?? '',
+    organization: contact.organization ?? '',
     custom_url: contact.custom_url ?? '',
     avatar_url: contact.avatar_url ?? '',
+    additionalPhones: buildAdditionalPhoneRows(contact),
+    additionalEmails: buildAdditionalEmailRows(contact),
     custom_fields: contact.custom_fields ?? '[]',
     custom_field_values: contact.custom_field_values?.length ? contact.custom_field_values.map((item) => normalizeCustomFieldValueItem(item)) : parseCustomFields(contact.custom_fields).map((item) => normalizeCustomFieldValueItem(item)),
     crm_status: contact.crm_status ?? 'Novo',
@@ -6221,6 +8197,10 @@ function EditContactModal({ contact, tagSuggestions, customFieldDefinitions, onC
                 <textarea value={draft.solves} onChange={(event) => updateDraft('solves', event.target.value)} className="field-input min-h-20 resize-y" />
               </Field>
             </div>
+            <Field label="Tags da demanda">
+              <input value={draft.demand_tags} onChange={(event) => updateDraft('demand_tags', event.target.value)} className="field-input" placeholder="Use tags já existentes para estruturar a demanda" list="network-agenda-edit-demand-tag-suggestions" />
+              <TagSuggestionDatalist id="network-agenda-edit-demand-tag-suggestions" tags={tagSuggestions} />
+            </Field>
             <Field label="Tags">
               <input value={draft.tags} onChange={(event) => updateDraft('tags', event.target.value)} className="field-input" placeholder="Tags separadas por vírgula" list="network-agenda-edit-tag-suggestions" />
               <TagSuggestionDatalist id="network-agenda-edit-tag-suggestions" tags={tagSuggestions} />
@@ -6238,9 +8218,32 @@ function EditContactModal({ contact, tagSuggestions, customFieldDefinitions, onC
               <Field label="LinkedIn">
                 <input value={draft.linkedin} onChange={(event) => updateDraft('linkedin', event.target.value)} className="field-input" />
               </Field>
+              <Field label="Empresa / organização">
+                <input value={draft.organization} onChange={(event) => updateDraft('organization', event.target.value)} className="field-input" />
+              </Field>
               <Field label="URL customizada">
                 <input value={draft.custom_url} onChange={(event) => updateDraft('custom_url', event.target.value)} className="field-input" />
               </Field>
+            </div>
+            <div className="grid gap-3">
+              <LabeledValueListEditor
+                title="Telefones adicionais"
+                valueKey="phone"
+                items={draft.additionalPhones}
+                onChange={(nextValue) => updateDraft('additionalPhones', nextValue)}
+                addLabel="Adicionar telefone"
+                placeholder="Telefone adicional"
+                fallbackLabel="Telefone"
+              />
+              <LabeledValueListEditor
+                title="Emails adicionais"
+                valueKey="email"
+                items={draft.additionalEmails}
+                onChange={(nextValue) => updateDraft('additionalEmails', nextValue)}
+                addLabel="Adicionar email"
+                placeholder="email@exemplo.com"
+                fallbackLabel="Email"
+              />
             </div>
             <CustomFieldValuesEditor
               definitions={customFieldDefinitions}
@@ -6811,7 +8814,7 @@ function SharedGroupsPage({ user, groups, contacts, publicProfiles, users, group
                 canManage={canManageSelectedGroup}
               />
 
-              <GraphWorkspace
+              <DeferredGraphWorkspace
                 contextLabel="Grafo do grupo"
                 title={`Rede compartilhada: ${selectedGroup.name}`}
                 description="Leia este contexto como uma rede própria, separada da sua base privada, mas com indicação de vínculos públicos e internos."
@@ -6986,6 +8989,7 @@ function SharedGroupsPageModern({
   user,
   groups,
   contacts,
+  publicProfiles,
   users,
   groupContactsById,
   groupMessagesById,
@@ -7004,6 +9008,7 @@ function SharedGroupsPageModern({
   onDeleteCustomField,
   onUpdateContactCustomFields,
   onClearMessages,
+  onAskCopilot,
   onNavigate,
 }) {
   const [activeTab, setActiveTab] = useState('view')
@@ -7058,8 +9063,8 @@ function SharedGroupsPageModern({
   }
 
   const selectedGraphItems = useMemo(
-    () => (selectedGroup ? buildGroupGraphRecords({ group: selectedGroup, members: selectedMembers, users, currentUser: user }) : []),
-    [selectedGroup, selectedMembers, users, user],
+    () => (selectedGroup ? buildGroupGraphRecords({ group: selectedGroup, members: selectedMembers, contacts: selectedContacts, publicProfiles, users, currentUser: user }) : []),
+    [selectedGroup, selectedMembers, selectedContacts, publicProfiles, users, user],
   )
 
   useEffect(() => {
@@ -7246,6 +9251,10 @@ function SharedGroupsPageModern({
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
+                      <button type="button" onClick={() => onNavigate(`${ROUTES.GROUP_ADMIN}/${selectedGroup.id}`)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+                        <Pencil size={16} />
+                        Administração
+                      </button>
                       <button type="button" onClick={() => setGroupDataOpen(true)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
                         <UsersRound size={16} />
                         Acessar dados do grupo
@@ -7292,12 +9301,14 @@ function SharedGroupsPageModern({
                       messages={selectedMessages}
                       currentUserId={currentUserId}
                       members={selectedMembers}
+                      sharedContacts={selectedContacts}
                       users={users}
                       currentUser={user}
                       canManage={canManageSelectedGroup}
                       draft={groupMessageDraft}
                       onDraftChange={setGroupMessageDraft}
                       onSubmit={submitGroupMessage}
+                      onAskCopilot={(message) => onAskCopilot?.(selectedGroup.id, message)}
                       memberCount={selectedMembers.length}
                       onOpenData={() => setGroupDataOpen(true)}
                       onClearConversation={() => onClearMessages?.(selectedGroup.id)}
@@ -7387,12 +9398,14 @@ function GroupChatPanel({
   messages,
   currentUserId,
   members,
+  sharedContacts,
   users,
   currentUser,
   canManage,
   draft,
   onDraftChange,
   onSubmit,
+  onAskCopilot,
   memberCount,
   onOpenData,
   onClearConversation,
@@ -7403,11 +9416,17 @@ function GroupChatPanel({
   const [toolsOpen, setToolsOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [actionStatus, setActionStatus] = useState('')
+  const [copilotDraft, setCopilotDraft] = useState('')
+  const [copilotMessages, setCopilotMessages] = useState([])
+  const [isCopilotThinking, setIsCopilotThinking] = useState(false)
 
   useEffect(() => {
     setToolsOpen(false)
     setSearchQuery('')
     setActionStatus('')
+    setCopilotDraft('')
+    setCopilotMessages([])
+    setIsCopilotThinking(false)
   }, [group?.id])
 
   useEffect(() => {
@@ -7442,6 +9461,54 @@ function GroupChatPanel({
     return (messages ?? []).filter((message) => !q || matchText(q, [message.message, message.sender_name, message.sender_email, formatDateTime(message.created_at)]))
   }, [messages, searchQuery])
 
+  async function runCopilot(message) {
+    if (!message || isCopilotThinking || !onAskCopilot) return
+    const userMessage = {
+      id: `group-copilot-user-${Date.now()}`,
+      role: 'user',
+      text: message,
+    }
+    setCopilotMessages((current) => [...current, userMessage])
+    setCopilotDraft('')
+    setIsCopilotThinking(true)
+    try {
+      const response = await onAskCopilot(message)
+      setCopilotMessages((current) => [
+        ...current,
+        {
+          id: `group-copilot-assistant-${Date.now()}`,
+          role: 'assistant',
+          text: response?.answer || 'Não consegui montar uma leitura útil para esse pedido.',
+          provider: response?.provider || 'local',
+        },
+      ])
+    } catch {
+      setCopilotMessages((current) => [
+        ...current,
+        {
+          id: `group-copilot-assistant-${Date.now()}`,
+          role: 'assistant',
+          text: 'Não consegui consultar o copiloto do grupo agora.',
+          provider: 'local',
+        },
+      ])
+    } finally {
+      setIsCopilotThinking(false)
+    }
+  }
+
+  async function submitCopilot(event) {
+    event.preventDefault()
+    const message = copilotDraft.trim()
+    await runCopilot(message)
+  }
+
+  function quickCopilot(message) {
+    if (!message || isCopilotThinking || !onAskCopilot) return
+    setCopilotDraft('')
+    void runCopilot(message)
+  }
+
   async function handleClearConversation() {
     if (!canManage) {
       setActionStatus('Somente admin ou owner pode limpar a conversa.')
@@ -7474,7 +9541,7 @@ function GroupChatPanel({
         <div className="min-w-0">
           <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Sala do grupo</p>
           <h3 className="mt-1 truncate text-sm font-black text-slate-100">{group.name}</h3>
-          <p className="mt-1 text-xs font-semibold text-slate-500">{memberCount} membros conversando em tempo real.</p>
+          <p className="mt-1 text-xs font-semibold text-slate-500">{memberCount} membros e {(sharedContacts ?? []).length} contatos compartilhados neste contexto.</p>
         </div>
         <button
           type="button"
@@ -7553,6 +9620,7 @@ function GroupChatPanel({
               <div className="grid grid-cols-2 gap-2">
                 <Metric value={memberCount} label="membros" />
                 <Metric value={messages.length} label="mensagens" />
+                <Metric value={(sharedContacts ?? []).length} label="contatos" />
                 <Metric value={group.area || 'sem área'} label="área" />
                 <Metric value={canManage ? 'admin' : 'membro'} label="acesso" />
               </div>
@@ -7561,6 +9629,69 @@ function GroupChatPanel({
                 <DetailRow label="Meta mínima" value={`${group.people_goal || 3}+ pessoas`} />
                 <DetailRow label="Seu perfil" value={currentUser?.name || 'Você'} />
               </div>
+            </section>
+
+            <section className="space-y-3 rounded-2xl border border-cyan-400/15 bg-cyan-500/5 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-[11px] font-black uppercase tracking-widest text-cyan-300">Copiloto do grupo</p>
+                  <p className="mt-1 text-xs font-semibold leading-5 text-slate-400">Consulta a base compartilhada deste grupo sem misturar com a agenda privada.</p>
+                </div>
+                <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-cyan-100">{(sharedContacts ?? []).length} base</span>
+              </div>
+
+              <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                {[
+                  `quem resolve ${group.area || 'esse tema'}?`,
+                  'quem esta buscando algo agora?',
+                  'quais contatos tem DDD 11?',
+                ].map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    onClick={() => quickCopilot(prompt)}
+                    className="action-card shrink-0 rounded-lg px-2.5 py-1.5 text-xs font-black text-slate-300"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+
+              <div className="max-h-52 space-y-2 overflow-y-auto pr-1">
+                {copilotMessages.length ? copilotMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={[
+                      'rounded-2xl border px-3 py-2.5 text-sm leading-6',
+                      message.role === 'user' ? 'border-cyan-400/20 bg-cyan-400/10 text-cyan-50' : 'border-slate-800 bg-slate-950/45 text-slate-200',
+                    ].join(' ')}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-[10px] font-black uppercase tracking-widest opacity-70">{message.role === 'user' ? 'Você' : 'Copiloto'}</p>
+                      {message.provider ? <span className="text-[10px] font-black uppercase tracking-widest opacity-50">{message.provider === 'openai' ? 'IA conectada' : 'motor local'}</span> : null}
+                    </div>
+                    <p className="mt-1 whitespace-pre-wrap">{message.text}</p>
+                  </div>
+                )) : (
+                  <p className="rounded-2xl border border-dashed border-slate-800 p-4 text-sm font-semibold text-slate-500">Peça algo como "quem resolve limpeza?" ou "quem esta buscando parceria?" para analisar a base compartilhada.</p>
+                )}
+                {isCopilotThinking ? (
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/45 px-3 py-2.5 text-sm font-semibold text-slate-400">Lendo os contatos compartilhados...</div>
+                ) : null}
+              </div>
+
+              <form onSubmit={submitCopilot} className="grid gap-2">
+                <textarea
+                  value={copilotDraft}
+                  onChange={(event) => setCopilotDraft(event.target.value)}
+                  rows={2}
+                  className="field-input min-h-20 resize-none py-3"
+                  placeholder="Ex.: quem do grupo presta servico de limpeza comercial?"
+                />
+                <button type="submit" disabled={isCopilotThinking} className="primary-button inline-flex h-10 items-center justify-center rounded-lg px-3 text-sm font-black disabled:cursor-not-allowed disabled:opacity-50">
+                  Consultar copiloto
+                </button>
+              </form>
             </section>
 
             <div className="glass-panel-soft flex items-center gap-2 rounded-lg px-3">
@@ -7765,7 +9896,7 @@ function GroupGraphPanel({ group, members, users, currentUser, graphItems }) {
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState('')
   const visibleItems = useMemo(() => {
-    return (graphItems ?? []).filter((item) => matchText(query, [item.name, item.service, item.city, item.locationLabel, item.roleLabel, item.ddd, item.demand, item.solves, ...(item.tags ?? [])]))
+    return (graphItems ?? []).filter((item) => matchText(query, [item.name, item.service, item.city, item.locationLabel, item.roleLabel, item.ddd, item.demand, item.solves, ...(item.demandTags ?? []), ...(item.tags ?? [])]))
   }, [graphItems, query])
 
   useEffect(() => {
@@ -7789,12 +9920,12 @@ function GroupGraphPanel({ group, members, users, currentUser, graphItems }) {
       <section className="glass-panel rounded-xl p-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Grafo dos membros</p>
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Grafo do grupo</p>
             <h3 className="mt-1 text-xl font-black text-slate-100">{group.name}</h3>
-            <p className="mt-1 text-sm font-semibold text-slate-500">Somente membros, com posição aproximada baseada em localidade e DDD quando houver.</p>
+            <p className="mt-1 text-sm font-semibold text-slate-500">Membros e contatos compartilhados com posição aproximada por localidade e DDD quando houver.</p>
           </div>
           <div className="grid grid-cols-4 gap-2">
-            <Metric value={summary.nodes} label="membros" />
+            <Metric value={summary.nodes} label="nós" />
             <Metric value={summary.located} label="localizados" />
             <Metric value={summary.ddds} label="DDDs" />
             <Metric value={summary.cities} label="cidades" />
@@ -7820,7 +9951,7 @@ function GroupGraphPanel({ group, members, users, currentUser, graphItems }) {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             className="h-11 min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-100 outline-none placeholder:text-slate-600"
-            placeholder="Buscar membro, cidade, DDD, área ou tag"
+            placeholder="Buscar pessoa, cidade, DDD, área ou tag"
           />
         </div>
 
@@ -7837,7 +9968,7 @@ function GroupGraphPanel({ group, members, users, currentUser, graphItems }) {
           </div>
         ) : (
           <div className="mt-4 rounded-lg border border-dashed border-slate-800 p-6 text-sm font-semibold text-slate-500">
-            Nenhum membro encontrado para os filtros atuais.
+            Nenhum nó encontrado para os filtros atuais.
           </div>
         )}
       </section>
@@ -7867,13 +9998,13 @@ function GroupGraphPanel({ group, members, users, currentUser, graphItems }) {
               ) : null}
             </div>
           ) : (
-            <p className="text-sm font-semibold text-slate-500">Selecione um membro no grafo para ver a leitura de proximidade.</p>
+            <p className="text-sm font-semibold text-slate-500">Selecione um nó no grafo para ver a leitura de proximidade.</p>
           )}
         </div>
 
         <div className="glass-panel rounded-xl p-3">
           <div className="mb-2 flex items-center justify-between">
-            <p className="text-sm font-black text-slate-100">Membros por proximidade</p>
+            <p className="text-sm font-black text-slate-100">Rede do grupo por proximidade</p>
             <span className="text-xs font-black text-slate-500">{visibleItems.length}</span>
           </div>
           <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
@@ -7910,7 +10041,7 @@ function GroupLocationPanel({ group, members, users, currentUser, graphItems }) 
   )
 
   const visibleItems = useMemo(() => {
-    return (graphItems ?? []).filter((item) => matchText(query, [item.name, item.service, item.city, item.locationLabel, item.ddd, item.roleLabel, ...(item.tags ?? [])]))
+    return (graphItems ?? []).filter((item) => matchText(query, [item.name, item.service, item.city, item.locationLabel, item.ddd, item.roleLabel, item.demand, item.solves, ...(item.demandTags ?? []), ...(item.tags ?? [])]))
   }, [graphItems, query])
 
   useEffect(() => {
@@ -7937,10 +10068,10 @@ function GroupLocationPanel({ group, members, users, currentUser, graphItems }) 
             <div>
               <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Mapa e proximidade</p>
               <h3 className="mt-1 text-xl font-black text-slate-100">{group.name}</h3>
-              <p className="mt-1 text-sm font-semibold text-slate-500">Veja a proximidade de cada membro em relação a você e ao grupo.</p>
+              <p className="mt-1 text-sm font-semibold text-slate-500">Veja a proximidade de membros e contatos compartilhados em relação a você e ao grupo.</p>
             </div>
             <div className="grid grid-cols-4 gap-2">
-              <Metric value={summary.nodes} label="membros" />
+              <Metric value={summary.nodes} label="nós" />
               <Metric value={summary.located} label="localizados" />
               <Metric value={summary.ddds} label="DDDs" />
               <Metric value={summary.cities} label="cidades" />
@@ -7962,11 +10093,11 @@ function GroupLocationPanel({ group, members, users, currentUser, graphItems }) 
             <Search size={16} className="text-slate-500" />
             <input
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              className="h-11 min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-100 outline-none placeholder:text-slate-600"
-              placeholder="Buscar por cidade, DDD, nome ou área"
-            />
-          </div>
+            onChange={(event) => setQuery(event.target.value)}
+            className="h-11 min-w-0 flex-1 bg-transparent text-sm font-semibold text-slate-100 outline-none placeholder:text-slate-600"
+            placeholder="Buscar por cidade, DDD, nome, área ou tag"
+          />
+        </div>
         </div>
 
         <GoogleLocationMap
@@ -7993,7 +10124,7 @@ function GroupLocationPanel({ group, members, users, currentUser, graphItems }) 
               </div>
             </div>
           ) : (
-            <p className="text-sm font-semibold text-slate-500">Selecione um membro para ver a proximidade.</p>
+            <p className="text-sm font-semibold text-slate-500">Selecione um membro ou contato para ver a proximidade.</p>
           )}
         </div>
 
@@ -8049,6 +10180,7 @@ function GroupDetailsModal({
   onUpdateContactCustomFields,
   onEditContact,
   onNavigate,
+  embedded = false,
 }) {
   const [editDraft, setEditDraft] = useState({
     name: group.name || '',
@@ -8103,9 +10235,8 @@ function GroupDetailsModal({
 
   const groupRoleTone = canManage ? 'text-cyan-200 border-cyan-400/20 bg-cyan-400/10' : 'text-slate-300 border-slate-700 bg-slate-900/60'
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/70 p-3 sm:items-center">
-      <div className="glass-panel max-h-[92vh] w-full max-w-4xl overflow-auto rounded-2xl p-4 shadow-2xl sm:p-5">
+  const panel = (
+      <div className={[embedded ? 'glass-panel w-full rounded-2xl p-4 shadow-2xl sm:p-5' : 'glass-panel max-h-[92vh] w-full max-w-4xl overflow-auto rounded-2xl p-4 shadow-2xl sm:p-5'].join(' ')}>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Acessar dados do grupo</p>
@@ -8116,9 +10247,11 @@ function GroupDetailsModal({
               <span className="text-xs font-semibold text-slate-400">{currentUser?.name || 'Você'}</span>
             </div>
           </div>
-          <button type="button" onClick={onClose} className="rounded-lg bg-slate-900 p-2 text-slate-400" aria-label="Fechar">
-            <X size={18} />
-          </button>
+          {!embedded ? (
+            <button type="button" onClick={onClose} className="rounded-lg bg-slate-900 p-2 text-slate-400" aria-label="Fechar">
+              <X size={18} />
+            </button>
+          ) : null}
         </div>
 
         <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
@@ -8289,6 +10422,13 @@ function GroupDetailsModal({
           </div>
         </div>
       </div>
+  )
+
+  if (embedded) return panel
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/70 p-3 sm:items-center">
+      {panel}
     </div>
   )
 }
@@ -8385,13 +10525,12 @@ function MapPage({ contacts, users, publicProfiles, groups, groupContactsById, u
         }
       />
       {!hasGoogleConnection(user) ? (
-        <GoogleRequiredPanel
-          title="Google ausente"
-          description="A conta Google libera origem, geolocalização e mapas. O grafo 3D continua disponível para navegação e análise da rede."
-          onNavigate={onNavigate}
-        />
+        <section className="glass-panel rounded-lg p-4">
+          <p className="text-sm font-black text-slate-100">Conexão Google opcional</p>
+          <p className="mt-1 text-sm font-semibold leading-6 text-slate-500">Você pode usar o grafo normalmente. Conectar Google só melhora importação, avatar e alguns metadados de origem.</p>
+        </section>
       ) : null}
-      <GraphWorkspace
+      <DeferredGraphWorkspace
         contextLabel="Grafo interno"
         title="Sua agenda como inteligência de rede"
         description="Filtre por tag, fonte, DDD, demanda, solução, grupo e vínculos com perfis públicos da plataforma."
@@ -8405,7 +10544,7 @@ function MapPage({ contacts, users, publicProfiles, groups, groupContactsById, u
           if (item.actionKind === 'service') onOpenGroup(item.raw)
         }}
       />
-      <NetworkGraphMap user={user} contacts={mapItems} />
+      <DeferredNetworkGraphMap user={user} contacts={mapItems} />
     </div>
   )
 }
@@ -8429,7 +10568,7 @@ function GraphPage({ contacts, publicProfiles, users, groups, groupContactsById,
           </button>
         }
       />
-      <GraphWorkspace
+      <DeferredGraphWorkspace
         contextLabel="Grafo privado"
         title="Rede pessoal fora dos grupos"
         description="Filtre sua base por tag, fonte, DDD, demanda, solução, vínculo e contexto público com leitura semântica."
@@ -8536,7 +10675,7 @@ function NetworkGraphMap({ user, contacts }) {
   const nearbyItems = useMemo(() => {
     const query = serviceQuery.trim()
     return enrichedItems
-      .filter((contact) => !query || matchText(query, [contact.name, contact.service, contact.category?.label, contact.category?.group, contact.city, contact.address, contact.ddd, contact.locationLabel]))
+      .filter((contact) => !query || matchText(query, [contact.name, contact.service, contact.category?.label, contact.category?.group, contact.city, contact.address, contact.ddd, contact.locationLabel, contact.organization, contact.demand, contact.demand_tags, contact.solves, ...contactCustomFieldSearchValues(contact)]))
       .sort((a, b) => (a.distanceKm ?? 99999) - (b.distanceKm ?? 99999))
   }, [enrichedItems, serviceQuery])
 
@@ -8807,6 +10946,7 @@ function NetworkGraph({
         email: contact.email ?? '',
         ddd: contact.ddd ?? extractDdd(contact.phone || contact.whatsapp || ''),
         demand: contact.demand ?? contact.publicDemand ?? '',
+        demandTags: contact.demandTags ?? [],
         solves: contact.solves ?? contact.publicSolves ?? contact.publicDescription ?? contact.offeredServices ?? '',
         organization: contact.organization ?? contact.company ?? contact.org ?? '',
         scopes: contact.scopes ?? [],
@@ -8817,8 +10957,9 @@ function NetworkGraph({
         locationLabel: contact.locationLabel ?? contact.city ?? '',
         locationQuery: contact.locationQuery ?? contact.address ?? contact.city ?? '',
         locationSourceLabel: contact.locationSourceLabel ?? contact.source ?? '',
-        linkedPlatform: Boolean(contact.linkedPlatform),
-        linkedLabel: contact.linkedLabel ?? '',
+        potentialMatches: Array.isArray(contact.potentialMatches) ? contact.potentialMatches : [],
+        linkedPlatform: hasContactPlatformLink(contact),
+        linkedLabel: contactPlatformLinkLabel(contact),
         graphX: contact.graphX,
         graphY: contact.graphY,
         graphZ: contact.graphZ,
@@ -9073,11 +11214,12 @@ const GRAPH_FILTER_LABELS = {
   ddd: 'DDDs',
   demand: 'Demandas',
   solve: 'Soluções',
+  match: 'Matches',
   link: 'Vínculos',
   org: 'Empresas',
 }
 
-const GRAPH_SEMANTIC_FILTERS = new Set(['interno', 'grupo', 'publico', 'tag', 'source', 'ddd', 'demand', 'solve', 'link', 'org'])
+const GRAPH_SEMANTIC_FILTERS = new Set(['interno', 'grupo', 'publico', 'tag', 'source', 'ddd', 'demand', 'solve', 'match', 'link', 'org'])
 
 function graphFilterLabel(value) {
   return GRAPH_FILTER_LABELS[value] ?? value
@@ -9090,7 +11232,8 @@ function graphContactSemanticTypes(contact) {
   if (contact?.ddd) types.add('ddd')
   if (contact?.demand?.trim()) types.add('demand')
   if (contact?.solves?.trim()) types.add('solve')
-  if (contact?.linkedPlatform) types.add('link')
+  if (contact?.potentialMatches?.length) types.add('match')
+  if (hasContactPlatformLink(contact)) types.add('link')
   if (contact?.organization || contact?.company || contact?.org) types.add('org')
   return [...types]
 }
@@ -9250,6 +11393,7 @@ function buildCanvasGraph(contacts, query, W, H) {
       contact.organization,
       contact.company,
       contact.org,
+      ...(contact.demandTags ?? []),
       ...(contact.tags ?? []),
       ...(contact.groupNames ?? []),
     ]))
@@ -9261,6 +11405,7 @@ function buildCanvasGraph(contacts, query, W, H) {
   const edges = []
   const catNodeIds = new globalThis.Map()
   const groupNodeIds = new globalThis.Map()
+  const contactNodeMap = new globalThis.Map()
   const semanticBuckets = new globalThis.Map()
   const semanticNodeIds = new globalThis.Map()
   const semanticSpecs = [
@@ -9462,6 +11607,7 @@ function buildCanvasGraph(contacts, query, W, H) {
         semanticTypes: Array.isArray(contact.semanticTypes) ? contact.semanticTypes : graphContactSemanticTypes(contact),
         alpha: 1,
       })
+      contactNodeMap.set(id, contact)
       edges.push({ a: catNodeIds.get(catId), b: id, k: 'contact', catId })
     })
   })
@@ -9510,32 +11656,56 @@ function buildCanvasGraph(contacts, query, W, H) {
 
   const shouldShowGroups = filteredContacts.some((contact) => contact.kind !== 'member')
   if (shouldShowGroups) {
-    GROUPS_SEED.filter((group) => !q || matchText(q, [group.name, group.svc, group.resp, group.score, group.cat, String(group.people)]))
+    const groupsInGraph = new globalThis.Map()
+    filteredContacts.forEach((contact) => {
+      ;(contact.groupNames ?? []).forEach((groupName, index) => {
+        const name = String(groupName ?? '').trim()
+        const key = normalize(contact.groupIds?.[index] ?? name)
+        if (!name || !key) return
+        const catId = CATS.some((cat) => cat.id === contact.cat) ? contact.cat : 'business'
+        const current = groupsInGraph.get(key) ?? {
+          key,
+          externalId: String(contact.groupIds?.[index] ?? graphSlug(name)),
+          name,
+          catId,
+          people: 0,
+          sources: new Set(),
+        }
+        current.people += 1
+        current.sources.add(contact.src || contact.source || 'Agenda')
+        if (!current.name || name.length > current.name.length) current.name = name
+        if (!current.catId || current.catId === 'business') current.catId = catId
+        groupsInGraph.set(key, current)
+      })
+    })
+
+    ;[...groupsInGraph.values()]
+      .sort((a, b) => b.people - a.people || a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' }))
       .forEach((group, index) => {
-        const catIndex = Math.max(0, CATS.findIndex((cat) => cat.id === group.cat))
+        const catIndex = Math.max(0, CATS.findIndex((cat) => cat.id === group.catId))
         const base = (Math.PI * 2 * catIndex) / CATS.length
         const angle = base + (index % 2 === 0 ? 0.5 : -0.5)
-        const id = `group-${group.id}`
+        const id = `group-${group.externalId}`
         nodes.push({
           id,
           name: group.name,
           label: group.name,
           x: Math.cos(angle) * 370,
           y: Math.sin(angle) * 370,
-        z: index % 2 === 0 ? 30 : -30,
-        r: 11,
-        col: GRAPH_PALETTE.structure,
-        kind: 'group',
-        catId: group.cat,
-        dashed: true,
+          z: index % 2 === 0 ? 30 : -30,
+          r: 11,
+          col: GRAPH_PALETTE.structure,
+          kind: 'group',
+          catId: group.catId,
+          dashed: true,
           people: group.people,
-          resp: group.resp,
-          score: group.score,
-          svc: group.svc,
+          resp: `${group.people} ligação${group.people === 1 ? '' : 'ões'}`,
+          score: group.people,
+          svc: 'Grupo compartilhado',
           alpha: 1,
         })
-        edges.push({ a: catNodeIds.get(group.cat), b: id, k: 'group', catId: group.cat, col: GRAPH_PALETTE.accent })
-        groupNodeIds.set(normalize(group.name), id)
+        edges.push({ a: catNodeIds.get(group.catId), b: id, k: 'group', catId: group.catId, col: GRAPH_PALETTE.accent })
+        groupNodeIds.set(group.key, id)
       })
   }
 
@@ -9554,9 +11724,22 @@ function buildCanvasGraph(contacts, query, W, H) {
       })
     })
 
-    ;(contact.groupNames ?? []).forEach((groupName) => {
-      const groupId = groupNodeIds.get(normalize(groupName))
+    ;(contact.groupNames ?? []).forEach((groupName, index) => {
+      const groupId = groupNodeIds.get(normalize(contact.groupIds?.[index] ?? groupName))
       if (groupId) edges.push({ a: contactId, b: groupId, k: 'group', catId: contact.cat })
+    })
+  })
+
+  const seenMatches = new Set()
+  filteredContacts.forEach((contact) => {
+    const fromId = `contact-${contact.id}`
+    ;(contact.potentialMatches ?? []).forEach((match) => {
+      const toId = String(match.id || '')
+      if (!contactNodeMap.has(toId)) return
+      const pairKey = [fromId, toId].sort().join('::')
+      if (seenMatches.has(pairKey)) return
+      seenMatches.add(pairKey)
+      edges.push({ a: fromId, b: toId, k: 'match', catId: contact.cat, col: '#f59e0b' })
     })
   })
 
@@ -9577,6 +11760,11 @@ function applyGraphFilter(filter, nodes) {
     }
     if (filter === 'groups') {
       node.alpha = node.kind === 'group' || node.kind === 'member' ? 1 : node.kind === 'cat' ? 0.4 : 0.1
+      return
+    }
+    if (filter === 'match') {
+      const hasMatches = Array.isArray(node.potentialMatches) && node.potentialMatches.length > 0
+      node.alpha = hasMatches ? 1 : node.kind === 'cat' ? 0.32 : 0.08
       return
     }
     if (semanticFilter) {
@@ -9673,18 +11861,18 @@ function renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef) {
     const al = Math.min(a.alpha ?? 1, b.alpha ?? 1)
     if (al <= 0.04) return
     const sc = Math.max(0.45, (a.sc + b.sc) / 2)
-    const color = edge.col ?? (edge.k === 'contact' ? GRAPH_PALETTE.contact : edge.k === 'city' ? GRAPH_PALETTE.accent : edge.k === 'group' ? GRAPH_PALETTE.structure : edge.k === 'semantic' ? GRAPH_PALETTE.tag : GRAPH_PALETTE.accent)
-    const opacity = edge.k === 'hub' ? 0.34 * al : edge.k === 'contact' ? 0.22 * al : edge.k === 'city' ? 0.2 * al : edge.k === 'semantic' ? 0.18 * al : 0.12 * al
-    ctx.setLineDash(edge.k === 'group' ? [6, 9] : edge.k === 'city' || edge.k === 'semantic' ? [2, 5] : [])
+    const color = edge.col ?? (edge.k === 'contact' ? GRAPH_PALETTE.contact : edge.k === 'city' ? GRAPH_PALETTE.accent : edge.k === 'group' ? GRAPH_PALETTE.structure : edge.k === 'semantic' ? GRAPH_PALETTE.tag : edge.k === 'match' ? '#f59e0b' : GRAPH_PALETTE.accent)
+    const opacity = edge.k === 'hub' ? 0.34 * al : edge.k === 'contact' ? 0.22 * al : edge.k === 'city' ? 0.2 * al : edge.k === 'semantic' ? 0.18 * al : edge.k === 'match' ? 0.28 * al : 0.12 * al
+    ctx.setLineDash(edge.k === 'group' ? [6, 9] : edge.k === 'city' || edge.k === 'semantic' ? [2, 5] : edge.k === 'match' ? [10, 6] : [])
     ctx.strokeStyle = hexA(color, opacity)
-    ctx.lineWidth = (edge.k === 'hub' ? 1.2 : edge.k === 'contact' ? 0.9 : edge.k === 'city' ? 0.8 : 0.7) * sc
+    ctx.lineWidth = (edge.k === 'hub' ? 1.2 : edge.k === 'contact' ? 0.9 : edge.k === 'city' ? 0.8 : edge.k === 'match' ? 1.1 : 0.7) * sc
     ctx.beginPath()
     ctx.moveTo(a.sx, a.sy)
     ctx.lineTo(b.sx, b.sy)
     ctx.stroke()
     ctx.setLineDash([])
 
-    if (edge.k === 'hub' || edge.k === 'contact' || edge.k === 'semantic') {
+    if (edge.k === 'hub' || edge.k === 'contact' || edge.k === 'semantic' || edge.k === 'match') {
       const t = (state.tick / 90 + edgeIndex * 0.17) % 1
       const x = a.sx + (b.sx - a.sx) * t
       const y = a.sy + (b.sy - a.sy) * t
@@ -9749,7 +11937,7 @@ function renderCanvasGraph(ctx, W, H, DPR, nodes, edges, cam, state, nodesRef) {
     } else if (node.kind === 'group') {
       const fs = Math.max(7, Math.round(8.5 * node.sc))
       drawGraphLabel(ctx, node.name, node.sx, node.sy - r - fs, fs, palette.label, 0.7 * al)
-      if (node.sc > 0.42) drawGraphLabel(ctx, `${node.people} mbr`, node.sx, node.sy + r + fs + 2, Math.max(6, Math.round(7 * node.sc)), palette.sublabel, 0.65 * al)
+      if (node.sc > 0.42) drawGraphLabel(ctx, `${node.people} nós`, node.sx, node.sy + r + fs + 2, Math.max(6, Math.round(7 * node.sc)), palette.sublabel, 0.65 * al)
     } else if (node.kind === 'semantic') {
       const fs = Math.max(6, Math.round(7.8 * node.sc))
       drawGraphLabel(ctx, node.label, node.sx, node.sy - r - fs, fs, palette.label, 0.7 * al)
@@ -9973,35 +12161,16 @@ function geocodeAddress(geocoder, address) {
   })
 }
 
-function LoginPage({ onLogin, onGoogleLogin, onMagicLink, supabaseAuthEnabled, onSaveUser, onImportContacts, onImportGoogleContacts, onImportGoogleProfile, theme, onToggleTheme }) {
-  const [mode, setMode] = useState('login')
-  const [email, setEmail] = useState('ana@network.local')
-  const [password, setPassword] = useState('')
+function LoginPage({ onGoogleLogin, onAppleLogin, onMagicLink, supabaseAuthEnabled, authStatus, authStatusChecked, authStatusError, theme, onToggleTheme }) {
+  const [email, setEmail] = useState('')
   const [errors, setErrors] = useState({})
   const [status, setStatus] = useState('')
   const [isGoogleLoading, setIsGoogleLoading] = useState(false)
+  const [isAppleLoading, setIsAppleLoading] = useState(false)
   const [isMagicLoading, setIsMagicLoading] = useState(false)
-
-  async function submit(event) {
-    event.preventDefault()
-    if (supabaseAuthEnabled) {
-      setStatus('Use Google ou magic link neste ambiente.')
-      return
-    }
-    const nextErrors = {
-      email: email.trim() ? '' : 'Obrigatório.',
-      password: password.trim() ? '' : 'Obrigatória.',
-    }
-    setErrors(nextErrors)
-    if (Object.values(nextErrors).some(Boolean)) return
-
-    setStatus('')
-    try {
-      await onLogin({ email: email.trim(), password })
-    } catch (error) {
-      setStatus(error.message || 'Não foi possível entrar.')
-    }
-  }
+  const authWarnings = Array.isArray(authStatus?.warnings) ? authStatus.warnings : []
+  const productionAuthReady = Boolean(authStatus?.production_auth_ready)
+  const authActionEnabled = supabaseAuthEnabled && (!import.meta.env.PROD || productionAuthReady)
 
   return (
     <AuthLayout
@@ -10010,114 +12179,108 @@ function LoginPage({ onLogin, onGoogleLogin, onMagicLink, supabaseAuthEnabled, o
       theme={theme}
       onToggleTheme={onToggleTheme}
     >
-      <div className="glass-panel-soft mb-4 grid grid-cols-2 rounded-lg p-1">
-        {[
-          ['login', 'Entrar'],
-          ['register', 'Cadastrar'],
-        ].map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => setMode(id)}
-            className={[
-              'h-10 rounded-md text-sm font-black transition',
-              mode === id ? 'nav-pill-active' : 'text-slate-400 hover:text-cyan-300',
-            ].join(' ')}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {mode === 'login' ? (
-        <form onSubmit={submit} noValidate className="space-y-3">
-          {supabaseAuthEnabled ? (
-            <div className="rounded-lg border border-cyan-400/20 bg-cyan-500/10 px-3 py-3 text-xs font-bold text-cyan-100">
-              <p>Esta instalação está em modo Supabase-first.</p>
-              <p className="mt-1 text-cyan-100/75">Use Google ou magic link. O login por senha fica desativado aqui para evitar sessão híbrida entre produção e modo local.</p>
-            </div>
-          ) : null}
-          <Field label="Email" required error={errors.email}>
-            <input value={email} onChange={(event) => setEmail(event.target.value)} className={inputClass(errors.email)} type="email" placeholder="você@email.com" />
-          </Field>
-          {!supabaseAuthEnabled ? (
-            <Field label="Senha" required error={errors.password}>
-              <input value={password} onChange={(event) => setPassword(event.target.value)} className={inputClass(errors.password)} type="password" placeholder="Senha" />
-            </Field>
-          ) : null}
-          {status ? (
-            <p className={['rounded-lg border p-3 text-sm font-bold', isGoogleLoading ? 'border-cyan-400/30 bg-cyan-500/10 text-cyan-100' : 'border-rose-400/30 bg-rose-500/10 text-rose-200'].join(' ')}>
-              {status}
+      <form
+        onSubmit={(event) => {
+          event.preventDefault()
+        }}
+        noValidate
+        className="space-y-3"
+      >
+        <div className={['rounded-lg border px-3 py-3 text-xs font-bold', supabaseAuthEnabled ? 'border-cyan-400/20 bg-cyan-500/10 text-cyan-100' : 'border-amber-400/20 bg-amber-500/10 text-amber-100'].join(' ')}>
+          <p>{supabaseAuthEnabled ? 'Esta instalação está em modo Supabase-first.' : 'Faltam variáveis do Supabase no frontend.'}</p>
+          <p className={supabaseAuthEnabled ? 'mt-1 text-cyan-100/75' : 'mt-1 text-amber-100/75'}>
+            {supabaseAuthEnabled
+              ? 'Entre com Google, Apple ou magic link. Depois disso, o app abre a etapa de perfil se ainda faltar completar cadastro.'
+              : 'Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para habilitar OAuth e magic link.'}
+          </p>
+        </div>
+        {authStatus ? (
+          <div className={['rounded-lg border px-3 py-3 text-xs font-bold', productionAuthReady ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-100' : 'border-amber-400/20 bg-amber-500/10 text-amber-100'].join(' ')}>
+            <p>{productionAuthReady ? 'Backend pronto para auth de produção.' : 'Backend ainda não está pronto para auth de produção.'}</p>
+            <p className={productionAuthReady ? 'mt-1 text-emerald-100/75' : 'mt-1 text-amber-100/75'}>
+              {productionAuthReady
+                ? `Banco ${authStatus.database_dialect || 'desconhecido'} com RLS ativo em ${authStatus.rls_enabled_tables || 0}/${authStatus.rls_total_tables || 0} tabelas monitoradas.`
+                : (authWarnings[0] || 'Revise variáveis do Supabase, Postgres/Supabase e políticas RLS antes do go-live.')}
             </p>
-          ) : null}
-          {!supabaseAuthEnabled ? (
-            <button type="submit" className="primary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black">
-              <LogIn size={18} />
-              Entrar
-            </button>
-          ) : null}
-          <button
-            type="button"
-            disabled={isGoogleLoading}
-            onClick={async () => {
-              setStatus('Abrindo Google...')
-              setIsGoogleLoading(true)
-              try {
-                await onGoogleLogin()
-              } catch (error) {
-                setStatus(error.message || 'Não foi possível entrar com Google.')
-              } finally {
-                setIsGoogleLoading(false)
-              }
-            }}
-            className="secondary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <Cloud size={18} />
-            {isGoogleLoading ? 'Conectando...' : supabaseAuthEnabled ? 'Entrar com Google via Supabase' : 'Entrar com Google'}
-          </button>
-          <button
-            type="button"
-            disabled={isMagicLoading}
-            onClick={async () => {
-              if (!email.trim()) {
-                setErrors((current) => ({ ...current, email: 'Informe o email para receber o link.' }))
-                return
-              }
-              setStatus('Enviando magic link...')
-              setIsMagicLoading(true)
-              try {
-                await onMagicLink(email.trim())
-                setStatus('Enviamos um link de acesso para seu email.')
-              } catch (error) {
-                setStatus(error.message || 'Não foi possível enviar o magic link.')
-              } finally {
-                setIsMagicLoading(false)
-              }
-            }}
-            className="secondary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            <Sparkles size={18} />
-            {isMagicLoading ? 'Enviando...' : 'Receber magic link'}
-          </button>
-          <button
-            type="button"
-            disabled
-            className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 text-sm font-black text-slate-500"
-          >
-            <Lock size={17} />
-            Apple login em breve
-          </button>
-        </form>
-      ) : (
-        <UserProfileForm
-          initialUser={defaultUser}
-          submitLabel="Criar cadastro"
-          onSubmit={(nextUser, pendingContacts) => onSaveUser({ ...nextUser, role: 'user' }, pendingContacts)}
-          onImportContacts={onImportContacts}
-          onImportGoogleContacts={onImportGoogleContacts}
-          onImportGoogleProfile={onImportGoogleProfile}
-        />
-      )}
+          </div>
+        ) : null}
+        {!authStatus && authStatusChecked && authStatusError ? (
+          <div className="rounded-lg border border-amber-400/20 bg-amber-500/10 px-3 py-3 text-xs font-bold text-amber-100">
+            <p>Não consegui validar o backend de autenticação.</p>
+            <p className="mt-1 text-amber-100/75">{authStatusError}</p>
+          </div>
+        ) : null}
+        <Field label="Email para magic link" required error={errors.email}>
+          <input value={email} onChange={(event) => setEmail(event.target.value)} className={inputClass(errors.email)} type="email" placeholder="você@email.com" />
+        </Field>
+        {status ? (
+          <p className={['rounded-lg border p-3 text-sm font-bold', status.includes('Enviamos') || status.includes('Abrindo') ? 'border-cyan-400/30 bg-cyan-500/10 text-cyan-100' : 'border-rose-400/30 bg-rose-500/10 text-rose-200'].join(' ')}>
+            {status}
+          </p>
+        ) : null}
+        <button
+          type="button"
+          disabled={isGoogleLoading || !authActionEnabled}
+          onClick={async () => {
+            setStatus('Abrindo Google...')
+            setIsGoogleLoading(true)
+            try {
+              await onGoogleLogin()
+            } catch (error) {
+              setStatus(error.message || 'Não foi possível entrar com Google.')
+            } finally {
+              setIsGoogleLoading(false)
+            }
+          }}
+          className="secondary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <Cloud size={18} />
+          {isGoogleLoading ? 'Conectando...' : 'Entrar com Google'}
+        </button>
+        <button
+          type="button"
+          disabled={isMagicLoading || !authActionEnabled}
+          onClick={async () => {
+            if (!email.trim()) {
+              setErrors((current) => ({ ...current, email: 'Informe o email para receber o link.' }))
+              return
+            }
+            setStatus('Enviando magic link...')
+            setIsMagicLoading(true)
+            try {
+              await onMagicLink(email.trim())
+              setStatus('Enviamos um link de acesso para seu email.')
+            } catch (error) {
+              setStatus(error.message || 'Não foi possível enviar o magic link.')
+            } finally {
+              setIsMagicLoading(false)
+            }
+          }}
+          className="secondary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <Sparkles size={18} />
+          {isMagicLoading ? 'Enviando...' : 'Receber magic link'}
+        </button>
+        <button
+          type="button"
+          disabled={isAppleLoading || !authActionEnabled}
+          onClick={async () => {
+            setStatus('Abrindo Apple...')
+            setIsAppleLoading(true)
+            try {
+              await onAppleLogin()
+            } catch (error) {
+              setStatus(error.message || 'Não foi possível entrar com Apple.')
+            } finally {
+              setIsAppleLoading(false)
+            }
+          }}
+          className="secondary-button inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <Lock size={17} />
+          {isAppleLoading ? 'Conectando...' : 'Entrar com Apple'}
+        </button>
+      </form>
     </AuthLayout>
   )
 }
@@ -10144,7 +12307,6 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
   const [errors, setErrors] = useState({})
   const [photoSourceOpen, setPhotoSourceOpen] = useState(false)
   const [photoPicker, setPhotoPicker] = useState(null)
-  const isCreating = submitLabel.toLowerCase().includes('criar')
   const googleConnected = hasGoogleConnection(draft)
   const googleContactsImported = Boolean(draft.googleContactsImportedAt)
   const googleProfileSynced = Boolean(draft.googleProfileSyncedAt)
@@ -10367,16 +12529,11 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
 
   async function submit(event) {
     event.preventDefault()
-    if (!hasGoogleConnection(draft)) {
-      setImportStatus('Conecte sua conta Google no rodapé para salvar o perfil e liberar mapa/rede pública.')
-      return
-    }
     const nextErrors = {
       name: draft.name.trim() ? '' : 'Obrigatório.',
       email: draft.email.trim() ? '' : 'Obrigatório.',
       birthDate: draft.birthDate ? '' : 'Obrigatória.',
       phone: draft.phone.trim() ? '' : 'Obrigatório.',
-      password: !isCreating || draft.password.trim() ? '' : 'Obrigatória.',
       cep: isValidCep(draft.cep) ? '' : 'CEP obrigatório e válido.',
       city: draft.city.trim() ? '' : 'Informe a cidade manualmente se o CEP não localizar.',
       state: draft.state.trim() ? '' : 'Informe a UF.',
@@ -10411,9 +12568,6 @@ function UserProfileForm({ initialUser, submitLabel, onSubmit, onImportContacts,
         </Field>
         <Field label="Email" required error={errors.email}>
           <input value={draft.email} onChange={(event) => updateDraft('email', event.target.value)} className={inputClass(errors.email)} type="email" placeholder="você@email.com" />
-        </Field>
-        <Field label={isCreating ? 'Senha' : 'Nova senha'} required={isCreating} error={errors.password}>
-          <input value={draft.password} onChange={(event) => updateDraft('password', event.target.value)} className={inputClass(errors.password)} type="password" placeholder={isCreating ? 'Crie uma senha' : 'Deixe em branco para manter'} />
         </Field>
         <Field label="Data de nascimento" required error={errors.birthDate}>
           <input value={draft.birthDate} onChange={(event) => updateDraft('birthDate', event.target.value)} className={inputClass(errors.birthDate)} type="date" />
@@ -10754,7 +12908,7 @@ function OnboardingPage({ user, contacts, publicProfiles, duplicateCount, onNavi
       detail: importReady ? `${contacts.length} contato${contacts.length === 1 ? '' : 's'} já estão na agenda.` : 'Importe Google Contacts, CSV ou faça cadastro manual.',
       done: importReady,
       actionLabel: 'Importar',
-      action: () => onNavigate(ROUTES.SETTINGS),
+      action: () => onNavigate(ROUTES.IMPORT),
     },
     {
       id: 'insights',
@@ -10954,7 +13108,7 @@ function getRecommendedGroups(publicProfiles, user, query) {
 }
 
 export default function App() {
-  const [user, setUser] = useState(SUPABASE_AUTH_ENABLED ? null : loadStoredUser)
+  const [user, setUser] = useState(loadStoredUser)
   const initialOfflineData = loadOfflineSnapshot(user)
   const [contacts, setContacts] = useState(() => Array.isArray(initialOfflineData?.contacts) ? initialOfflineData.contacts : contactsSeed)
   const [publicProfiles, setPublicProfiles] = useState(() => Array.isArray(initialOfflineData?.publicProfiles) ? initialOfflineData.publicProfiles : publicProfilesSeed)
@@ -10964,13 +13118,22 @@ export default function App() {
   const [groupMessagesById, setGroupMessagesById] = useState(() => initialOfflineData?.groupMessagesById ?? {})
   const [customFieldDefinitions, setCustomFieldDefinitions] = useState(() => Array.isArray(initialOfflineData?.customFieldDefinitions) ? initialOfflineData.customFieldDefinitions : [])
   const [groupCustomFieldsById, setGroupCustomFieldsById] = useState(() => initialOfflineData?.groupCustomFieldsById ?? {})
+  const [chatThreads, setChatThreads] = useState(() => Array.isArray(initialOfflineData?.chatThreads) ? initialOfflineData.chatThreads : [])
+  const [currentChatThreadId, setCurrentChatThreadId] = useState(() => initialOfflineData?.currentChatThreadId ?? null)
+  const [importJobs, setImportJobs] = useState(() => Array.isArray(initialOfflineData?.importJobs) ? initialOfflineData.importJobs : [])
   const [backendOnline, setBackendOnline] = useState(false)
   const [browserOnline, setBrowserOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine)
   const [syncNonce, setSyncNonce] = useState(0)
   const [pendingMutations, setPendingMutations] = useState(() => loadOfflineMutations(user))
   const [theme, setTheme] = useState(loadThemePreference)
   const [onboardingComplete, setOnboardingComplete] = useState(() => loadOnboardingCompletion(user))
+  const [authStatus, setAuthStatus] = useState(null)
+  const [authStatusChecked, setAuthStatusChecked] = useState(false)
+  const [authStatusError, setAuthStatusError] = useState('')
   const [queryDraft, setQueryDraft] = useState('')
+  const [searchResults, setSearchResults] = useState(null)
+  const [isSearching, setIsSearching] = useState(false)
+  const [searchError, setSearchError] = useState('')
   const [route, setRoute] = useState(parsePath)
   const [recents, setRecents] = useState(loadRecentSearches)
   const emptyContactForm = {
@@ -10982,14 +13145,18 @@ export default function App() {
     address: '',
     description: '',
     demand: '',
+    demand_tags: '',
     solves: '',
     tags: '',
     email: '',
     whatsapp: '',
     instagram: '',
     linkedin: '',
+    organization: '',
     custom_url: '',
     avatar_url: '',
+    additionalPhones: [],
+    additionalEmails: [],
     custom_fields: '[]',
     custom_field_values: [],
     cep: '',
@@ -11021,16 +13188,9 @@ export default function App() {
   const [notificationPermission, setNotificationPermission] = useState(() =>
     typeof window !== 'undefined' && 'Notification' in window ? window.Notification.permission : 'unsupported',
   )
-  const [chatMessages, setChatMessages] = useState([
-    {
-      id: 'welcome',
-      role: 'assistant',
-      text: 'Posso organizar contatos importados, sugerir categorias e encontrar pessoas por tema.',
-      provider: 'local',
-      suggestions: [],
-    },
-  ])
+  const [chatMessages, setChatMessages] = useState(() => Array.isArray(initialOfflineData?.chatMessages) && initialOfflineData.chatMessages.length ? initialOfflineData.chatMessages : defaultChatMessages())
   const lastSupabaseUserRef = useRef('')
+  const autoPushInFlightRef = useRef(false)
 
   function refreshPendingMutations(owner = user) {
     const pending = loadOfflineMutations(owner)
@@ -11044,6 +13204,20 @@ export default function App() {
     return pending
   }
 
+  function dismissPendingMutation(mutation, owner = user) {
+    if (!mutation?.id) return
+    const pending = removeOfflineMutation(owner, mutation.id)
+    setPendingMutations(pending)
+    showToast('Alteração removida da fila offline.')
+  }
+
+  async function retryPendingMutation(mutation, owner = user) {
+    if (!mutation?.id) return
+    patchOfflineMutation(owner, mutation.id, resetOfflineMutationState(mutation))
+    refreshPendingMutations(owner)
+    await syncPendingNow()
+  }
+
   function applyOfflineSnapshot(snapshot) {
     if (!snapshot) return false
     setContacts(Array.isArray(snapshot.contacts) ? snapshot.contacts : contactsSeed)
@@ -11055,87 +13229,127 @@ export default function App() {
     setGroupMessagesById(snapshot.groupMessagesById ?? {})
     setCustomFieldDefinitions(Array.isArray(snapshot.customFieldDefinitions) ? snapshot.customFieldDefinitions : [])
     setGroupCustomFieldsById(snapshot.groupCustomFieldsById ?? {})
+    setChatThreads(Array.isArray(snapshot.chatThreads) ? snapshot.chatThreads : [])
+    setChatMessages(Array.isArray(snapshot.chatMessages) && snapshot.chatMessages.length ? snapshot.chatMessages : defaultChatMessages())
+    setCurrentChatThreadId(snapshot.currentChatThreadId ?? null)
+    setImportJobs(Array.isArray(snapshot.importJobs) ? snapshot.importJobs : [])
     return true
   }
 
   async function syncPendingOfflineChanges(owner = user) {
-    if (!owner || (typeof navigator !== 'undefined' && navigator.onLine === false)) return 0
+    if (!owner || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+      return { synced: 0, conflicts: 0, failed: 0, deferred: 0, remaining: loadOfflineMutations(owner).length }
+    }
     const pending = loadOfflineMutations(owner)
     setPendingMutations(pending)
-    if (!pending.length) return 0
+    if (!pending.length) return { synced: 0, conflicts: 0, failed: 0, deferred: 0, remaining: 0 }
 
-    const syncedIds = []
+    const summary = { synced: 0, conflicts: 0, failed: 0, deferred: 0, remaining: pending.length }
     const groupIdMap = new globalThis.Map()
     for (const mutation of pending) {
-      if (mutation.type === 'contact:create') {
-        await apiRequest('/api/contacts', {
-          method: 'POST',
-          body: JSON.stringify(mutation.payload),
-        })
-      } else if (mutation.type === 'contact:update') {
-        await apiRequest(`/api/contacts/${mutation.contactId}`, {
-          method: 'PUT',
-          body: JSON.stringify(mutation.payload),
-        })
-      } else if (mutation.type === 'contact:delete') {
-        await apiRequest(`/api/contacts/${mutation.contactId}?user_id=${encodeURIComponent(contactOwnerId(owner))}`, { method: 'DELETE' })
-      } else if (mutation.type === 'user:save') {
-        await apiRequest('/api/users', {
-          method: 'POST',
-          body: JSON.stringify(mutation.payload),
-        })
-      } else if (mutation.type === 'duplicate:ignore') {
-        await apiRequest('/api/merge-suggestions/ignore', {
-          method: 'POST',
-          body: JSON.stringify(mutation.payload),
-        })
-      } else if (mutation.type === 'duplicate:merge') {
-        await apiRequest('/api/merge-suggestions/merge', {
-          method: 'POST',
-          body: JSON.stringify(mutation.payload),
-        })
-      } else if (mutation.type === 'group:create') {
-        const created = await apiRequest('/api/groups', {
-          method: 'POST',
-          body: JSON.stringify(mutation.payload),
-        })
-        if (mutation.clientGroupId) {
-          groupIdMap.set(String(mutation.clientGroupId), created.id)
-        }
-      } else if (mutation.type === 'group:update') {
-        const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
-        await apiRequest(`/api/groups/${groupId}`, {
-          method: 'PUT',
-          body: JSON.stringify(mutation.payload),
-        })
-      } else if (mutation.type === 'group:member:add') {
-        const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
-        await apiRequest(`/api/groups/${groupId}/members`, {
-          method: 'POST',
-          body: JSON.stringify(mutation.payload),
-        })
-      } else if (mutation.type === 'group:member:remove') {
-        const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
-        await apiRequest(`/api/groups/${groupId}/members/${mutation.memberId}?requester_id=${encodeURIComponent(contactOwnerId(owner))}`, {
-          method: 'DELETE',
-        })
-      } else if (mutation.type === 'group:contact:add') {
-        const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
-        await apiRequest(`/api/groups/${groupId}/contacts`, {
-          method: 'POST',
-          body: JSON.stringify(mutation.payload),
-        })
-      } else if (mutation.type === 'group:contact:remove') {
-        const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
-        await apiRequest(`/api/groups/${groupId}/contacts/${mutation.contactId}?requester_id=${encodeURIComponent(contactOwnerId(owner))}`, {
-          method: 'DELETE',
-        })
+      if (!shouldAttemptOfflineMutation(mutation)) {
+        if (offlineMutationStatus(mutation) === 'conflict') summary.conflicts += 1
+        else summary.failed += 1
+        continue
       }
-      syncedIds.push(mutation.id)
-      removeOfflineMutations(owner, syncedIds)
+      patchOfflineMutation(owner, mutation.id, {
+        status: 'syncing',
+        attemptCount: Number(mutation.attemptCount || 0) + 1,
+        lastAttemptAt: new Date().toISOString(),
+        lastError: '',
+      })
+      refreshPendingMutations(owner)
+      try {
+        if (mutation.type === 'contact:create') {
+          await apiRequest('/api/contacts', {
+            method: 'POST',
+            body: JSON.stringify(mutation.payload),
+          })
+        } else if (mutation.type === 'contact:update') {
+          await apiRequest(`/api/contacts/${mutation.contactId}`, {
+            method: 'PUT',
+            body: JSON.stringify(mutation.payload),
+          })
+        } else if (mutation.type === 'contact:delete') {
+          await apiRequest(`/api/contacts/${mutation.contactId}?user_id=${encodeURIComponent(contactOwnerId(owner))}`, { method: 'DELETE' })
+        } else if (mutation.type === 'user:save') {
+          await apiRequest('/api/users', {
+            method: 'POST',
+            body: JSON.stringify(mutation.payload),
+          })
+        } else if (mutation.type === 'duplicate:ignore') {
+          await apiRequest('/api/merge-suggestions/ignore', {
+            method: 'POST',
+            body: JSON.stringify(mutation.payload),
+          })
+        } else if (mutation.type === 'duplicate:merge') {
+          await apiRequest('/api/merge-suggestions/merge', {
+            method: 'POST',
+            body: JSON.stringify(mutation.payload),
+          })
+        } else if (mutation.type === 'group:create') {
+          const created = await apiRequest('/api/groups', {
+            method: 'POST',
+            body: JSON.stringify(mutation.payload),
+          })
+          if (mutation.clientGroupId) {
+            groupIdMap.set(String(mutation.clientGroupId), created.id)
+          }
+        } else if (mutation.type === 'group:update') {
+          const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
+          await apiRequest(`/api/groups/${groupId}`, {
+            method: 'PUT',
+            body: JSON.stringify(mutation.payload),
+          })
+        } else if (mutation.type === 'group:member:add') {
+          const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
+          await apiRequest(`/api/groups/${groupId}/members`, {
+            method: 'POST',
+            body: JSON.stringify(mutation.payload),
+          })
+        } else if (mutation.type === 'group:member:remove') {
+          const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
+          await apiRequest(`/api/groups/${groupId}/members/${mutation.memberId}?requester_id=${encodeURIComponent(contactOwnerId(owner))}`, {
+            method: 'DELETE',
+          })
+        } else if (mutation.type === 'group:contact:add') {
+          const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
+          await apiRequest(`/api/groups/${groupId}/contacts`, {
+            method: 'POST',
+            body: JSON.stringify(mutation.payload),
+          })
+        } else if (mutation.type === 'group:contact:remove') {
+          const groupId = groupIdMap.get(String(mutation.groupId)) ?? mutation.groupId
+          await apiRequest(`/api/groups/${groupId}/contacts/${mutation.contactId}?requester_id=${encodeURIComponent(contactOwnerId(owner))}`, {
+            method: 'DELETE',
+          })
+        }
+
+        removeOfflineMutation(owner, mutation.id)
+        summary.synced += 1
+      } catch (error) {
+        if (isOfflineRequestError(error)) {
+          patchOfflineMutation(owner, mutation.id, {
+            status: 'pending',
+            lastError: 'Sem conexão estável para concluir esta alteração.',
+          })
+          summary.deferred = loadOfflineMutations(owner).length
+          refreshPendingMutations(owner)
+          break
+        }
+
+        const conflict = error?.status === 409 || error?.status === 422
+        patchOfflineMutation(owner, mutation.id, {
+          status: conflict ? 'conflict' : 'failed',
+          lastError: offlineMutationFailureMessage(mutation, error, conflict),
+        })
+        if (conflict) summary.conflicts += 1
+        else summary.failed += 1
+      }
       refreshPendingMutations(owner)
     }
-    return syncedIds.length
+    summary.remaining = loadOfflineMutations(owner).length
+    return summary
   }
 
   async function syncPendingNow() {
@@ -11145,9 +13359,12 @@ export default function App() {
       return
     }
     try {
-      const syncedCount = await syncPendingOfflineChanges(user)
+      const syncSummary = await syncPendingOfflineChanges(user)
       setSyncNonce((value) => value + 1)
-      showToast(syncedCount > 0 ? `${syncedCount} alteração${syncedCount === 1 ? '' : 'es'} sincronizada${syncedCount === 1 ? '' : 's'}.` : 'Nenhuma alteração pendente.')
+      showToast(offlineSyncSummaryLabel(syncSummary))
+      if (syncSummary.synced > 0) {
+        void dispatchPriorityPushes(user, { silent: true, force: true })
+      }
     } catch (error) {
       setBackendOnline(false)
       showToast(error.message || 'Não consegui sincronizar agora.')
@@ -11219,6 +13436,77 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    let cancelled = false
+
+    async function loadAuthStatus() {
+      try {
+        const status = await apiRequest('/api/auth/status')
+        if (!cancelled) {
+          setAuthStatus(status)
+          setAuthStatusError('')
+          setAuthStatusChecked(true)
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAuthStatus(null)
+          setAuthStatusError(error.message || 'API de status não respondeu.')
+          setAuthStatusChecked(true)
+        }
+      }
+    }
+
+    void loadAuthStatus()
+    return () => {
+      cancelled = true
+    }
+  }, [browserOnline, user?.id, user?.email])
+
+  useEffect(() => {
+    if (!user || notificationPermission !== 'granted' || !browserOnline) return undefined
+    let cancelled = false
+
+    async function hydratePushSubscription() {
+      try {
+        await syncPushSubscription(user, { silent: true, showTestNotification: false })
+      } catch {
+        if (!cancelled) setBackendOnline(false)
+      }
+    }
+
+    void hydratePushSubscription()
+    return () => {
+      cancelled = true
+    }
+  }, [user?.id, notificationPermission, browserOnline])
+
+  useEffect(() => {
+    if (!user || notificationPermission !== 'granted' || !browserOnline) return undefined
+    let cancelled = false
+
+    const runDispatchCheck = (force = false) => {
+      if (cancelled) return
+      void dispatchPriorityPushes(user, { silent: true, force })
+    }
+
+    const handleFocus = () => runDispatchCheck(false)
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') runDispatchCheck(false)
+    }
+
+    runDispatchCheck(false)
+    window.addEventListener('focus', handleFocus)
+    document.addEventListener('visibilitychange', handleVisibility)
+    const interval = window.setInterval(() => runDispatchCheck(false), AUTO_PUSH_COOLDOWN_MS)
+
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', handleFocus)
+      document.removeEventListener('visibilitychange', handleVisibility)
+      window.clearInterval(interval)
+    }
+  }, [user?.id, notificationPermission, browserOnline, syncNonce])
+
+  useEffect(() => {
     setOnboardingComplete(loadOnboardingCompletion(user))
   }, [user?.id, user?.email])
 
@@ -11240,23 +13528,30 @@ export default function App() {
     let active = true
 
     async function syncSession(session) {
-      if (!active || !session?.user?.email) return
+      if (!active) return
+      if (!session?.user?.email) {
+        clearStoredSessionUser()
+        setUser(null)
+        setPendingMutations([])
+        return
+      }
       if (lastSupabaseUserRef.current === session.user.id && user?.email === session.user.email) return
       lastSupabaseUserRef.current = session.user.id
       try {
-        const response = await apiRequest('/api/google-login', {
+        const response = await apiRequest('/api/auth/session', {
           method: 'POST',
           body: JSON.stringify({
             sub: session.user.id,
             email: session.user.email,
             name: session.user.user_metadata?.full_name || session.user.user_metadata?.name || session.user.email,
             picture: session.user.user_metadata?.avatar_url || '',
+            auth_provider: inferSupabaseAuthProvider(session),
           }),
         })
         const loggedUser = apiUserToLocal(response)
         if (!loggedUser || !active) return
         setBackendOnline(true)
-        rememberUser(loggedUser)
+        rememberUser(loggedUser, Number(session.expires_at || 0) * 1000)
         if (isCadastroIncomplete(loggedUser)) {
           navigate(ROUTES.REGISTER)
         } else if (parsePath().page === 'login') {
@@ -11274,6 +13569,10 @@ export default function App() {
     const { data } = client.auth.onAuthStateChange((event, session) => {
       if (event === 'SIGNED_OUT') {
         lastSupabaseUserRef.current = ''
+        clearStoredSessionUser()
+        setUser(null)
+        setPendingMutations([])
+        setRoute({ page: 'login', categoryId: null })
         return
       }
       syncSession(session)
@@ -11312,13 +13611,17 @@ export default function App() {
       'register',
       'publicProfile',
       'settings',
+      'import',
+      'customFields',
       'dashboard',
       'agenda',
+      'graph',
       'crm',
       'chat',
       'public',
       'feed',
       'groups',
+      'groupAdmin',
       'duplicates',
       'map',
       'apiDocs',
@@ -11339,18 +13642,22 @@ export default function App() {
       }
 
       try {
-        const syncedCount = await syncPendingOfflineChanges(user)
+        const syncSummary = await syncPendingOfflineChanges(user)
         const contactsPath = user ? `/api/contacts?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
         const duplicatesPath = user ? `/api/merge-suggestions?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
         const groupsPath = user ? `/api/groups?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
         const customFieldsPath = user ? `/api/custom-fields?user_id=${encodeURIComponent(contactOwnerId(user))}&scope_type=user&scope_id=` : null
-        const [remoteContacts, remoteProfiles, remoteUsers, remoteDuplicates, remoteGroups, remoteCustomFields] = await Promise.all([
+        const chatThreadsPath = user ? `/api/chat/threads?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
+        const importJobsPath = user ? `/api/import-jobs?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
+        const [remoteContacts, remoteProfiles, remoteUsers, remoteDuplicates, remoteGroups, remoteCustomFields, remoteChatThreads, remoteImportJobs] = await Promise.all([
           contactsPath ? apiRequest(contactsPath) : Promise.resolve([]),
           apiRequest('/api/public-profiles'),
           apiRequest('/api/users'),
           duplicatesPath ? apiRequest(duplicatesPath) : Promise.resolve([]),
           groupsPath ? apiRequest(groupsPath) : Promise.resolve([]),
           customFieldsPath ? apiRequest(customFieldsPath) : Promise.resolve([]),
+          chatThreadsPath ? apiRequest(chatThreadsPath) : Promise.resolve([]),
+          importJobsPath ? apiRequest(importJobsPath) : Promise.resolve([]),
         ])
         if (cancelled) return
         const localUsers = remoteUsers.map(apiUserToLocal).filter(Boolean)
@@ -11360,6 +13667,8 @@ export default function App() {
         setDuplicateSuggestions(remoteDuplicates)
         setSharedGroups(remoteGroups)
         setCustomFieldDefinitions(remoteCustomFields)
+        setChatThreads(remoteChatThreads)
+        setImportJobs(remoteImportJobs)
         saveOfflineSnapshot(user, {
           contacts: remoteContacts,
           publicProfiles: remoteProfiles,
@@ -11370,9 +13679,18 @@ export default function App() {
           groupMessagesById,
           customFieldDefinitions: remoteCustomFields,
           groupCustomFieldsById,
+          chatThreads: remoteChatThreads,
+          chatMessages,
+          currentChatThreadId,
+          importJobs: remoteImportJobs,
         })
         setBackendOnline(true)
-        if (syncedCount > 0) showToast(`${syncedCount} alteração${syncedCount === 1 ? '' : 'es'} offline sincronizada${syncedCount === 1 ? '' : 's'}.`)
+        if (syncSummary.synced > 0) {
+          showToast(offlineSyncSummaryLabel(syncSummary))
+          void dispatchPriorityPushes(user, { silent: true, force: true })
+        } else if (syncSummary.conflicts > 0) {
+          showToast(`${syncSummary.conflicts} alteração${syncSummary.conflicts === 1 ? '' : 'es'} entrou${syncSummary.conflicts === 1 ? '' : 'ram'} em conflito. Revise em Configurações.`)
+        }
       } catch {
         if (!cancelled) {
           const cached = loadOfflineSnapshot(user)
@@ -11402,8 +13720,43 @@ export default function App() {
       groupMessagesById,
       customFieldDefinitions,
       groupCustomFieldsById,
+      chatThreads,
+      chatMessages,
+      currentChatThreadId,
+      importJobs,
     })
-  }, [user?.id, user?.email, contacts, publicProfiles, networkUsers, duplicateSuggestions, sharedGroups, groupContactsById, groupMessagesById, customFieldDefinitions, groupCustomFieldsById, backendOnline])
+  }, [user?.id, user?.email, contacts, publicProfiles, networkUsers, duplicateSuggestions, sharedGroups, groupContactsById, groupMessagesById, customFieldDefinitions, groupCustomFieldsById, chatThreads, chatMessages, currentChatThreadId, importJobs, backendOnline])
+
+  useEffect(() => {
+    if (!user) return
+    if (!chatThreads.length) {
+      if (currentChatThreadId !== null) setCurrentChatThreadId(null)
+      setChatMessages(defaultChatMessages())
+      return
+    }
+    const activeExists = chatThreads.some((thread) => String(thread.id) === String(currentChatThreadId))
+    if (!activeExists) {
+      setCurrentChatThreadId(chatThreads[0].id)
+    }
+  }, [user?.id, chatThreads, currentChatThreadId, chatMessages.length])
+
+  useEffect(() => {
+    if (!user || !currentChatThreadId || !backendOnline) return undefined
+    let cancelled = false
+
+    async function hydrateChatThread() {
+      const messages = await loadChatThreadMessages(currentChatThreadId, user)
+      if (cancelled) return
+      if (!messages.length) {
+        setChatMessages(defaultChatMessages())
+      }
+    }
+
+    hydrateChatThread()
+    return () => {
+      cancelled = true
+    }
+  }, [user?.id, currentChatThreadId, backendOnline])
 
   useEffect(() => {
     if (!user || !sharedGroups.length || !backendOnline) return undefined
@@ -11508,26 +13861,58 @@ export default function App() {
     setToast(message)
   }
 
-  function rememberUser(nextUser) {
+  function rememberUser(nextUser, sessionExpiresAt = 0) {
     const normalized = normalizeUserDraft(nextUser)
     setUser(normalized)
     setNetworkUsers((current) => {
       const others = current.filter((item) => normalize(item.email) !== normalize(normalized.email))
       return [normalized, ...others]
     })
-    storeSessionUser(normalized)
+    storeSessionUser(normalized, sessionExpiresAt)
     return normalized
   }
 
   function onSearch(rawQuery = queryDraft) {
-    const nextQuery = rawQuery.trim()
+    const nextQuery = String(rawQuery || '').trim()
     setQueryDraft(nextQuery)
     if (nextQuery) {
       const nextRecents = [nextQuery, ...recents.filter((item) => normalize(item) !== normalize(nextQuery))].slice(0, 6)
       setRecents(nextRecents)
       localStorage.setItem('network-agenda-recents', JSON.stringify(nextRecents))
     }
-    navigate(ROUTES.AGENDA)
+    if (!nextQuery) {
+      setSearchResults(null)
+      setSearchError('')
+      navigate(ROUTES.SEARCH)
+      return
+    }
+
+    setIsSearching(true)
+    setSearchError('')
+    navigate(ROUTES.SEARCH)
+
+    apiRequest(`/api/search?query=${encodeURIComponent(nextQuery)}&user_id=${encodeURIComponent(contactOwnerId(user))}`)
+      .then((response) => {
+        setSearchResults(normalizeSearchPayload(response))
+        setBackendOnline(true)
+      })
+      .catch((error) => {
+        const fallbackResults = buildLocalSearchPayload({
+          query: nextQuery,
+          contacts: contactsWithCategory,
+          publicProfiles: publicProfilesWithCategory,
+        })
+        setSearchResults(fallbackResults)
+        if (isOfflineRequestError(error)) {
+          setBackendOnline(false)
+          setSearchError('Conexão indisponível. Exibindo leitura local dos dados já carregados.')
+          return
+        }
+        setSearchError(`${error.message || 'Falha ao consultar o motor semântico.'} Exibindo leitura local dos dados já carregados.`)
+      })
+      .finally(() => {
+        setIsSearching(false)
+      })
   }
 
   function clearRecentSearches() {
@@ -11593,8 +13978,8 @@ export default function App() {
     return newContact
   }
 
-  function parseImport(text) {
-    return parseImportedContacts(text).slice(0, 30)
+  function parseImport(text, filename = '') {
+    return parseImportedContacts(text, filename).slice(0, 200)
   }
 
   async function importContactsFromProfile(items) {
@@ -11647,6 +14032,19 @@ export default function App() {
       if (!googleContacts.length) {
         const connectedUser = rememberUser({ ...user, googleConnected: true })
         showToast('Nenhum contato do Google disponível para importar.')
+        void recordImportJob(
+          {
+            source: 'Google Contacts',
+            filename: '',
+            status: 'completed',
+            total_count: 0,
+            imported_count: 0,
+            skipped_count: 0,
+            failed_count: 0,
+            details: 'Conta conectada sem contatos elegíveis para importação.',
+          },
+          user,
+        )
         try {
           await apiRequest('/api/users', {
             method: 'POST',
@@ -11675,6 +14073,19 @@ export default function App() {
       } catch {
         setBackendOnline(false)
       }
+      void recordImportJob(
+        {
+          source: 'Google Contacts',
+          filename: '',
+          status: 'completed',
+          total_count: googleContacts.length,
+          imported_count: imported.length,
+          skipped_count: Math.max(0, googleContacts.length - imported.length),
+          failed_count: 0,
+          details: imported.length ? 'Importação concluída com dados da People API.' : 'Conta conectada, mas sem contatos elegíveis.',
+        },
+        user,
+      )
       showToast(`${imported.length} contato${imported.length === 1 ? '' : 's'} importado${imported.length === 1 ? '' : 's'} do Google.`)
     } catch (error) {
       showToast(error.message || 'Não foi possível importar contatos do Google.')
@@ -11748,6 +14159,212 @@ export default function App() {
       setBackendOnline(false)
       showToast(error.message || 'Não foi possível carregar a conversa do grupo.')
       return []
+    }
+  }
+
+  async function refreshChatThreads(owner = user) {
+    if (!owner) return []
+    try {
+      const threads = await apiRequest(`/api/chat/threads?user_id=${encodeURIComponent(contactOwnerId(owner))}`)
+      setChatThreads(threads)
+      setBackendOnline(true)
+      return threads
+    } catch {
+      setBackendOnline(false)
+      return []
+    }
+  }
+
+  async function loadChatThreadMessages(threadId, owner = user) {
+    if (!owner || !threadId) {
+      setChatMessages(defaultChatMessages())
+      return []
+    }
+    try {
+      const messages = await apiRequest(`/api/chat/threads/${threadId}/messages?user_id=${encodeURIComponent(contactOwnerId(owner))}`)
+      setChatMessages(messages.length ? messages : defaultChatMessages())
+      setBackendOnline(true)
+      return messages
+    } catch {
+      setBackendOnline(false)
+      setChatMessages(defaultChatMessages())
+      return []
+    }
+  }
+
+  async function createChatThreadClient(title = '') {
+    if (!user) return null
+    try {
+      const created = await apiRequest('/api/chat/threads', {
+        method: 'POST',
+        body: JSON.stringify({
+          user_id: contactOwnerId(user),
+          title: title.trim(),
+        }),
+      })
+      setChatThreads((current) => [created, ...current.filter((thread) => String(thread.id) !== String(created.id))])
+      setCurrentChatThreadId(created.id)
+      setChatMessages(defaultChatMessages())
+      setBackendOnline(true)
+      return created
+    } catch (error) {
+      setBackendOnline(false)
+      showToast(error.message || 'Não foi possível abrir uma nova conversa.')
+      return null
+    }
+  }
+
+  async function appendChatMessageToThread(threadId, payload, owner = user) {
+    if (!owner || !threadId) return null
+    try {
+      const message = await apiRequest(`/api/chat/threads/${threadId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          user_id: contactOwnerId(owner),
+          ...payload,
+        }),
+      })
+      const refreshed = await refreshChatThreads(owner)
+      if (!refreshed.length) setChatThreads((current) => current)
+      setBackendOnline(true)
+      return message
+    } catch {
+      setBackendOnline(false)
+      return null
+    }
+  }
+
+  async function syncPushSubscription(owner = user, { silent = true, showTestNotification = false } = {}) {
+    if (!owner) return null
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      if (silent) return null
+      throw new Error('Notificações não são suportadas neste navegador.')
+    }
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      if (silent) return null
+      throw new Error('Push web não está disponível neste navegador.')
+    }
+
+    const registration = await navigator.serviceWorker.ready
+    let subscription = await registration.pushManager.getSubscription()
+
+    if (!subscription) {
+      if (!WEB_PUSH_PUBLIC_KEY) {
+        if (silent) return null
+        throw new Error('Permissão liberada, mas falta VITE_WEB_PUSH_PUBLIC_KEY para registrar este dispositivo.')
+      }
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(WEB_PUSH_PUBLIC_KEY),
+      })
+    }
+
+    const serialized = subscription.toJSON?.() ?? {}
+    const deviceClass = window.innerWidth <= 768 ? 'mobile' : 'desktop'
+    await apiRequest('/api/push-subscriptions', {
+      method: 'POST',
+      body: JSON.stringify({
+        user_id: contactOwnerId(owner),
+        endpoint: subscription.endpoint,
+        p256dh_key: serialized.keys?.p256dh || '',
+        auth_key: serialized.keys?.auth || '',
+        expiration_time: subscription.expirationTime ? Number(subscription.expirationTime) : null,
+        user_agent: navigator.userAgent || '',
+        device_label: `${navigator.platform || 'web'} ${deviceClass}`.trim(),
+      }),
+    })
+
+    if (showTestNotification && registration.showNotification) {
+      await registration.showNotification('Notificações ativadas', {
+        body: 'Este dispositivo já está pronto para receber alertas web push.',
+        tag: 'push-enabled',
+        icon: '/icon-192.png',
+        badge: '/icon-192.png',
+        data: { route: ROUTES.SETTINGS },
+      })
+    }
+
+    setBackendOnline(true)
+    return subscription
+  }
+
+  async function dispatchPriorityPushes(owner = user, { silent = true, force = false, kinds = ['follow_up', 'duplicates', 'matches'] } = {}) {
+    if (!owner || notificationPermission !== 'granted' || !browserOnline) return null
+    if (autoPushInFlightRef.current) return null
+
+    const state = loadAutoPushState(owner)
+    const now = Date.now()
+    if (!force && now - Number(state.lastAttemptAt || 0) < AUTO_PUSH_COOLDOWN_MS) {
+      return { skipped: true, reason: 'cooldown' }
+    }
+
+    autoPushInFlightRef.current = true
+    try {
+      const result = await apiRequest('/api/push-subscriptions/dispatch', {
+        method: 'POST',
+        body: JSON.stringify({
+          user_id: contactOwnerId(owner),
+          kinds,
+        }),
+      })
+      saveAutoPushState(owner, {
+        lastAttemptAt: now,
+        lastSuccessAt: now,
+        lastEvents: result.events ?? [],
+      })
+      setBackendOnline(true)
+      if (!silent && (result.sent || result.events?.length)) {
+        showToast(`${result.sent || 0} alerta${result.sent === 1 ? '' : 's'} automatizado${result.sent === 1 ? '' : 's'} enviado${result.sent === 1 ? '' : 's'}.`)
+      }
+      return result
+    } catch (error) {
+      if (isOfflineRequestError(error)) {
+        setBackendOnline(false)
+        return null
+      }
+      if (!silent) showToast(error.message || 'Não foi possível verificar alertas automáticos agora.')
+      return null
+    } finally {
+      autoPushInFlightRef.current = false
+    }
+  }
+
+  async function refreshImportJobs(owner = user) {
+    if (!owner) return []
+    try {
+      const jobs = await apiRequest(`/api/import-jobs?user_id=${encodeURIComponent(contactOwnerId(owner))}`)
+      setImportJobs(jobs)
+      setBackendOnline(true)
+      return jobs
+    } catch {
+      setBackendOnline(false)
+      return []
+    }
+  }
+
+  async function recordImportJob(payload, owner = user) {
+    if (!owner) return null
+    try {
+      const job = await apiRequest('/api/import-jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          user_id: contactOwnerId(owner),
+          ...payload,
+        }),
+      })
+      setImportJobs((current) => [job, ...current.filter((item) => String(item.id) !== String(job.id))].slice(0, 12))
+      setBackendOnline(true)
+      return job
+    } catch {
+      setBackendOnline(false)
+      const localJob = {
+        id: `local-${Date.now()}`,
+        owner_id: contactOwnerId(owner),
+        created_at: new Date().toISOString(),
+        ...payload,
+      }
+      setImportJobs((current) => [localJob, ...current].slice(0, 12))
+      return localJob
     }
   }
 
@@ -12272,6 +14889,74 @@ export default function App() {
     }
   }
 
+  async function requestCopilot(message, { targetContactId = null, groupId = null } = {}) {
+    return apiRequest('/api/ai/chat', {
+      method: 'POST',
+      body: JSON.stringify({
+        user_id: contactOwnerId(user),
+        message,
+        target_contact_id: targetContactId ? Number(targetContactId) : null,
+        group_id: /^\d+$/.test(String(groupId ?? '')) ? Number(groupId) : null,
+        thread_id: groupId ? null : (currentChatThreadId && /^\d+$/.test(String(currentChatThreadId)) ? Number(currentChatThreadId) : null),
+      }),
+    })
+  }
+
+  function buildGroupCopilotFallback(groupId, message) {
+    const scopedContacts = groupContactsById[groupId] ?? []
+    if (!scopedContacts.length) {
+      return {
+        answer: 'Esse grupo ainda não tem contatos compartilhados para eu analisar.',
+        suggestions: [],
+        provider: 'local',
+      }
+    }
+
+    const normalized = normalize(message)
+    const queryCategory = classifyService(message)
+    const stopwords = new Set(['quem', 'quais', 'qual', 'pode', 'podem', 'com', 'para', 'uma', 'uns', 'umas', 'dos', 'das', 'tem', 'teve', 'esta', 'estao', 'está', 'estão', 'grupo', 'contato', 'contatos'])
+    const terms = normalized.split(/\W+/).filter((term) => term.length > 2 && !stopwords.has(term))
+    const matches = scopedContacts
+      .map((contact) => {
+        const haystack = normalize([
+          contact.name,
+          contact.service,
+          contact.description,
+          contact.note,
+          contact.demand,
+          contact.demand_tags,
+          contact.solves,
+          contact.tags,
+          contact.category?.label,
+          contact.category?.group,
+          ...contactTags(contact),
+        ].filter(Boolean).join(' '))
+        let score = terms.reduce((total, term) => total + (haystack.includes(term) ? 1 : 0), 0)
+        if (queryCategory.id !== 'general' && contact.category?.id === queryCategory.id) score += 2
+        return { score, contact }
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || String(a.contact.name || '').localeCompare(String(b.contact.name || ''), 'pt-BR', { sensitivity: 'base' }))
+
+    if (!matches.length) {
+      return {
+        answer: 'Não consegui falar com a API agora e também não encontrei contatos compartilhados do grupo relacionados a esse tema.',
+        suggestions: [],
+        provider: 'local',
+      }
+    }
+
+    const preview = matches
+      .slice(0, 6)
+      .map(({ contact }) => `${contact.name} (${contact.service || contact.category?.label || 'sem categoria'})`)
+      .join(', ')
+    return {
+      answer: `Encontrei ${matches.length} contato(s) no grupo relacionados a isso: ${preview}.`,
+      suggestions: [],
+      provider: 'local',
+    }
+  }
+
   async function askCopilot(message, targetContactId = null) {
     const userMessage = {
       id: `user-${Date.now()}`,
@@ -12282,25 +14967,28 @@ export default function App() {
     setChatMessages((current) => [...current, userMessage])
     setIsChatThinking(true)
     try {
-      const response = await apiRequest('/api/ai/chat', {
-        method: 'POST',
-        body: JSON.stringify({
-          user_id: contactOwnerId(user),
-          message,
-          target_contact_id: targetContactId ? Number(targetContactId) : null,
-        }),
-      })
+      const response = await requestCopilot(message, { targetContactId })
       setBackendOnline(true)
-      setChatMessages((current) => [
-        ...current,
-        {
-          id: `assistant-${Date.now()}`,
-          role: 'assistant',
-          text: response.answer,
-          provider: response.provider,
-          suggestions: response.suggestions ?? [],
-        },
-      ])
+      let hydratedFromThread = false
+      if (response.thread_id) {
+        setCurrentChatThreadId(response.thread_id)
+        await refreshChatThreads(user)
+        const persistedMessages = await loadChatThreadMessages(response.thread_id, user)
+        hydratedFromThread = persistedMessages.length > 0
+      }
+      if (!hydratedFromThread) {
+        setChatMessages((current) => [
+          ...current,
+          {
+            id: `assistant-${Date.now()}`,
+            role: 'assistant',
+            text: response.answer,
+            provider: response.provider,
+            suggestions: response.suggestions ?? [],
+          },
+        ])
+      }
+      return response
     } catch {
       setBackendOnline(false)
       const suggestions = contacts
@@ -12329,8 +15017,35 @@ export default function App() {
           suggestions,
         },
       ])
+      return {
+        answer: suggestions.length ? `Encontrei ${suggestions.length} contato(s) para revisar.` : 'Não consegui falar com a API agora, mas não encontrei pendências locais.',
+        provider: 'local',
+        suggestions,
+        thread_id: currentChatThreadId,
+      }
     } finally {
       setIsChatThinking(false)
+    }
+  }
+
+  async function askGroupCopilot(groupId, message) {
+    if (!groupId) {
+      return {
+        answer: 'Selecione um grupo para consultar a base compartilhada.',
+        suggestions: [],
+        provider: 'local',
+      }
+    }
+    if (!/^\d+$/.test(String(groupId))) {
+      return buildGroupCopilotFallback(groupId, message)
+    }
+    try {
+      const response = await requestCopilot(message, { groupId })
+      setBackendOnline(true)
+      return response
+    } catch {
+      setBackendOnline(false)
+      return buildGroupCopilotFallback(groupId, message)
     }
   }
 
@@ -12415,6 +15130,16 @@ export default function App() {
         },
       ],
     )
+    if (currentChatThreadId && /^\d+$/.test(String(currentChatThreadId))) {
+      void appendChatMessageToThread(currentChatThreadId, {
+        role: 'assistant',
+        text: confirmation,
+        provider: 'local',
+        suggestions: [],
+        cta_label: crmActions.has(action) ? 'Ver no CRM' : '',
+        cta_route: crmActions.has(action) ? ROUTES.CRM : '',
+      })
+    }
     showToast(confirmation)
     if (isCrmAction) navigate(ROUTES.CRM)
   }
@@ -12431,7 +15156,7 @@ export default function App() {
     setIsImporting(true)
     try {
       const text = await file.text()
-      const imported = parseImport(text)
+      const imported = parseImport(text, file.name)
       if (!imported.length) {
         showToast('Nenhum contato encontrado no arquivo.')
         return
@@ -12444,7 +15169,22 @@ export default function App() {
       setContacts((current) => [...saved, ...current])
       setNewCount((count) => count + imported.length)
       await refreshDuplicates(user)
+      void recordImportJob(
+        {
+          source: imported[0]?.source || (normalize(file.name).endsWith('.vcf') ? 'VCF' : 'CSV'),
+          filename: file.name,
+          status: 'completed',
+          total_count: imported.length,
+          imported_count: saved.length,
+          skipped_count: Math.max(0, imported.length - saved.length),
+          failed_count: 0,
+          details: `Arquivo ${file.name} processado pelo parser local com suporte a CSV, VCF, Outlook e exportações compatíveis do LinkedIn.`,
+        },
+        user,
+      )
       showToast(`${imported.length} contato${imported.length > 1 ? 's' : ''} importado${imported.length > 1 ? 's' : ''}.`)
+    } catch (error) {
+      showToast(error.message || 'Não foi possível processar esse arquivo.')
     } finally {
       setIsImporting(false)
     }
@@ -12471,12 +15211,16 @@ export default function App() {
       address: resolvedAddress || resolvedCity || '',
       description: form.description || '',
       demand: form.demand || '',
+      demand_tags: form.demand_tags || '',
       solves: form.solves || '',
       tags: form.tags || '',
       email: form.email || '',
+      phones: buildContactPhonePayload(form.phone, form.additionalPhones),
+      emails: buildContactEmailPayload(form.email, form.additionalEmails),
       whatsapp: form.whatsapp || '',
       instagram: form.instagram || '',
       linkedin: form.linkedin || '',
+      organization: form.organization || '',
       custom_url: form.custom_url || '',
       avatar_url: form.avatar_url || '',
       custom_fields: serializeCustomFields(prepareCustomFieldPayload(form.custom_field_values || [])),
@@ -12511,12 +15255,25 @@ export default function App() {
     setContacts((current) => [newContact, ...current])
     setNewCount((count) => count + 1)
     if (!queuedOffline) await refreshDuplicates(user)
+    void recordImportJob(
+      {
+        source: 'Manual',
+        filename: '',
+        status: queuedOffline ? 'queued_offline' : 'completed',
+        total_count: 1,
+        imported_count: 1,
+        skipped_count: 0,
+        failed_count: 0,
+        details: `Cadastro manual de ${newContact.name}.`,
+      },
+      user,
+    )
     setForm(emptyContactForm)
     showToast(queuedOffline ? 'Contato salvo offline. Vou sincronizar ao reconectar.' : 'Contato salvo.')
     navigate(ROUTES.AGENDA)
   }
 
-  async function deleteContact(id) {
+  async function deleteContact(id, options = {}) {
     let queuedOffline = false
     try {
       await apiRequest(`/api/contacts/${id}?user_id=${encodeURIComponent(contactOwnerId(user))}`, { method: 'DELETE' })
@@ -12527,13 +15284,14 @@ export default function App() {
         queueLocalMutation({ type: 'contact:delete', contactId: id })
         queuedOffline = true
       } else {
-        showToast(error.message || 'Não foi possível remover no banco.')
-        return
+        if (!options.silent) showToast(error.message || 'Não foi possível remover no banco.')
+        return false
       }
     }
     setContacts((prev) => prev.filter((contact) => contact.id !== id))
-    if (!queuedOffline) await refreshDuplicates(user)
-    showToast(queuedOffline ? 'Contato removido offline. Vou sincronizar ao reconectar.' : 'Contato removido.')
+    if (!queuedOffline && !options.skipRefresh) await refreshDuplicates(user)
+    if (!options.silent) showToast(queuedOffline ? 'Contato removido offline. Vou sincronizar ao reconectar.' : 'Contato removido.')
+    return true
   }
 
   async function saveEditedContact(nextContact, options = {}) {
@@ -12554,12 +15312,16 @@ export default function App() {
       source: nextContact.source || 'Manual',
       description: nextContact.description || '',
       demand: nextContact.demand || '',
+      demand_tags: nextContact.demand_tags || '',
       solves: nextContact.solves || '',
       tags: nextContact.tags || '',
       email: nextContact.email || '',
+      phones: buildContactPhonePayload(nextContact.phone, nextContact.additionalPhones),
+      emails: buildContactEmailPayload(nextContact.email, nextContact.additionalEmails),
       whatsapp: nextContact.whatsapp || '',
       instagram: nextContact.instagram || '',
       linkedin: nextContact.linkedin || '',
+      organization: nextContact.organization || '',
       custom_url: nextContact.custom_url || '',
       avatar_url: nextContact.avatar_url || '',
       custom_fields: serializeCustomFields(prepareCustomFieldPayload(nextContact.custom_field_values || [])),
@@ -12592,10 +15354,63 @@ export default function App() {
     }
 
     setContacts((current) => current.map((contact) => (contact.id === nextContact.id ? saved : contact)))
-    await refreshDuplicates(user)
+    if (!options.skipRefresh) await refreshDuplicates(user)
     setEditingContact(null)
     if (!options.silent) showToast('Contato atualizado.')
     return saved
+  }
+
+  async function bulkUpdateContacts(contactIds, changes, summaryLabel) {
+    const normalizedIds = contactIds.map((id) => String(id))
+    const targets = contacts.filter((contact) => normalizedIds.includes(String(contact.id)))
+    if (!targets.length) return { updated: 0, failed: 0 }
+
+    let updated = 0
+    let failed = 0
+    for (const contact of targets) {
+      try {
+        await saveEditedContact(
+          {
+            ...contact,
+            ...changes,
+          },
+          { silent: true, skipRefresh: true },
+        )
+        updated += 1
+      } catch {
+        failed += 1
+      }
+    }
+    await refreshDuplicates(user)
+    if (updated || failed) {
+      const parts = []
+      if (updated) parts.push(`${updated} contato${updated === 1 ? '' : 's'} ${summaryLabel}`)
+      if (failed) parts.push(`${failed} com falha`)
+      showToast(parts.join(' · '))
+    }
+    return { updated, failed }
+  }
+
+  async function bulkDeleteContacts(contactIds) {
+    const normalizedIds = contactIds.map((id) => String(id))
+    const targets = contacts.filter((contact) => normalizedIds.includes(String(contact.id)))
+    if (!targets.length) return { deleted: 0, failed: 0 }
+
+    let deleted = 0
+    let failed = 0
+    for (const contact of targets) {
+      const ok = await deleteContact(contact.id, { silent: true, skipRefresh: true })
+      if (ok) deleted += 1
+      else failed += 1
+    }
+    await refreshDuplicates(user)
+    if (deleted || failed) {
+      const parts = []
+      if (deleted) parts.push(`${deleted} contato${deleted === 1 ? '' : 's'} removido${deleted === 1 ? '' : 's'}`)
+      if (failed) parts.push(`${failed} com falha`)
+      showToast(parts.join(' · '))
+    }
+    return { deleted, failed }
   }
 
   async function completeFollowUp(contact) {
@@ -12673,41 +15488,32 @@ export default function App() {
 
   async function loginWithGoogle() {
     const client = getSupabaseClient()
-    if (client) {
-      const { error } = await client.auth.signInWithOAuth({
-        provider: 'google',
-        options: { redirectTo: window.location.origin },
-      })
-      if (error) throw error
-      return
+    if (!client) {
+      throw new Error('Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para entrar com Google.')
     }
-    const { profile } = await getGoogleProfileWithToken()
-    const response = await apiRequest('/api/google-login', {
-      method: 'POST',
-      body: JSON.stringify({
-        sub: profile.sub,
-        email: profile.email,
-        name: profile.name || profile.email,
-        picture: profile.picture || '',
-      }),
+    const { error } = await client.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: window.location.origin },
     })
-    const loggedUser = apiUserToLocal(response)
-    if (!loggedUser) throw new Error('Usuário Google não encontrado.')
-    setBackendOnline(true)
-    setUser(loggedUser)
-    setNetworkUsers((current) => {
-      const others = current.filter((item) => normalize(item.email) !== normalize(loggedUser.email))
-      return [loggedUser, ...others]
+    if (error) throw error
+  }
+
+  async function loginWithApple() {
+    const client = getSupabaseClient()
+    if (!client) {
+      throw new Error('Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para entrar com Apple.')
+    }
+    const { error } = await client.auth.signInWithOAuth({
+      provider: 'apple',
+      options: { redirectTo: window.location.origin },
     })
-    storeSessionUser(loggedUser)
-    showToast('Login Google realizado.')
-    navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
+    if (error) throw error
   }
 
   async function sendMagicLink(email) {
     const client = getSupabaseClient()
     if (!client) {
-      throw new Error('Magic link estará disponível quando o Supabase Auth for configurado.')
+      throw new Error('Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para usar magic link.')
     }
     const { error } = await client.auth.signInWithOtp({
       email,
@@ -12741,7 +15547,7 @@ export default function App() {
       const others = current.filter((item) => normalize(item.email) !== normalize(savedUser.email))
       return [savedUser, ...others]
     })
-    storeSessionUser(savedUser)
+    storeSessionUser(savedUser, getStoredSessionExpiry())
     if (pendingContacts.length) {
       await importContactsForOwner(pendingContacts, savedUser)
     }
@@ -12774,7 +15580,7 @@ export default function App() {
     void getSupabaseClient()?.auth.signOut()
     setUser(null)
     setPendingMutations([])
-    localStorage.removeItem(AUTH_STORAGE_KEY)
+    clearStoredSessionUser()
     showToast('Sessão encerrada.')
     navigate(ROUTES.LOGIN)
   }
@@ -12801,11 +15607,43 @@ export default function App() {
     const permission = await window.Notification.requestPermission()
     setNotificationPermission(permission)
     if (permission === 'granted') {
-      showToast('Notificações liberadas. Push real entra numa etapa posterior.')
+      if (!user) {
+        showToast('Permissão liberada. Entre na conta para registrar este dispositivo.')
+        return
+      }
+      try {
+        await syncPushSubscription(user, { silent: false, showTestNotification: true })
+        showToast('Notificações ativadas neste dispositivo.')
+      } catch (error) {
+        showToast(error.message || 'Permissão liberada, mas não consegui registrar este dispositivo.')
+      }
     } else if (permission === 'denied') {
       showToast('Notificações bloqueadas pelo navegador.')
     } else {
       showToast('Permissão de notificações não foi concluída.')
+    }
+  }
+
+  async function sendPushTestNotification() {
+    if (!user) {
+      showToast('Entre na conta para enviar um push de teste.')
+      return
+    }
+    try {
+      const result = await apiRequest('/api/push-subscriptions/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          user_id: contactOwnerId(user),
+          title: 'Teste do Network Intelligence CRM',
+          body: 'Seu dispositivo recebeu um push disparado pelo backend.',
+          route: ROUTES.SETTINGS,
+        }),
+      })
+      setBackendOnline(true)
+      showToast(`${result.sent || 0} push enviado${result.sent === 1 ? '' : 's'}${result.removed ? ` · ${result.removed} dispositivo(s) inválido(s) removido(s)` : ''}.`)
+    } catch (error) {
+      setBackendOnline(false)
+      showToast(error.message || 'Não foi possível enviar o push de teste.')
     }
   }
 
@@ -12841,7 +15679,7 @@ export default function App() {
   }, [contactsWithCategory])
 
   const inferredCategory = form.service ? classifyService(form.service) : null
-  const isAuthRoute = route.page === 'onboarding' || (!user && (route.page === 'login' || route.page === 'register'))
+  const isAuthRoute = route.page === 'onboarding' || (!user && route.page === 'login')
   const effectiveRoute = !user && !isAuthRoute ? { page: 'login', categoryId: null } : route
 
   let page
@@ -12865,13 +15703,30 @@ export default function App() {
       />
     )
   } else if (effectiveRoute.page === 'login') {
-    page = <LoginPage theme={theme} onToggleTheme={toggleTheme} onLogin={loginUser} onGoogleLogin={loginWithGoogle} onMagicLink={sendMagicLink} supabaseAuthEnabled={SUPABASE_AUTH_ENABLED} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} />
+    page = <LoginPage theme={theme} onToggleTheme={toggleTheme} onGoogleLogin={loginWithGoogle} onAppleLogin={loginWithApple} onMagicLink={sendMagicLink} supabaseAuthEnabled={SUPABASE_AUTH_ENABLED} authStatus={authStatus} authStatusChecked={authStatusChecked} authStatusError={authStatusError} />
   } else if (effectiveRoute.page === 'register') {
     page = <RegisterPage user={user} theme={theme} onToggleTheme={toggleTheme} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'publicProfile') {
     page = <PublicProfileSettingsPage user={user} onSaveUser={saveUser} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'dashboard') {
     page = <DashboardPage contacts={contactsWithCategory} duplicateCount={duplicateSuggestions.length} backendOnline={backendOnline} onNavigate={navigate} onAsk={askCopilot} isThinking={isChatThinking} />
+  } else if (effectiveRoute.page === 'search') {
+    page = (
+      <SearchPage
+        queryDraft={queryDraft}
+        setQueryDraft={setQueryDraft}
+        onSearch={onSearch}
+        recents={recents}
+        contacts={contactsWithCategory}
+        publicProfiles={publicProfilesWithCategory}
+        user={user}
+        onNavigate={navigate}
+        onOpenGroup={setSelectedGroup}
+        searchResults={searchResults}
+        isSearching={isSearching}
+        searchError={searchError}
+      />
+    )
   } else if (effectiveRoute.page === 'agenda') {
     page = (
       <AgendaPage
@@ -12888,8 +15743,14 @@ export default function App() {
         onNavigate={navigate}
         onImport={handleImportFile}
         isImporting={isImporting}
+        duplicateSuggestions={duplicateSuggestions}
+        onBulkUpdateStatus={(contactIds, crmStatus) => bulkUpdateContacts(contactIds, { crm_status: crmStatus }, `atualizado${contactIds.length === 1 ? '' : 's'} com status ${crmStatus}`)}
+        onBulkUpdatePriority={(contactIds, crmPriority) => bulkUpdateContacts(contactIds, { crm_priority: crmPriority }, `atualizado${contactIds.length === 1 ? '' : 's'} com prioridade ${crmPriority}`)}
+        onBulkDelete={bulkDeleteContacts}
       />
     )
+  } else if (effectiveRoute.page === 'import') {
+    page = <ImportContactsPage user={user} contacts={contactsWithCategory} importJobs={importJobs} isImporting={isImporting} onImportGoogleContacts={importGoogleContactsFromSettings} onImportFile={handleImportFile} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'graph') {
     page = <GraphPage contacts={contactsWithCategory} publicProfiles={publicProfilesWithCategory} users={networkUsers} groups={sharedGroups} groupContactsById={groupContactsById} user={user} onNavigate={navigate} onOpenGroup={setSelectedGroup} />
   } else if (effectiveRoute.page === 'contact') {
@@ -12907,10 +15768,11 @@ export default function App() {
     page = <FeedPage publicProfiles={publicProfilesWithCategory} user={user} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'groups') {
     page = (
-      <SharedGroupsPageModern
+      <DeferredGroupsPage
         user={user}
         groups={sharedGroups}
         contacts={contactsWithCategory}
+        publicProfiles={publicProfilesWithCategory}
         users={networkUsers}
         groupContactsById={groupContactsById}
         groupMessagesById={groupMessagesById}
@@ -12929,16 +15791,43 @@ export default function App() {
         onDeleteCustomField={deleteCustomFieldDefinition}
         onUpdateContactCustomFields={updateGroupContactCustomFields}
         onClearMessages={clearGroupMessages}
+        onAskCopilot={askGroupCopilot}
         onNavigate={navigate}
+      />
+    )
+  } else if (effectiveRoute.page === 'groupAdmin') {
+    page = (
+      <GroupAdminPage
+        user={user}
+        groupId={effectiveRoute.groupId}
+        groups={sharedGroups}
+        contacts={contactsWithCategory}
+        groupContactsById={groupContactsById}
+        groupCustomFieldsById={groupCustomFieldsById}
+        users={networkUsers}
+        onNavigate={navigate}
+        onLoadContacts={loadGroupContacts}
+        onLoadCustomFields={(groupId) => loadCustomFieldDefinitions('group', String(groupId))}
+        onUpdateGroup={updateSharedGroup}
+        onAddMember={addSharedGroupMember}
+        onRemoveMember={removeSharedGroupMember}
+        onAddContact={addContactToSharedGroup}
+        onRemoveContact={removeContactFromSharedGroup}
+        onSendMessage={sendGroupMessage}
+        onSaveCustomField={saveCustomFieldDefinition}
+        onDeleteCustomField={deleteCustomFieldDefinition}
+        onUpdateContactCustomFields={updateGroupContactCustomFields}
       />
     )
   } else if (effectiveRoute.page === 'apiDocs') {
     page = <ApiDocsPage onNavigate={navigate} />
   } else if (effectiveRoute.page === 'chat') {
-    page = <ChatPage contacts={contactsWithCategory} messages={chatMessages} onAsk={askCopilot} onApplySuggestion={applyCopilotSuggestion} onNavigate={navigate} isThinking={isChatThinking} />
+    page = <DeferredChatPage contacts={contactsWithCategory} messages={chatMessages} threads={chatThreads} activeThreadId={currentChatThreadId} onSelectThread={setCurrentChatThreadId} onCreateThread={createChatThreadClient} onAsk={askCopilot} onApplySuggestion={applyCopilotSuggestion} onNavigate={navigate} isThinking={isChatThinking} />
+  } else if (effectiveRoute.page === 'customFields') {
+    page = <CustomFieldsPage definitions={customFieldDefinitions} groups={sharedGroups} groupCustomFieldsById={groupCustomFieldsById} onNavigate={navigate} onSaveCustomField={saveCustomFieldDefinition} onDeleteCustomField={deleteCustomFieldDefinition} />
   } else if (effectiveRoute.page === 'settings') {
     page = (
-      <SettingsPage
+      <DeferredSettingsPage
         user={user}
         contacts={contactsWithCategory}
         duplicateCount={duplicateSuggestions.length}
@@ -12950,11 +15839,14 @@ export default function App() {
         onRefreshDuplicates={refreshDuplicates}
         onImportGoogleContacts={importGoogleContactsFromSettings}
         onSyncPending={syncPendingNow}
+        onRetryPendingMutation={retryPendingMutation}
+        onDismissPendingMutation={dismissPendingMutation}
         onExportContacts={exportContacts}
         onClearRecents={clearRecentSearches}
         onSaveCustomField={saveCustomFieldDefinition}
         onDeleteCustomField={deleteCustomFieldDefinition}
         onSaveUser={saveUser}
+        onSendPushTest={sendPushTestNotification}
         onLogout={logout}
       />
     )
@@ -12973,7 +15865,7 @@ export default function App() {
   } else if (effectiveRoute.page === 'connections') {
     page = <ConnectionsPage user={user} contacts={contactsWithCategory} publicProfiles={publicProfilesWithCategory} backendOnline={backendOnline} onNavigate={navigate} />
   } else {
-    page = <AgendaPage contacts={contactsWithCategory} activeCategory="all" queryDraft={queryDraft} setQueryDraft={setQueryDraft} onSearch={onSearch} recents={recents} onDelete={deleteContact} onEdit={setEditingContact} onOpenContact={(contact) => navigate(`${ROUTES.CONTACT}/${contact.id}`)} onToast={showToast} onNavigate={navigate} onImport={handleImportFile} isImporting={isImporting} />
+    page = <AgendaPage contacts={contactsWithCategory} activeCategory="all" queryDraft={queryDraft} setQueryDraft={setQueryDraft} onSearch={onSearch} recents={recents} onDelete={deleteContact} onEdit={setEditingContact} onOpenContact={(contact) => navigate(`${ROUTES.CONTACT}/${contact.id}`)} onToast={showToast} onNavigate={navigate} onImport={handleImportFile} isImporting={isImporting} duplicateSuggestions={duplicateSuggestions} onBulkUpdateStatus={(contactIds, crmStatus) => bulkUpdateContacts(contactIds, { crm_status: crmStatus }, `atualizado${contactIds.length === 1 ? '' : 's'} com status ${crmStatus}`)} onBulkUpdatePriority={(contactIds, crmPriority) => bulkUpdateContacts(contactIds, { crm_priority: crmPriority }, `atualizado${contactIds.length === 1 ? '' : 's'} com prioridade ${crmPriority}`)} onBulkDelete={bulkDeleteContacts} />
   }
 
   return (
@@ -13000,4 +15892,39 @@ export default function App() {
       {selectedGroup ? <GroupModal profile={selectedGroup} onClose={() => setSelectedGroup(null)} onToast={showToast} /> : null}
     </Shell>
   )
+}
+
+export {
+  Avatar,
+  ChatSuggestionReviewModal,
+  CustomFieldDefinitionsManager,
+  DetailRow,
+  Field,
+  GroupContactCustomFieldsModal,
+  NOTIFICATION_OPTIONS,
+  PageTitle,
+  PublicProfileText,
+  ROUTES,
+  SettingsAction,
+  SettingsRow,
+  buildGroupGraphRecords,
+  categoryDetails,
+  contactCustomFieldSearchValues,
+  contactMatchesGroupArea,
+  contactOwnerId,
+  formatDateTime,
+  formatFollowUp,
+  initials,
+  isGenericService,
+  matchText,
+  normalize,
+  normalizeUserDraft,
+  offlineMutationRecoveryHint,
+  offlineMutationReviewRoute,
+  offlineMutationStatus,
+  offlineMutationStatusClass,
+  offlineMutationStatusLabel,
+  offlineMutationTitle,
+  targetContactOptionValue,
+  targetContactServiceLabel,
 }

@@ -99,20 +99,21 @@ Status: `implementado`
 
 ### 4.1 Autenticacao
 
-Status: `parcial`
+Status: `implementado`
 
 Ja entregue:
 
 - Google login;
 - magic link quando Supabase Auth estiver configurado;
-- placeholder de Apple login;
+- Apple login;
 - protecao de areas internas para usuarios nao autenticados.
 
 Observacoes:
 
-- ainda existe fallback local com email e senha para modo legado/desenvolvimento;
-- a API entra em modo `Supabase-first` quando `SUPABASE_JWT_SECRET` esta configurado;
-- rollout final de auth 100% Supabase com RLS continua pendente.
+- o frontend opera em modo `Supabase-first` para Google OAuth e magic link;
+- o login local por senha fica desabilitado por padrao e so volta se habilitado explicitamente por ambiente;
+- usuarios autenticados por magic link nao dependem de conta Google para concluir perfil ou acessar a rede;
+- rollout final de auth 100% Supabase com RLS continua pendente apenas como endurecimento operacional e nao mais como bloqueio do fluxo principal.
 
 ### 4.2 PWA e mobile-first
 
@@ -133,7 +134,7 @@ Ja entregue:
 
 Pendente:
 
-- push notifications reais;
+- automacoes de push alem do envio de teste/manual;
 - estrategia mais robusta de conflito e sincronizacao offline.
 
 ### 4.3 Onboarding
@@ -181,21 +182,21 @@ Ja entregue:
 
 ### 4.6 Importacao de contatos
 
-Status: `parcial`
+Status: `parcial avancado`
 
 Ja entregue:
 
 - Google Contacts real;
 - CSV;
+- Apple Contacts via VCF/export;
+- Outlook via CSV/export compativel;
+- LinkedIn via CSV/export compativel;
 - cadastro manual.
-
-Entregue como base de evolucao:
-
-- placeholders claros para Apple Contacts, Outlook e LinkedIn export.
 
 Pendente:
 
-- integracoes reais com Apple Contacts, Outlook e LinkedIn.
+- conectores nativos/OAuth para Apple Contacts e Outlook;
+- automacao mais guiada para imports de LinkedIn alem do CSV compativel.
 
 ### 4.7 Duplicacao e merge
 
@@ -253,7 +254,7 @@ Ja entregue:
 
 Parcial:
 
-- match automatico entre contato interno e usuario real da plataforma ainda precisa ficar mais forte e mais explicito em todos os contextos.
+- match automatico entre contato interno, usuario real e perfil publico foi reforcado por email, telefone e links sociais, com sinalizacao visual mais clara no detalhe e na agenda.
 
 ### 4.11 Grafos
 
@@ -281,13 +282,17 @@ Regra mantida:
 
 ### 4.12 Busca e inteligencia de networking
 
-Status: `parcial`
+Status: `parcial avancado`
 
 Ja entregue:
 
 - busca por nome, servico, cidade, categoria, tags e campos de CRM;
+- busca por DDD, links e campos customizados no backend;
 - copiloto com perguntas do tipo "quem pode ajudar com X?";
 - exploracao por grupo, rede publica e agenda privada.
+- ranking reforcado por intencao de demanda, servico e complementaridade;
+- matches potenciais por contato com leitura de overlap entre demanda e oferta;
+- insights adicionais na busca consolidada.
 
 Pendente:
 

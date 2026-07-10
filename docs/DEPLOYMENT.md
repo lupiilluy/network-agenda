@@ -4,7 +4,7 @@
 
 Use o Vercel para o frontend e hospede a API FastAPI em um servico Python. Para dados de producao, use Supabase Postgres ou outro banco persistente.
 
-O frontend e estatico, entao combina bem com Vercel. O backend usa SQLite local quando `DATABASE_URL` nao existe e usa Supabase/Postgres quando `DATABASE_URL=postgresql://...`. Para deploy publico, configure Supabase Postgres.
+O frontend e estatico, entao combina bem com Vercel. O backend usa SQLite local quando `DATABASE_URL` nao existe e usa Supabase/Postgres quando `DATABASE_URL=postgresql://...`. Para deploy publico, configure Supabase Postgres e aplique `supabase/schema.sql` ou `scripts/apply-supabase-schema.ps1`.
 
 Para executar a publicacao, siga `docs/GO_LIVE.md`.
 
@@ -65,11 +65,16 @@ Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
 Variaveis:
 
 ```env
+APP_ENV=production
 DATABASE_URL=postgresql://...
 CORS_ALLOWED_ORIGINS=https://seu-app.vercel.app
 SUPABASE_URL=https://seu-projeto.supabase.co
+SUPABASE_JWT_SECRET=
+ALLOW_LEGACY_PASSWORD_LOGIN=false
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
+WEB_PUSH_VAPID_PRIVATE_KEY=
+WEB_PUSH_VAPID_SUBJECT=mailto:voce@seudominio.com
 ```
 
 Depois de publicar a API, copie a URL publica para `VITE_API_URL` no Vercel e rode um novo deploy.
@@ -101,3 +106,11 @@ Frontend:
 cd frontend
 npm run build
 ```
+
+Go-live remoto:
+
+```powershell
+.\scripts\check-auth-readiness.ps1 -Strict
+```
+
+Para o strict passar, `/api/auth/status` precisa retornar `production_auth_ready=true`, `production_auth_enforced=true`, `demo_fallback_enabled=false` e `rls_ready=true`.

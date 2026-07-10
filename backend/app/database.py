@@ -8,6 +8,7 @@ import secrets
 import sqlite3
 from contextlib import contextmanager
 from collections.abc import Iterator
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,27 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = Path("/tmp/network-agenda") if os.getenv("VERCEL") else BASE_DIR / "data"
 DATA_DIR = Path(os.getenv("NETWORK_AGENDA_DATA_DIR", str(DEFAULT_DATA_DIR)))
 DB_PATH = DATA_DIR / "network_agenda.sqlite3"
+AUTH_RLS_REQUIRED_TABLES = (
+    "users",
+    "contacts",
+    "public_profiles",
+    "merge_suggestions",
+    "contact_phones",
+    "contact_emails",
+    "tags",
+    "contact_tags",
+    "custom_fields",
+    "custom_field_values",
+    "groups",
+    "group_members",
+    "group_contacts",
+    "group_messages",
+    "chat_threads",
+    "chat_messages",
+    "import_jobs",
+    "push_subscriptions",
+    "push_dispatch_events",
+)
 
 
 CONTACTS_SEED = (
@@ -151,6 +173,7 @@ def use_postgres() -> bool:
 def to_postgres_sql(sql: str) -> str:
     return (
         sql.replace("datetime(created_at)", "created_at")
+        .replace("datetime(updated_at)", "updated_at")
         .replace("datetime(groups.created_at)", "groups.created_at")
         .replace("datetime(group_contacts.created_at)", "group_contacts.created_at")
         .replace("datetime(group_messages.created_at)", "group_messages.created_at")
@@ -217,6 +240,9 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS contacts (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               owner_id TEXT NOT NULL DEFAULT 'demo-user',
+              linked_user_id TEXT NOT NULL DEFAULT '',
+              linked_user_name TEXT NOT NULL DEFAULT '',
+              linked_user_email TEXT NOT NULL DEFAULT '',
               name TEXT NOT NULL,
               phone TEXT NOT NULL,
               service TEXT NOT NULL,
@@ -227,12 +253,14 @@ def init_db() -> None:
               source TEXT NOT NULL DEFAULT 'Manual',
               description TEXT NOT NULL DEFAULT '',
               demand TEXT NOT NULL DEFAULT '',
+              demand_tags TEXT NOT NULL DEFAULT '',
               solves TEXT NOT NULL DEFAULT '',
               tags TEXT NOT NULL DEFAULT '',
               email TEXT NOT NULL DEFAULT '',
               whatsapp TEXT NOT NULL DEFAULT '',
               instagram TEXT NOT NULL DEFAULT '',
               linkedin TEXT NOT NULL DEFAULT '',
+              organization TEXT NOT NULL DEFAULT '',
               custom_url TEXT NOT NULL DEFAULT '',
               avatar_url TEXT NOT NULL DEFAULT '',
               custom_fields TEXT NOT NULL DEFAULT '[]',
@@ -428,12 +456,49 @@ def init_db() -> None:
               message TEXT NOT NULL,
               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS chat_threads (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              owner_id TEXT NOT NULL,
+              title TEXT NOT NULL DEFAULT '',
+              last_message_preview TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              thread_id INTEGER NOT NULL,
+              owner_id TEXT NOT NULL,
+              role TEXT NOT NULL,
+              text TEXT NOT NULL,
+              provider TEXT NOT NULL DEFAULT '',
+              suggestions TEXT NOT NULL DEFAULT '[]',
+              cta_label TEXT NOT NULL DEFAULT '',
+              cta_route TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS import_jobs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              owner_id TEXT NOT NULL,
+              source TEXT NOT NULL,
+              filename TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'completed',
+              total_count INTEGER NOT NULL DEFAULT 0,
+              imported_count INTEGER NOT NULL DEFAULT 0,
+              skipped_count INTEGER NOT NULL DEFAULT 0,
+              failed_count INTEGER NOT NULL DEFAULT 0,
+              details TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             """
             )
             ensure_contact_columns(connection)
             ensure_user_columns(connection)
             ensure_normalized_contact_tables(connection)
             ensure_group_tables(connection)
+            ensure_chat_and_import_tables(connection)
             repair_text_encoding(connection)
         seed_db(connection)
         assign_demo_contacts(connection)
@@ -442,21 +507,107 @@ def init_db() -> None:
         sync_all_contact_structures(connection)
 
 
+def auth_storage_readiness(connection: DbConnection) -> dict[str, Any]:
+    warnings: list[str] = []
+    result: dict[str, Any] = {
+        "database_dialect": connection.dialect,
+        "rls_supported": connection.dialect == "postgres",
+        "rls_ready": False,
+        "rls_enabled_tables": 0,
+        "rls_total_tables": len(AUTH_RLS_REQUIRED_TABLES),
+        "rls_missing_tables": list(AUTH_RLS_REQUIRED_TABLES),
+        "rls_tables_without_policy": list(AUTH_RLS_REQUIRED_TABLES),
+        "warnings": warnings,
+    }
+
+    if connection.dialect != "postgres":
+        warnings.append("Banco atual em SQLite. Auth de produção deve usar Postgres/Supabase com RLS.")
+        return result
+
+    try:
+        table_rows = connection.connection.execute(
+            """
+            SELECT c.relname AS table_name, c.relrowsecurity AS rls_enabled
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relname = ANY(%s)
+            """,
+            (list(AUTH_RLS_REQUIRED_TABLES),),
+        ).fetchall()
+        policy_rows = connection.connection.execute(
+            """
+            SELECT tablename AS table_name, COUNT(*)::int AS policy_count
+            FROM pg_policies
+            WHERE schemaname = 'public'
+              AND tablename = ANY(%s)
+            GROUP BY tablename
+            """,
+            (list(AUTH_RLS_REQUIRED_TABLES),),
+        ).fetchall()
+    except Exception as exc:
+        warnings.append(f"Não foi possível inspecionar RLS no Postgres atual: {exc}")
+        return result
+
+    table_status = {
+        str(row["table_name"]): bool(row["rls_enabled"])
+        for row in table_rows
+    }
+    policy_status = {
+        str(row["table_name"]): int(row["policy_count"] or 0)
+        for row in policy_rows
+    }
+
+    missing_tables = [table for table in AUTH_RLS_REQUIRED_TABLES if table not in table_status]
+    tables_without_policy = [table for table in AUTH_RLS_REQUIRED_TABLES if policy_status.get(table, 0) <= 0]
+    rls_enabled_tables = sum(1 for table in AUTH_RLS_REQUIRED_TABLES if table_status.get(table))
+    all_rls_enabled = rls_enabled_tables == len(AUTH_RLS_REQUIRED_TABLES)
+    rls_ready = all_rls_enabled and not missing_tables and not tables_without_policy
+
+    if missing_tables:
+        warnings.append(f"Tabelas ausentes no schema protegido: {', '.join(missing_tables[:6])}.")
+    if not all_rls_enabled:
+        disabled_tables = [table for table in AUTH_RLS_REQUIRED_TABLES if not table_status.get(table)]
+        warnings.append(f"RLS não está ativo em todas as tabelas obrigatórias: {', '.join(disabled_tables[:6])}.")
+    if tables_without_policy:
+        warnings.append(f"Faltam políticas RLS em: {', '.join(tables_without_policy[:6])}.")
+
+    result.update(
+        {
+            "rls_ready": rls_ready,
+            "rls_enabled_tables": rls_enabled_tables,
+            "rls_missing_tables": missing_tables,
+            "rls_tables_without_policy": tables_without_policy,
+        }
+    )
+    return result
+
+
 def init_postgres_db(connection: DbConnection) -> None:
     schema_path = Path(__file__).resolve().parent / "postgres_schema.sql"
     connection.executescript(schema_path.read_text(encoding="utf-8"))
+    ensure_contact_columns(connection)
+    ensure_user_columns(connection)
     ensure_normalized_contact_tables(connection)
     ensure_group_tables(connection)
+    ensure_chat_and_import_tables(connection)
     repair_text_encoding(connection)
 
 
 def ensure_contact_columns(connection: DbConnection) -> None:
     if connection.dialect == "postgres":
         connection.execute("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT ''")
+        connection.execute("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS organization TEXT NOT NULL DEFAULT ''")
+        connection.execute("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS linked_user_id TEXT NOT NULL DEFAULT ''")
+        connection.execute("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS linked_user_name TEXT NOT NULL DEFAULT ''")
+        connection.execute("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS linked_user_email TEXT NOT NULL DEFAULT ''")
         return
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(contacts)").fetchall()}
     if "owner_id" not in columns:
         connection.execute("ALTER TABLE contacts ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'demo-user'")
+    for column in ("linked_user_id", "linked_user_name", "linked_user_email"):
+        if column not in columns:
+            connection.execute(f"ALTER TABLE contacts ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
     if "address" not in columns:
         connection.execute("ALTER TABLE contacts ADD COLUMN address TEXT NOT NULL DEFAULT ''")
         connection.execute("UPDATE contacts SET address = city WHERE address = ''")
@@ -473,12 +624,14 @@ def ensure_contact_columns(connection: DbConnection) -> None:
     for column, default in (
         ("description", ""),
         ("demand", ""),
+        ("demand_tags", ""),
         ("solves", ""),
         ("tags", ""),
         ("email", ""),
         ("whatsapp", ""),
         ("instagram", ""),
         ("linkedin", ""),
+        ("organization", ""),
         ("custom_url", ""),
         ("avatar_url", ""),
         ("custom_fields", "[]"),
@@ -713,6 +866,161 @@ def ensure_group_tables(connection: DbConnection) -> None:
     connection.execute(statements[-1])
 
 
+def ensure_chat_and_import_tables(connection: DbConnection) -> None:
+    postgres_statements = (
+        """
+        CREATE TABLE IF NOT EXISTS chat_threads (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          last_message_preview TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS chat_messages (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          thread_id BIGINT NOT NULL,
+          owner_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          text TEXT NOT NULL,
+          provider TEXT NOT NULL DEFAULT '',
+          suggestions TEXT NOT NULL DEFAULT '[]',
+          cta_label TEXT NOT NULL DEFAULT '',
+          cta_route TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS import_jobs (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          source TEXT NOT NULL,
+          filename TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'completed',
+          total_count INTEGER NOT NULL DEFAULT 0,
+          imported_count INTEGER NOT NULL DEFAULT 0,
+          skipped_count INTEGER NOT NULL DEFAULT 0,
+          failed_count INTEGER NOT NULL DEFAULT 0,
+          details TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          endpoint TEXT NOT NULL UNIQUE,
+          p256dh_key TEXT NOT NULL DEFAULT '',
+          auth_key TEXT NOT NULL DEFAULT '',
+          expiration_time BIGINT,
+          user_agent TEXT NOT NULL DEFAULT '',
+          device_label TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS push_dispatch_events (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          event_key TEXT NOT NULL,
+          fingerprint TEXT NOT NULL DEFAULT '',
+          send_count INTEGER NOT NULL DEFAULT 0,
+          last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(owner_id, event_key)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS chat_threads_owner_updated_idx ON chat_threads(owner_id, updated_at DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS chat_messages_thread_created_idx ON chat_messages(thread_id, created_at ASC, id ASC)",
+        "CREATE INDEX IF NOT EXISTS import_jobs_owner_created_idx ON import_jobs(owner_id, created_at DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS push_subscriptions_owner_updated_idx ON push_subscriptions(owner_id, updated_at DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS push_dispatch_events_owner_sent_idx ON push_dispatch_events(owner_id, last_sent_at DESC, id DESC)",
+    )
+    if connection.dialect == "postgres":
+        for statement in postgres_statements:
+            connection.execute(statement)
+        return
+    sqlite_statements = (
+        """
+        CREATE TABLE IF NOT EXISTS chat_threads (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          owner_id TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          last_message_preview TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS chat_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          thread_id INTEGER NOT NULL,
+          owner_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          text TEXT NOT NULL,
+          provider TEXT NOT NULL DEFAULT '',
+          suggestions TEXT NOT NULL DEFAULT '[]',
+          cta_label TEXT NOT NULL DEFAULT '',
+          cta_route TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS import_jobs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          owner_id TEXT NOT NULL,
+          source TEXT NOT NULL,
+          filename TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'completed',
+          total_count INTEGER NOT NULL DEFAULT 0,
+          imported_count INTEGER NOT NULL DEFAULT 0,
+          skipped_count INTEGER NOT NULL DEFAULT 0,
+          failed_count INTEGER NOT NULL DEFAULT 0,
+          details TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          owner_id TEXT NOT NULL,
+          endpoint TEXT NOT NULL UNIQUE,
+          p256dh_key TEXT NOT NULL DEFAULT '',
+          auth_key TEXT NOT NULL DEFAULT '',
+          expiration_time INTEGER,
+          user_agent TEXT NOT NULL DEFAULT '',
+          device_label TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS push_dispatch_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          owner_id TEXT NOT NULL,
+          event_key TEXT NOT NULL,
+          fingerprint TEXT NOT NULL DEFAULT '',
+          send_count INTEGER NOT NULL DEFAULT 0,
+          last_sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(owner_id, event_key)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS chat_threads_owner_updated_idx ON chat_threads(owner_id, updated_at DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS chat_messages_thread_created_idx ON chat_messages(thread_id, created_at ASC, id ASC)",
+        "CREATE INDEX IF NOT EXISTS import_jobs_owner_created_idx ON import_jobs(owner_id, created_at DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS push_subscriptions_owner_updated_idx ON push_subscriptions(owner_id, updated_at DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS push_dispatch_events_owner_sent_idx ON push_dispatch_events(owner_id, last_sent_at DESC, id DESC)",
+    )
+    for statement in sqlite_statements:
+        connection.execute(statement)
+
+
 def looks_mojibake(value: str) -> bool:
     return any(marker in value for marker in ("Ã", "Â", "Ă", "Ä", "Ĺ", "Ľ", "�"))
 
@@ -744,8 +1052,8 @@ def repair_text_encoding(connection: DbConnection) -> None:
     text_columns = {
         "contacts": (
             "name", "phone", "service", "note", "city", "address", "trust", "source",
-            "description", "demand", "solves", "tags", "email", "whatsapp", "instagram",
-            "linkedin", "custom_url", "avatar_url", "custom_fields", "crm_status", "crm_priority",
+            "description", "demand", "demand_tags", "solves", "tags", "email", "whatsapp", "instagram",
+            "linkedin", "organization", "custom_url", "avatar_url", "custom_fields", "crm_status", "crm_priority",
             "last_contact_at", "next_follow_up_at", "crm_note", "category_id",
             "category_label", "category_group", "search_text",
         ),
@@ -1101,6 +1409,67 @@ def payload_email_items(payload: dict) -> list[dict]:
     return results
 
 
+def contact_identity_candidates(connection: DbConnection, contact_id: int, owner_id: str, payload: dict | None = None) -> tuple[set[str], set[str]]:
+    emails = set()
+    phones = set()
+    if payload is not None:
+        emails.update(item["normalized_email"] for item in payload_email_items(payload) if item["normalized_email"])
+        phones.update(item["phone_digits"] for item in payload_phone_items(payload) if item["phone_digits"])
+
+    for row in connection.execute(
+        "SELECT normalized_email FROM contact_emails WHERE contact_id = ? AND owner_id = ?",
+        (contact_id, owner_id),
+    ).fetchall():
+        if row["normalized_email"]:
+            emails.add(str(row["normalized_email"]).strip().lower())
+
+    for row in connection.execute(
+        "SELECT phone_digits FROM contact_phones WHERE contact_id = ? AND owner_id = ?",
+        (contact_id, owner_id),
+    ).fetchall():
+        digits = str(row["phone_digits"] or "").strip()
+        if digits:
+            phones.add(digits)
+
+    return emails, phones
+
+
+def resolve_contact_platform_user(connection: DbConnection, owner_id: str, contact_id: int, payload: dict | None = None):
+    emails, phones = contact_identity_candidates(connection, contact_id, owner_id, payload)
+
+    for email in sorted(emails):
+        user = find_user_by_email(connection, email)
+        if user is not None and str(user["id"]) != str(owner_id):
+            return user
+
+    for digits in sorted(phones):
+        user = connection.execute("SELECT * FROM users WHERE phone_digits = ?", (digits,)).fetchone()
+        if user is not None and str(user["id"]) != str(owner_id):
+            return user
+
+    return None
+
+
+def sync_contact_platform_link(connection: DbConnection, contact_id: int, owner_id: str, payload: dict | None = None) -> None:
+    linked_user = resolve_contact_platform_user(connection, owner_id, contact_id, payload)
+    connection.execute(
+        """
+        UPDATE contacts
+        SET linked_user_id = ?,
+            linked_user_name = ?,
+            linked_user_email = ?
+        WHERE id = ? AND owner_id = ?
+        """,
+        (
+            str(linked_user["id"]) if linked_user is not None else "",
+            str(linked_user["name"]) if linked_user is not None else "",
+            str(linked_user["email"]) if linked_user is not None else "",
+            contact_id,
+            owner_id,
+        ),
+    )
+
+
 def payload_tag_items(payload: dict) -> list[str]:
     values = split_multi_value(payload.get("tags") or "")
     for item in payload.get("tag_items") or []:
@@ -1164,6 +1533,21 @@ def payload_custom_field_items(payload: dict) -> list[dict]:
             }
         )
     return results
+
+
+def custom_field_search_blob(payload: dict) -> str:
+    parts: list[str] = []
+    for item in payload_custom_field_items(payload):
+        name = str(item.get("name") or item.get("label") or item.get("key") or "").strip()
+        key = str(item.get("key") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if name:
+            parts.append(name)
+        if key and key != name:
+            parts.append(key)
+        if value:
+            parts.append(value)
+    return " ".join(parts)
 
 
 def upsert_tag(connection: DbConnection, owner_id: str, name: str) -> int:
@@ -1372,7 +1756,14 @@ def sync_contact_structures(connection: DbConnection, contact_id: int, payload: 
         items=user_scope_fields,
     )
 
+    sync_contact_platform_link(connection, contact_id, owner_id, payload)
     refresh_tag_usage(connection, owner_id)
+
+
+def sync_owner_contact_platform_links(connection: DbConnection, owner_id: str) -> None:
+    rows = connection.execute("SELECT id, owner_id FROM contacts WHERE owner_id = ?", (owner_id,)).fetchall()
+    for row in rows:
+        sync_contact_platform_link(connection, int(row["id"]), str(row["owner_id"]))
 
 
 def refresh_tag_usage(connection: DbConnection, owner_id: str) -> None:
@@ -1402,12 +1793,14 @@ def row_to_payload(row) -> dict:
         "source": row["source"],
         "description": row["description"],
         "demand": row["demand"],
+        "demand_tags": row["demand_tags"] or "",
         "solves": row["solves"],
         "tags": row["tags"],
         "email": row["email"],
         "whatsapp": row["whatsapp"],
         "instagram": row["instagram"],
         "linkedin": row["linkedin"],
+        "organization": row["organization"] or "",
         "custom_url": row["custom_url"],
         "avatar_url": row["avatar_url"],
         "custom_fields": row["custom_fields"],
@@ -1599,6 +1992,47 @@ def upsert_google_user(connection: DbConnection, payload: dict):
     return connection.execute("SELECT * FROM users WHERE email = ?", (payload["email"],)).fetchone()
 
 
+def upsert_auth_user(connection: DbConnection, payload: dict):
+    provider = str(payload.get("auth_provider") or payload.get("provider") or "").strip().lower()
+    existing = connection.execute("SELECT * FROM users WHERE lower(email) = lower(?)", (payload["email"],)).fetchone()
+    avatar_url = str(payload.get("picture") or payload.get("avatar_url") or "").strip()
+    google_connected = provider == "google"
+    if existing is not None:
+        values = [db_bool(connection, google_connected), avatar_url, existing["id"]]
+        connection.execute(
+            """
+            UPDATE users
+            SET google_connected = CASE
+                    WHEN ? THEN true
+                    ELSE google_connected
+                END,
+                avatar_url = COALESCE(NULLIF(?, ''), avatar_url)
+            WHERE id = ?
+            """,
+            tuple(values),
+        )
+        return connection.execute("SELECT * FROM users WHERE id = ?", (existing["id"],)).fetchone()
+
+    password_hash = hash_password(secrets.token_urlsafe(24))
+    raw_sub = str(payload.get("sub") or "").strip()
+    phone_digits_value = f"auth:{raw_sub}" if raw_sub else f"auth:{secrets.token_urlsafe(12)}"
+    display_name = str(payload.get("name") or payload["email"].split("@", 1)[0]).strip() or payload["email"]
+    connection.execute(
+        """
+        INSERT INTO users (
+          name, birth_date, email, password_hash, phone, phone_digits, cep, address,
+          city, state, address_visible, interests, is_collaborator, offered_services,
+          service_address, service_address_visible, public_visible, public_description, public_demand,
+          public_solves, public_tags, public_whatsapp, public_instagram, public_linkedin, public_url, avatar_url,
+          google_connected, google_profile_synced_at, notification_preference, role
+        )
+        VALUES (?, '', ?, ?, '', ?, '', '', '', '', false, '[]', false, '', '', true, false, '', '', '', '', '', '', '', '', ?, ?, '', 'relevant', 'user')
+        """,
+        (display_name, payload["email"], password_hash, phone_digits_value, avatar_url, db_bool(connection, google_connected)),
+    )
+    return connection.execute("SELECT * FROM users WHERE email = ?", (payload["email"],)).fetchone()
+
+
 def find_user_by_phone(connection: DbConnection, phone: str):
     digits = phone_digits(phone)
     if not digits:
@@ -1697,32 +2131,35 @@ def insert_contact(connection: DbConnection, payload: dict):
     source = payload.get("source") or "Manual"
     description = payload.get("description") or ""
     demand = payload.get("demand") or ""
+    demand_tags = payload.get("demand_tags") or ""
     solves = payload.get("solves") or ""
     tags = payload.get("tags") or ""
     email = payload.get("email") or ""
     whatsapp = payload.get("whatsapp") or ""
     instagram = payload.get("instagram") or ""
     linkedin = payload.get("linkedin") or ""
+    organization = payload.get("organization") or ""
     custom_url = payload.get("custom_url") or ""
     avatar_url = payload.get("avatar_url") or ""
     custom_fields = payload.get("custom_fields") or "[]"
+    custom_field_blob = custom_field_search_blob(payload)
     crm_status = payload.get("crm_status") or "Novo"
     crm_priority = payload.get("crm_priority") or "Média"
     last_contact_at = payload.get("last_contact_at") or ""
     next_follow_up_at = payload.get("next_follow_up_at") or ""
     crm_note = payload.get("crm_note") or ""
-    search_text = normalize(" ".join([payload["name"], payload["phone"], service, note, city, address, trust, source, description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, avatar_url, custom_fields, crm_status, crm_priority, crm_note, category.label, category.group]))
+    search_text = normalize(" ".join([payload["name"], payload["phone"], service, note, city, address, trust, source, description, demand, demand_tags, solves, tags, email, whatsapp, instagram, linkedin, organization, custom_url, avatar_url, custom_fields, custom_field_blob, crm_status, crm_priority, crm_note, category.label, category.group]))
 
     returning_clause = " RETURNING id" if connection.dialect == "postgres" else ""
     cursor = connection.execute(
         f"""
         INSERT INTO contacts (
             owner_id, name, phone, service, note, city, address, trust, source,
-            description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, avatar_url, custom_fields,
+            description, demand, demand_tags, solves, tags, email, whatsapp, instagram, linkedin, organization, custom_url, avatar_url, custom_fields,
             crm_status, crm_priority, last_contact_at, next_follow_up_at, crm_note,
             category_id, category_label, category_group, search_text
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         {returning_clause}
         """,
         (
@@ -1737,12 +2174,14 @@ def insert_contact(connection: DbConnection, payload: dict):
             source,
             description,
             demand,
+            demand_tags,
             solves,
             tags,
             email,
             whatsapp,
             instagram,
             linkedin,
+            organization,
             custom_url,
             avatar_url,
             custom_fields,
@@ -1770,12 +2209,14 @@ def insert_contact(connection: DbConnection, payload: dict):
         "source": source,
         "description": description,
         "demand": demand,
+        "demand_tags": demand_tags,
         "solves": solves,
         "tags": tags,
         "email": email,
         "whatsapp": whatsapp,
         "instagram": instagram,
         "linkedin": linkedin,
+        "organization": organization,
         "custom_url": custom_url,
         "avatar_url": avatar_url,
         "custom_fields": custom_fields,
@@ -1800,21 +2241,24 @@ def update_contact(connection: DbConnection, contact_id: int, payload: dict):
     source = payload.get("source") or "Manual"
     description = payload.get("description") or ""
     demand = payload.get("demand") or ""
+    demand_tags = payload.get("demand_tags") or ""
     solves = payload.get("solves") or ""
     tags = payload.get("tags") or ""
     email = payload.get("email") or ""
     whatsapp = payload.get("whatsapp") or ""
     instagram = payload.get("instagram") or ""
     linkedin = payload.get("linkedin") or ""
+    organization = payload.get("organization") or ""
     custom_url = payload.get("custom_url") or ""
     avatar_url = payload.get("avatar_url") or ""
     custom_fields = payload.get("custom_fields") or "[]"
+    custom_field_blob = custom_field_search_blob(payload)
     crm_status = payload.get("crm_status") or "Novo"
     crm_priority = payload.get("crm_priority") or "Média"
     last_contact_at = payload.get("last_contact_at") or ""
     next_follow_up_at = payload.get("next_follow_up_at") or ""
     crm_note = payload.get("crm_note") or ""
-    search_text = normalize(" ".join([payload["name"], payload["phone"], service, note, city, address, trust, source, description, demand, solves, tags, email, whatsapp, instagram, linkedin, custom_url, avatar_url, custom_fields, crm_status, crm_priority, crm_note, category.label, category.group]))
+    search_text = normalize(" ".join([payload["name"], payload["phone"], service, note, city, address, trust, source, description, demand, demand_tags, solves, tags, email, whatsapp, instagram, linkedin, organization, custom_url, avatar_url, custom_fields, custom_field_blob, crm_status, crm_priority, crm_note, category.label, category.group]))
 
     cursor = connection.execute(
         """
@@ -1829,12 +2273,14 @@ def update_contact(connection: DbConnection, contact_id: int, payload: dict):
             source = ?,
             description = ?,
             demand = ?,
+            demand_tags = ?,
             solves = ?,
             tags = ?,
             email = ?,
             whatsapp = ?,
             instagram = ?,
             linkedin = ?,
+            organization = ?,
             custom_url = ?,
             avatar_url = ?,
             custom_fields = ?,
@@ -1860,12 +2306,14 @@ def update_contact(connection: DbConnection, contact_id: int, payload: dict):
             source,
             description,
             demand,
+            demand_tags,
             solves,
             tags,
             email,
             whatsapp,
             instagram,
             linkedin,
+            organization,
             custom_url,
             avatar_url,
             custom_fields,
@@ -1896,12 +2344,14 @@ def update_contact(connection: DbConnection, contact_id: int, payload: dict):
         "source": source,
         "description": description,
         "demand": demand,
+        "demand_tags": demand_tags,
         "solves": solves,
         "tags": tags,
         "email": email,
         "whatsapp": whatsapp,
         "instagram": instagram,
         "linkedin": linkedin,
+        "organization": organization,
         "custom_url": custom_url,
         "avatar_url": avatar_url,
         "custom_fields": custom_fields,
@@ -2033,12 +2483,14 @@ def merge_contacts(connection: DbConnection, owner_id: str, primary_id: int, dup
         "source": merged_source or "Merge",
         "description": choose("description"),
         "demand": choose("demand"),
+        "demand_tags": choose("demand_tags"),
         "solves": choose("solves"),
         "tags": merged_tags,
         "email": choose("email"),
         "whatsapp": choose("whatsapp"),
         "instagram": choose("instagram"),
         "linkedin": choose("linkedin"),
+        "organization": choose("organization"),
         "custom_url": choose("custom_url"),
         "custom_fields": choose("custom_fields") or "[]",
         "crm_status": choose("crm_status") or "Novo",
@@ -2172,11 +2624,345 @@ def contact_structured_data(connection: DbConnection | None, row) -> dict:
     }
 
 
+def normalize_link_identity(value: str | None) -> str:
+    normalized = normalize(str(value or "").strip())
+    if not normalized:
+        return ""
+    normalized = re.sub(r"^https?://", "", normalized)
+    normalized = re.sub(r"^www\.", "", normalized)
+    normalized = normalized.strip().strip("/")
+    normalized = normalized.removeprefix("@")
+    return normalized
+
+
+def unique_normalized(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    results: list[str] = []
+    for value in values:
+        normalized = normalize(str(value or "").strip())
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        results.append(normalized)
+    return results
+
+
+def semantic_tokens(value: str | None) -> set[str]:
+    return {token for token in re.split(r"[^a-z0-9]+", normalize(value or "")) if len(token) >= 3}
+
+
+def contact_snapshot(row, structured: dict) -> dict:
+    primary_phone_digits = {
+        item["phone_digits"]
+        for item in structured.get("phones") or []
+        if str(item.get("phone_digits") or "").strip()
+    }
+    email_values = {
+        str(item.get("normalized_email") or "").strip().lower()
+        for item in structured.get("emails") or []
+        if str(item.get("normalized_email") or "").strip()
+    }
+    tags = [str(item).strip() for item in structured.get("tag_items") or [] if str(item).strip()]
+    demand_tags = split_multi_value(row["demand_tags"] or "")
+    links = unique_normalized(
+        [
+            normalize_link_identity(row["instagram"]),
+            normalize_link_identity(row["linkedin"]),
+            normalize_link_identity(row["custom_url"]),
+            normalize_link_identity(row["whatsapp"]),
+        ]
+    )
+    return {
+        "id": int(row["id"]),
+        "owner_id": str(row["owner_id"]),
+        "linked_user_id": str(row["linked_user_id"] or ""),
+        "linked_user_name": str(row["linked_user_name"] or ""),
+        "linked_user_email": str(row["linked_user_email"] or ""),
+        "name": str(row["name"] or ""),
+        "name_key": normalize(row["name"] or ""),
+        "service": str(row["service"] or ""),
+        "service_tokens": semantic_tokens(row["service"] or ""),
+        "description": str(row["description"] or ""),
+        "demand": str(row["demand"] or ""),
+        "demand_tokens": semantic_tokens(" ".join([row["demand"] or "", row["demand_tags"] or ""])),
+        "solves": str(row["solves"] or ""),
+        "solve_tokens": semantic_tokens(" ".join([row["solves"] or "", row["service"] or ""])),
+        "tags": tags,
+        "tag_tokens": {normalize(tag) for tag in tags if normalize(tag)},
+        "demand_tags": demand_tags,
+        "demand_tag_tokens": {normalize(tag) for tag in demand_tags if normalize(tag)},
+        "organization": str(row["organization"] or ""),
+        "organization_tokens": semantic_tokens(row["organization"] or ""),
+        "city": str(row["city"] or ""),
+        "city_key": normalize(row["city"] or ""),
+        "ddd": str(structured.get("ddd") or ""),
+        "phone_digits": primary_phone_digits,
+        "emails": email_values,
+        "links": links,
+        "category_id": str(row["category_id"] or ""),
+        "category_label": str(row["category_label"] or ""),
+        "category_group": str(row["category_group"] or ""),
+    }
+
+
+def build_user_identity_snapshot(row) -> dict:
+    public_profile = row_to_public_user_profile(row)
+    service = str(row["offered_services"] or row["public_solves"] or row["public_description"] or "")
+    return {
+        "user_id": str(row["id"]),
+        "name": str(row["name"] or ""),
+        "name_key": normalize(row["name"] or ""),
+        "email": normalized_email(row["email"] or ""),
+        "phone_digits": phone_digits(row["phone"] or ""),
+        "links": unique_normalized(
+            [
+                normalize_link_identity(row["public_instagram"]),
+                normalize_link_identity(row["public_linkedin"]),
+                normalize_link_identity(row["public_url"]),
+                normalize_link_identity(row["public_whatsapp"]),
+            ]
+        ),
+        "city_key": normalize(row["city"] or row["service_city"] or ""),
+        "service_tokens": semantic_tokens(service),
+        "tag_tokens": semantic_tokens(row["public_tags"] or " ".join(public_profile.get("tags", "").split(","))),
+        "public_profile": public_profile,
+    }
+
+
+def score_platform_match(contact: dict, user_snapshot: dict) -> tuple[int, str]:
+    score = 0
+    reasons: list[str] = []
+    if contact["linked_user_id"] and contact["linked_user_id"] == user_snapshot["user_id"]:
+        return 100, "Vínculo persistido com usuário da plataforma."
+    if contact["linked_user_email"] and normalize(contact["linked_user_email"]) == user_snapshot["email"]:
+        return 98, "Vínculo persistido por email com usuário da plataforma."
+    if user_snapshot["email"] and user_snapshot["email"] in contact["emails"]:
+        score += 90
+        reasons.append("email igual")
+    if user_snapshot["phone_digits"] and user_snapshot["phone_digits"] in contact["phone_digits"]:
+        score += 88
+        reasons.append("telefone igual")
+    link_overlap = [value for value in contact["links"] if value in user_snapshot["links"]]
+    if link_overlap:
+        score += 72
+        reasons.append("link social igual")
+    if contact["name_key"] and user_snapshot["name_key"]:
+        ratio = SequenceMatcher(None, contact["name_key"], user_snapshot["name_key"]).ratio()
+        if ratio >= 0.94:
+            score += 18
+            reasons.append("nome muito próximo")
+        elif ratio >= 0.88 and (contact["city_key"] and contact["city_key"] == user_snapshot["city_key"]):
+            score += 14
+            reasons.append("nome e cidade coerentes")
+    if contact["service_tokens"] and user_snapshot["service_tokens"]:
+        overlap = contact["service_tokens"] & user_snapshot["service_tokens"]
+        if len(overlap) >= 2:
+            score += 10
+            reasons.append("serviço compatível")
+    return score, ", ".join(reasons)
+
+
+def score_public_profile_match(contact: dict, profile: dict) -> tuple[int, str]:
+    source_user_id = str(profile.get("source_user_id") or "")
+    score = 0
+    reasons: list[str] = []
+    if contact["linked_user_id"] and source_user_id and contact["linked_user_id"] == source_user_id:
+        return 100, "Perfil público do usuário já vinculado à agenda."
+    email = normalized_email(profile.get("email") or "")
+    profile_phones = {
+        phone_digits(profile.get("phone") or ""),
+        phone_digits(profile.get("whatsapp") or ""),
+    } - {""}
+    profile_links = unique_normalized(
+        [
+            normalize_link_identity(profile.get("instagram") or ""),
+            normalize_link_identity(profile.get("linkedin") or ""),
+            normalize_link_identity(profile.get("custom_url") or ""),
+        ]
+    )
+    if email and email in contact["emails"]:
+        score += 90
+        reasons.append("email igual")
+    if profile_phones and contact["phone_digits"] & profile_phones:
+        score += 88
+        reasons.append("telefone igual")
+    if profile_links and any(value in profile_links for value in contact["links"]):
+        score += 72
+        reasons.append("link social igual")
+    profile_name = normalize(profile.get("name") or "")
+    if contact["name_key"] and profile_name:
+        ratio = SequenceMatcher(None, contact["name_key"], profile_name).ratio()
+        if ratio >= 0.94:
+            score += 16
+            reasons.append("nome muito próximo")
+    profile_tokens = semantic_tokens(" ".join([profile.get("service") or "", profile.get("solves") or "", profile.get("tags") or ""]))
+    semantic_overlap = (contact["service_tokens"] | contact["solve_tokens"] | contact["tag_tokens"]) & profile_tokens
+    if len(semantic_overlap) >= 2:
+        score += 10
+        reasons.append("atuação compatível")
+    return score, ", ".join(reasons)
+
+
+def contact_offer_signals_snapshot(contact: dict) -> set[str]:
+    return set(contact["tag_tokens"]) | set(contact["service_tokens"]) | set(contact["solve_tokens"]) | set(contact["organization_tokens"])
+
+
+def contact_need_signals_snapshot(contact: dict) -> set[str]:
+    return set(contact["demand_tag_tokens"]) | set(contact["demand_tokens"])
+
+
+def resolve_contact_match_metadata(connection: DbConnection | None, row, structured: dict) -> dict:
+    if connection is None:
+        return {"platform_match": None, "public_profile_match": None, "potential_matches": []}
+
+    contact = contact_snapshot(row, structured)
+    owner_id = contact["owner_id"]
+    owner_user = find_user_by_id(connection, owner_id)
+    owner_email = normalized_email(owner_user["email"]) if owner_user is not None else ""
+    platform_match = None
+    public_profile_match = None
+
+    user_rows = connection.execute("SELECT * FROM users ORDER BY id ASC").fetchall()
+    best_platform_score = 0
+    for user_row in user_rows:
+        if str(user_row["id"]) == owner_id:
+            continue
+        if owner_email and normalized_email(user_row["email"]) == owner_email:
+            continue
+        score, reason = score_platform_match(contact, build_user_identity_snapshot(user_row))
+        if score > best_platform_score and score >= 72:
+            best_platform_score = score
+            platform_match = {
+                "user_id": str(user_row["id"]),
+                "name": str(user_row["name"] or ""),
+                "email": str(user_row["email"] or ""),
+                "confidence": min(score, 100),
+                "reason": reason or "Compatibilidade estrutural com usuário da plataforma.",
+            }
+
+    profile_rows = connection.execute("SELECT * FROM public_profiles ORDER BY score DESC, people DESC, id DESC").fetchall()
+    public_candidates = [row_to_public_profile(item) for item in profile_rows]
+    public_candidates.extend(row_to_public_user_profile(item) for item in user_rows if bool(item["public_visible"]))
+    best_public_score = 0
+    for profile in public_candidates:
+        if profile.get("kind") != "person":
+            continue
+        if platform_match and str(profile.get("source_user_id") or "") == str(platform_match["user_id"]):
+            score = 100
+            reason = "Perfil público do mesmo usuário já identificado."
+        else:
+            score, reason = score_public_profile_match(contact, profile)
+        if score > best_public_score and score >= 72:
+            best_public_score = score
+            public_profile_match = {
+                "profile_id": int(profile["id"]),
+                "name": str(profile.get("name") or ""),
+                "kind": str(profile.get("kind") or "person"),
+                "source_user_id": profile.get("source_user_id"),
+                "confidence": min(score, 100),
+                "reason": reason or "Compatibilidade com perfil público.",
+            }
+
+    candidate_rows = connection.execute(
+        "SELECT * FROM contacts WHERE owner_id = ? AND id != ? ORDER BY datetime(created_at) DESC, id DESC",
+        (owner_id, int(row["id"])),
+    ).fetchall()
+    need_signals = contact_need_signals_snapshot(contact)
+    offer_signals = contact_offer_signals_snapshot(contact)
+    potential_matches: list[dict] = []
+    for candidate_row in candidate_rows:
+        candidate_structured = contact_structured_data(connection, candidate_row)
+        candidate = contact_snapshot(candidate_row, candidate_structured)
+        candidate_offer = contact_offer_signals_snapshot(candidate)
+        candidate_need = contact_need_signals_snapshot(candidate)
+        overlap = sorted((need_signals & candidate_offer) | (offer_signals & candidate_need))
+        if not overlap:
+            continue
+        score = len(overlap) * 26
+        if contact["city_key"] and contact["city_key"] == candidate["city_key"]:
+            score += 8
+        if contact["ddd"] and contact["ddd"] == candidate["ddd"]:
+            score += 6
+        if candidate["linked_user_id"]:
+            score += 5
+        direction = "resolve demandas parecidas"
+        if need_signals & candidate_offer:
+            direction = "resolve parte da demanda atual"
+        elif offer_signals & candidate_need:
+            direction = "busca algo que este contato já entrega"
+        potential_matches.append(
+            {
+                "contact_id": int(candidate_row["id"]),
+                "name": str(candidate_row["name"] or ""),
+                "service": str(candidate_row["service"] or ""),
+                "score": score,
+                "overlap": overlap[:4],
+                "reason": direction,
+            }
+        )
+    for profile in public_candidates:
+        if str(profile.get("source_user_id") or "") == owner_id:
+            continue
+        profile_offer = semantic_tokens(
+            " ".join(
+                [
+                    profile.get("service") or "",
+                    profile.get("solves") or "",
+                    profile.get("description") or "",
+                    profile.get("tags") or "",
+                    profile.get("area") or "",
+                ]
+            )
+        )
+        profile_need = semantic_tokens(" ".join([profile.get("demand") or "", profile.get("tags") or ""]))
+        overlap = sorted((need_signals & profile_offer) | (offer_signals & profile_need))
+        if not overlap:
+            continue
+        score = len(overlap) * 22 + (12 if profile.get("kind") == "person" else 6)
+        potential_matches.append(
+            {
+                "profile_id": int(profile["id"]),
+                "name": str(profile.get("name") or ""),
+                "service": str(profile.get("service") or profile.get("solves") or ""),
+                "kind": "public_profile" if profile.get("kind") == "person" else "public_group",
+                "score": score,
+                "overlap": overlap[:4],
+                "reason": "o perfil pÃºblico complementa a demanda/oferta atual",
+            }
+        )
+    for group in list_groups_for_user(connection, owner_id):
+        group_signals = semantic_tokens(" ".join([group.get("name") or "", group.get("area") or "", group.get("description") or ""]))
+        overlap = sorted((need_signals | offer_signals) & group_signals)
+        if not overlap:
+            continue
+        potential_matches.append(
+            {
+                "group_id": int(group["id"]),
+                "name": str(group.get("name") or ""),
+                "service": str(group.get("area") or ""),
+                "kind": "group",
+                "score": len(overlap) * 18,
+                "overlap": overlap[:4],
+                "reason": "grupo compartilhado relacionado ao tema do contato",
+            }
+        )
+    potential_matches.sort(key=lambda item: (item["score"], item["name"]), reverse=True)
+    return {
+        "platform_match": platform_match,
+        "public_profile_match": public_profile_match,
+        "potential_matches": potential_matches[:4],
+    }
+
+
 def row_to_contact(row, connection: DbConnection | None = None) -> dict:
     structured = contact_structured_data(connection, row)
+    match_metadata = resolve_contact_match_metadata(connection, row, structured)
     return {
         "id": row["id"],
         "owner_id": row["owner_id"],
+        "linked_user_id": str(row["linked_user_id"] or ""),
+        "linked_user_name": row["linked_user_name"] or "",
+        "linked_user_email": row["linked_user_email"] or "",
         "name": row["name"],
         "phone": row["phone"],
         "service": row["service"],
@@ -2187,12 +2973,14 @@ def row_to_contact(row, connection: DbConnection | None = None) -> dict:
         "source": row["source"],
         "description": row["description"],
         "demand": row["demand"],
+        "demand_tags": row["demand_tags"] or "",
         "solves": row["solves"],
         "tags": row["tags"],
         "email": row["email"],
         "whatsapp": row["whatsapp"],
         "instagram": row["instagram"],
         "linkedin": row["linkedin"],
+        "organization": row["organization"] or "",
         "custom_url": row["custom_url"],
         "avatar_url": row["avatar_url"],
         "custom_fields": row["custom_fields"],
@@ -2207,6 +2995,9 @@ def row_to_contact(row, connection: DbConnection | None = None) -> dict:
         "tag_items": structured["tag_items"],
         "ddd": structured["ddd"],
         "custom_field_values": structured["custom_field_values"],
+        "platform_match": match_metadata["platform_match"],
+        "public_profile_match": match_metadata["public_profile_match"],
+        "potential_matches": match_metadata["potential_matches"],
         "category": {
             "id": row["category_id"],
             "label": row["category_label"],
@@ -2268,6 +3059,343 @@ def row_to_group_message(row) -> dict:
         "message": row["message"],
         "created_at": row_text(row["created_at"]),
     }
+
+
+def row_to_chat_thread(row, connection: DbConnection | None = None) -> dict:
+    message_count = 0
+    if connection is not None:
+        message_count = int(first_value(connection.execute("SELECT COUNT(*) FROM chat_messages WHERE thread_id = ?", (row["id"],)).fetchone()) or 0)
+    return {
+        "id": row["id"],
+        "owner_id": row["owner_id"],
+        "title": row["title"] or "Nova conversa",
+        "last_message_preview": row["last_message_preview"] or "",
+        "message_count": message_count,
+        "created_at": row_text(row["created_at"]),
+        "updated_at": row_text(row["updated_at"]),
+    }
+
+
+def row_to_chat_message(row) -> dict:
+    try:
+        suggestions = json.loads(row["suggestions"] or "[]")
+    except json.JSONDecodeError:
+        suggestions = []
+    cta_label = str(row["cta_label"] or "").strip()
+    cta_route = str(row["cta_route"] or "").strip()
+    return {
+        "id": row["id"],
+        "thread_id": row["thread_id"],
+        "owner_id": row["owner_id"],
+        "role": row["role"],
+        "text": row["text"],
+        "provider": row["provider"] or "",
+        "suggestions": suggestions if isinstance(suggestions, list) else [],
+        "cta": {"label": cta_label, "route": cta_route} if cta_label and cta_route else None,
+        "created_at": row_text(row["created_at"]),
+    }
+
+
+def row_to_import_job(row) -> dict:
+    return {
+        "id": row["id"],
+        "owner_id": row["owner_id"],
+        "source": row["source"],
+        "filename": row["filename"] or "",
+        "status": row["status"],
+        "total_count": int(row["total_count"] or 0),
+        "imported_count": int(row["imported_count"] or 0),
+        "skipped_count": int(row["skipped_count"] or 0),
+        "failed_count": int(row["failed_count"] or 0),
+        "details": row["details"] or "",
+        "created_at": row_text(row["created_at"]),
+    }
+
+
+def row_to_push_subscription(row) -> dict:
+    expiration_time = row["expiration_time"]
+    return {
+        "id": row["id"],
+        "owner_id": row["owner_id"],
+        "endpoint": row["endpoint"],
+        "p256dh_key": row["p256dh_key"] or "",
+        "auth_key": row["auth_key"] or "",
+        "expiration_time": int(expiration_time) if expiration_time not in (None, "") else None,
+        "user_agent": row["user_agent"] or "",
+        "device_label": row["device_label"] or "",
+        "created_at": row_text(row["created_at"]),
+        "updated_at": row_text(row["updated_at"]),
+    }
+
+
+def row_to_push_dispatch_event(row) -> dict:
+    return {
+        "id": row["id"],
+        "owner_id": row["owner_id"],
+        "event_key": row["event_key"],
+        "fingerprint": row["fingerprint"] or "",
+        "send_count": int(row["send_count"] or 0),
+        "last_sent_at": row_text(row["last_sent_at"]),
+        "created_at": row_text(row["created_at"]),
+        "updated_at": row_text(row["updated_at"]),
+    }
+
+
+def find_chat_thread_by_id(connection: DbConnection, thread_id: int):
+    return connection.execute("SELECT * FROM chat_threads WHERE id = ?", (thread_id,)).fetchone()
+
+
+def create_chat_thread(connection: DbConnection, owner_id: str, payload: dict | None = None) -> dict:
+    title = str((payload or {}).get("title") or "").strip() or "Nova conversa"
+    returning_clause = " RETURNING id" if connection.dialect == "postgres" else ""
+    cursor = connection.execute(
+        f"""
+        INSERT INTO chat_threads (owner_id, title, last_message_preview)
+        VALUES (?, ?, '')
+        {returning_clause}
+        """,
+        (str(owner_id), title[:160]),
+    )
+    thread_id = first_value(cursor.fetchone()) if connection.dialect == "postgres" else cursor.lastrowid
+    row = connection.execute("SELECT * FROM chat_threads WHERE id = ?", (thread_id,)).fetchone()
+    return row_to_chat_thread(row, connection)
+
+
+def list_chat_threads(connection: DbConnection, owner_id: str) -> list[dict]:
+    rows = connection.execute(
+        "SELECT * FROM chat_threads WHERE owner_id = ? ORDER BY datetime(updated_at) DESC, id DESC",
+        (str(owner_id),),
+    ).fetchall()
+    return [row_to_chat_thread(row, connection) for row in rows]
+
+
+def list_chat_messages(connection: DbConnection, thread_id: int, owner_id: str) -> list[dict]:
+    rows = connection.execute(
+        """
+        SELECT * FROM chat_messages
+        WHERE thread_id = ? AND owner_id = ?
+        ORDER BY datetime(created_at) ASC, id ASC
+        """,
+        (thread_id, str(owner_id)),
+    ).fetchall()
+    return [row_to_chat_message(row) for row in rows]
+
+
+def create_chat_message(connection: DbConnection, thread_id: int, owner_id: str, payload: dict) -> dict:
+    thread = find_chat_thread_by_id(connection, thread_id)
+    if thread is None or str(thread["owner_id"]) != str(owner_id):
+        raise ValueError("Thread nÃ£o encontrada.")
+    existing_count = int(first_value(connection.execute("SELECT COUNT(*) FROM chat_messages WHERE thread_id = ?", (thread_id,)).fetchone()) or 0)
+    role = str(payload.get("role") or "").strip().lower()
+    if role not in {"user", "assistant", "system"}:
+        raise ValueError("Role de mensagem invÃ¡lido.")
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise ValueError("Mensagem vazia.")
+    provider = str(payload.get("provider") or "").strip().lower()
+    suggestions = payload.get("suggestions") or []
+    if not isinstance(suggestions, list):
+        suggestions = []
+    cta_label = str(payload.get("cta_label") or "").strip()
+    cta_route = str(payload.get("cta_route") or "").strip()
+    returning_clause = " RETURNING id" if connection.dialect == "postgres" else ""
+    cursor = connection.execute(
+        f"""
+        INSERT INTO chat_messages (thread_id, owner_id, role, text, provider, suggestions, cta_label, cta_route)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        {returning_clause}
+        """,
+        (
+            thread_id,
+            str(owner_id),
+            role,
+            text[:4000],
+            provider[:40],
+            json.dumps(suggestions, ensure_ascii=False),
+            cta_label[:120],
+            cta_route[:240],
+        ),
+    )
+    message_id = first_value(cursor.fetchone()) if connection.dialect == "postgres" else cursor.lastrowid
+    preview = text[:160]
+    if role == "user" and existing_count == 0 and str(thread["title"] or "").strip() in {"", "Nova conversa"}:
+        connection.execute(
+            "UPDATE chat_threads SET title = ?, last_message_preview = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_id = ?",
+            (preview, preview, thread_id, str(owner_id)),
+        )
+    else:
+        connection.execute(
+            "UPDATE chat_threads SET last_message_preview = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_id = ?",
+            (preview, thread_id, str(owner_id)),
+        )
+    row = connection.execute("SELECT * FROM chat_messages WHERE id = ?", (message_id,)).fetchone()
+    return row_to_chat_message(row)
+
+
+def create_import_job(connection: DbConnection, owner_id: str, payload: dict) -> dict:
+    source = str(payload.get("source") or "").strip()
+    if len(source) < 2:
+        raise ValueError("Informe a origem da importaÃ§Ã£o.")
+    filename = str(payload.get("filename") or "").strip()
+    status = str(payload.get("status") or "completed").strip() or "completed"
+    total_count = max(0, int(payload.get("total_count") or 0))
+    imported_count = max(0, int(payload.get("imported_count") or 0))
+    skipped_count = max(0, int(payload.get("skipped_count") or 0))
+    failed_count = max(0, int(payload.get("failed_count") or 0))
+    details = str(payload.get("details") or "").strip()
+    returning_clause = " RETURNING id" if connection.dialect == "postgres" else ""
+    cursor = connection.execute(
+        f"""
+        INSERT INTO import_jobs (owner_id, source, filename, status, total_count, imported_count, skipped_count, failed_count, details)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        {returning_clause}
+        """,
+        (str(owner_id), source[:80], filename[:240], status[:40], total_count, imported_count, skipped_count, failed_count, details[:1200]),
+    )
+    job_id = first_value(cursor.fetchone()) if connection.dialect == "postgres" else cursor.lastrowid
+    row = connection.execute("SELECT * FROM import_jobs WHERE id = ?", (job_id,)).fetchone()
+    return row_to_import_job(row)
+
+
+def list_import_jobs(connection: DbConnection, owner_id: str) -> list[dict]:
+    rows = connection.execute(
+        "SELECT * FROM import_jobs WHERE owner_id = ? ORDER BY datetime(created_at) DESC, id DESC",
+        (str(owner_id),),
+    ).fetchall()
+    return [row_to_import_job(row) for row in rows]
+
+
+def list_push_subscriptions(connection: DbConnection, owner_id: str) -> list[dict]:
+    rows = connection.execute(
+        "SELECT * FROM push_subscriptions WHERE owner_id = ? ORDER BY datetime(updated_at) DESC, id DESC",
+        (str(owner_id),),
+    ).fetchall()
+    return [row_to_push_subscription(row) for row in rows]
+
+
+def upsert_push_subscription(connection: DbConnection, owner_id: str, payload: dict) -> dict:
+    endpoint = str(payload.get("endpoint") or "").strip()
+    if len(endpoint) < 12:
+        raise ValueError("Endpoint de push invÃƒÂ¡lido.")
+    p256dh_key = str(payload.get("p256dh_key") or "").strip()
+    auth_key = str(payload.get("auth_key") or "").strip()
+    expiration_time = payload.get("expiration_time")
+    normalized_expiration_time = None if expiration_time in ("", None) else max(0, int(expiration_time))
+    user_agent = str(payload.get("user_agent") or "").strip()
+    device_label = str(payload.get("device_label") or "").strip()
+
+    if connection.dialect == "postgres":
+        row = connection.execute(
+            """
+            INSERT INTO push_subscriptions (owner_id, endpoint, p256dh_key, auth_key, expiration_time, user_agent, device_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(endpoint) DO UPDATE
+            SET owner_id = excluded.owner_id,
+                p256dh_key = excluded.p256dh_key,
+                auth_key = excluded.auth_key,
+                expiration_time = excluded.expiration_time,
+                user_agent = excluded.user_agent,
+                device_label = excluded.device_label,
+                updated_at = NOW()
+            RETURNING *
+            """,
+            (
+                str(owner_id),
+                endpoint[:2000],
+                p256dh_key[:600],
+                auth_key[:600],
+                normalized_expiration_time,
+                user_agent[:600],
+                device_label[:160],
+            ),
+        ).fetchone()
+    else:
+        connection.execute(
+            """
+            INSERT INTO push_subscriptions (owner_id, endpoint, p256dh_key, auth_key, expiration_time, user_agent, device_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(endpoint) DO UPDATE SET
+              owner_id = excluded.owner_id,
+              p256dh_key = excluded.p256dh_key,
+              auth_key = excluded.auth_key,
+              expiration_time = excluded.expiration_time,
+              user_agent = excluded.user_agent,
+              device_label = excluded.device_label,
+              updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                str(owner_id),
+                endpoint[:2000],
+                p256dh_key[:600],
+                auth_key[:600],
+                normalized_expiration_time,
+                user_agent[:600],
+                device_label[:160],
+            ),
+        )
+        row = connection.execute("SELECT * FROM push_subscriptions WHERE endpoint = ?", (endpoint[:2000],)).fetchone()
+    return row_to_push_subscription(row)
+
+
+def delete_push_subscription(connection: DbConnection, subscription_id: int, owner_id: str) -> bool:
+    cursor = connection.execute(
+        "DELETE FROM push_subscriptions WHERE id = ? AND owner_id = ?",
+        (subscription_id, str(owner_id)),
+    )
+    return cursor.rowcount > 0
+
+
+def get_push_dispatch_event(connection: DbConnection, owner_id: str, event_key: str) -> dict | None:
+    normalized_key = str(event_key or "").strip().lower()
+    if not normalized_key:
+        return None
+    row = connection.execute(
+        "SELECT * FROM push_dispatch_events WHERE owner_id = ? AND event_key = ?",
+        (str(owner_id), normalized_key[:120]),
+    ).fetchone()
+    return row_to_push_dispatch_event(row) if row is not None else None
+
+
+def upsert_push_dispatch_event(connection: DbConnection, owner_id: str, event_key: str, fingerprint: str, sent_count: int = 1) -> dict:
+    normalized_key = str(event_key or "").strip().lower()
+    normalized_fingerprint = str(fingerprint or "").strip()
+    safe_send_count = max(0, int(sent_count or 0))
+    returning_clause = " RETURNING id" if connection.dialect == "postgres" else ""
+
+    if connection.dialect == "postgres":
+        row = connection.execute(
+            f"""
+            INSERT INTO push_dispatch_events (owner_id, event_key, fingerprint, send_count, last_sent_at)
+            VALUES (?, ?, ?, ?, NOW())
+            ON CONFLICT(owner_id, event_key) DO UPDATE
+            SET fingerprint = excluded.fingerprint,
+                send_count = push_dispatch_events.send_count + excluded.send_count,
+                last_sent_at = NOW(),
+                updated_at = NOW()
+            RETURNING *
+            """,
+            (str(owner_id), normalized_key[:120], normalized_fingerprint[:120], safe_send_count),
+        ).fetchone()
+        return row_to_push_dispatch_event(row)
+
+    connection.execute(
+        f"""
+        INSERT INTO push_dispatch_events (owner_id, event_key, fingerprint, send_count, last_sent_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(owner_id, event_key) DO UPDATE SET
+          fingerprint = excluded.fingerprint,
+          send_count = push_dispatch_events.send_count + excluded.send_count,
+          last_sent_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+        {returning_clause}
+        """,
+        (str(owner_id), normalized_key[:120], normalized_fingerprint[:120], safe_send_count),
+    )
+    row = connection.execute(
+        "SELECT * FROM push_dispatch_events WHERE owner_id = ? AND event_key = ?",
+        (str(owner_id), normalized_key[:120]),
+    ).fetchone()
+    return row_to_push_dispatch_event(row)
 
 
 def find_group_by_id(connection: DbConnection, group_id: int):

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import base64
+import hashlib
 from contextvars import ContextVar
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
@@ -23,11 +25,27 @@ except ImportError:
     PyJWKClient = None
     PyJWTError = Exception
 
+try:
+    from pywebpush import WebPushException, webpush
+except ImportError:
+    webpush = None
+
+    class WebPushException(Exception):
+        response = None
+
+try:
+    from cryptography.hazmat.primitives import serialization
+except ImportError:
+    serialization = None
+
 from .categories import classify_service, infer_service_from_contact, is_generic_service, normalize
 from .database import (
+    auth_storage_readiness,
     authenticate_user,
     find_user_by_email,
+    find_user_by_id,
     find_group_by_id,
+    find_chat_thread_by_id,
     get_connection,
     find_user_by_phone,
     init_db,
@@ -39,12 +57,21 @@ from .database import (
     can_manage_group,
     create_group,
     create_group_message,
+    create_chat_message,
+    create_chat_thread,
+    create_import_job,
     clear_group_messages,
+    delete_push_subscription,
+    get_push_dispatch_event,
     list_merge_suggestions,
     list_categories,
+    list_chat_messages,
+    list_chat_threads,
     list_group_contacts,
     list_group_messages,
     list_groups_for_user,
+    list_import_jobs,
+    list_push_subscriptions,
     merge_contacts,
     list_custom_fields,
     remove_group_contact,
@@ -55,15 +82,19 @@ from .database import (
     row_to_public_user_profile,
     row_to_user,
     save_custom_field_definition,
+    sync_owner_contact_platform_links,
+    upsert_push_dispatch_event,
+    upsert_push_subscription,
     update_group,
     update_group_contact_custom_fields,
     update_contact,
+    upsert_auth_user,
     upsert_google_user,
     upsert_user,
     delete_custom_field_definition,
     get_custom_field,
 )
-from .schemas import AddressLookupOut, AiChatIn, AiChatOut, CategoryOut, ContactCreate, ContactOut, CustomFieldDefinitionIn, CustomFieldDefinitionOut, GoogleLoginIn, GroupContactCustomFieldsIn, GroupContactLinkIn, GroupCreate, GroupMemberCreate, GroupMemberOut, GroupMessageCreate, GroupMessageOut, GroupOut, LoginIn, MergeDecisionIn, MergeSuggestionOut, PublicProfileOut, SearchOut, UserCreate, UserOut
+from .schemas import AddressLookupOut, AiChatIn, AiChatOut, AuthSessionIn, AuthStatusOut, CategoryOut, ChatMessageCreate, ChatMessageOut, ChatThreadCreate, ChatThreadOut, ContactCreate, ContactOut, CustomFieldDefinitionIn, CustomFieldDefinitionOut, GoogleLoginIn, GraphOut, GroupContactCustomFieldsIn, GroupContactLinkIn, GroupCreate, GroupMemberCreate, GroupMemberOut, GroupMessageCreate, GroupMessageOut, GroupOut, ImportIntegrationOut, ImportJobCreate, ImportJobOut, LoginIn, MergeDecisionIn, MergeSuggestionOut, PublicProfileOut, PushDispatchIn, PushDispatchOut, PushSubscriptionCreate, PushSubscriptionOut, PushTestNotificationIn, SearchOut, UserCreate, UserOut
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -121,7 +152,22 @@ def decode_supabase_token(token: str) -> dict | None:
     subject = str(claims.get("sub") or "").strip()
     if not email or not subject:
         return None
-    return {"sub": subject, "email": email}
+    provider = auth_provider_from_claims(claims)
+    result = {"sub": subject, "email": email}
+    if provider:
+        result["provider"] = provider
+    return result
+
+
+def auth_provider_from_claims(claims: dict | None) -> str:
+    if not isinstance(claims, dict):
+        return ""
+    provider = claims.get("provider")
+    if not provider and isinstance(claims.get("app_metadata"), dict):
+        provider = claims["app_metadata"].get("provider")
+    if not provider and isinstance(claims.get("user_metadata"), dict):
+        provider = claims["user_metadata"].get("provider")
+    return str(provider or "").strip().lower()
 
 
 def configured_supabase_url() -> str:
@@ -201,12 +247,13 @@ def auth_context_from_header(authorization: str) -> dict | None:
     with get_connection() as connection:
         row = find_user_by_email(connection, claims["email"])
         if row is None:
-            row = upsert_google_user(
+            row = upsert_auth_user(
                 connection,
                 {
                     "sub": claims["sub"],
                     "email": claims["email"],
                     "name": claims["email"].split("@", 1)[0],
+                    "auth_provider": claims.get("provider") or "",
                 },
             )
             connection.commit()
@@ -216,10 +263,37 @@ def auth_context_from_header(authorization: str) -> dict | None:
 
 
 def supabase_auth_required() -> bool:
-    return bool(os.getenv("SUPABASE_JWT_SECRET", "").strip() or configured_supabase_url()) and jwt is not None
+    return (production_auth_enforced() or bool(os.getenv("SUPABASE_JWT_SECRET", "").strip() or configured_supabase_url())) and jwt is not None
+
+
+def production_auth_enforced() -> bool:
+    environment = os.getenv("APP_ENV", os.getenv("ENV", "")).strip().lower()
+    return environment in {"production", "prod"}
+
+
+def demo_fallback_enabled() -> bool:
+    return not production_auth_enforced() and not bool(os.getenv("SUPABASE_JWT_SECRET", "").strip() or configured_supabase_url())
+
+
+def legacy_password_login_enabled() -> bool:
+    return os.getenv("ALLOW_LEGACY_PASSWORD_LOGIN", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def jwt_validation_mode() -> str:
+    if os.getenv("SUPABASE_JWT_SECRET", "").strip():
+        return "hs256"
+    if configured_supabase_url():
+        return "jwks"
+    return "disabled"
+
+
+def production_auth_blocker() -> None:
+    if production_auth_enforced() and not (configured_supabase_url() or os.getenv("SUPABASE_JWT_SECRET", "").strip()):
+        raise HTTPException(status_code=503, detail="APP_ENV=production exige SUPABASE_URL ou SUPABASE_JWT_SECRET.")
 
 
 def auth_context_or_unauthorized() -> dict | None:
+    production_auth_blocker()
     context = AUTH_CONTEXT.get()
     if context and context.get("owner_id") and context.get("email"):
         return context
@@ -229,12 +303,27 @@ def auth_context_or_unauthorized() -> dict | None:
 
 
 def authenticated_owner_id(fallback: str | None = "demo-user") -> str:
+    production_auth_blocker()
     context = AUTH_CONTEXT.get()
     if context and context.get("owner_id"):
         return str(context["owner_id"])
     if supabase_auth_required():
         raise HTTPException(status_code=401, detail="Autenticação Supabase obrigatória.")
     return str(fallback or "demo-user")
+
+
+def ai_thread_title_from_message(message: str) -> str:
+    cleaned = " ".join(str(message or "").strip().split())
+    if not cleaned:
+        return "Nova conversa"
+    return cleaned[:160]
+
+
+def assert_thread_access(connection, thread_id: int, owner_id: str):
+    thread = find_chat_thread_by_id(connection, thread_id)
+    if thread is None or str(thread["owner_id"]) != str(owner_id):
+        raise HTTPException(status_code=404, detail="Thread nÃ£o encontrada.")
+    return thread
 
 
 def resolve_custom_field_scope_owner(connection, requester_id: str, scope_type: str, scope_id: str) -> str:
@@ -271,10 +360,707 @@ def health() -> dict:
     return {"status": "ok", "service": "network-agenda-api"}
 
 
+@app.get("/api/auth/status", response_model=AuthStatusOut)
+def auth_status() -> dict:
+    context = AUTH_CONTEXT.get() or {}
+    has_supabase_url = bool(configured_supabase_url())
+    has_supabase_jwt_secret = bool(os.getenv("SUPABASE_JWT_SECRET", "").strip())
+    jwt_library_available = jwt is not None
+    with get_connection() as connection:
+        storage = auth_storage_readiness(connection)
+    warnings = list(storage.get("warnings") or [])
+    if not has_supabase_url and not has_supabase_jwt_secret:
+        warnings.append("Backend sem SUPABASE_URL/SUPABASE_JWT_SECRET. Tokens do Supabase não serão validados.")
+    if not jwt_library_available:
+        warnings.append("PyJWT não está disponível no runtime do backend.")
+    if legacy_password_login_enabled():
+        warnings.append("Login legado por senha ainda está habilitado.")
+    if production_auth_enforced() and not (has_supabase_url or has_supabase_jwt_secret):
+        warnings.append("APP_ENV=production ativo sem SUPABASE_URL/SUPABASE_JWT_SECRET; rotas privadas serao bloqueadas.")
+    if demo_fallback_enabled():
+        warnings.append("Fallback demo-user ativo apenas para desenvolvimento local.")
+    production_auth_ready = bool(
+        jwt_library_available
+        and not legacy_password_login_enabled()
+        and storage.get("database_dialect") == "postgres"
+        and storage.get("rls_ready")
+        and (has_supabase_url or has_supabase_jwt_secret)
+    )
+    return {
+        "supabase_auth_required": supabase_auth_required(),
+        "production_auth_enforced": production_auth_enforced(),
+        "demo_fallback_enabled": demo_fallback_enabled(),
+        "configured_supabase_url": has_supabase_url,
+        "configured_supabase_jwt_secret": has_supabase_jwt_secret,
+        "configured_web_push_vapid": bool(push_vapid_config()),
+        "jwt_library_available": jwt_library_available,
+        "legacy_password_login_enabled": legacy_password_login_enabled(),
+        "jwt_validation_mode": jwt_validation_mode(),
+        "database_dialect": str(storage.get("database_dialect") or ""),
+        "rls_supported": bool(storage.get("rls_supported")),
+        "rls_ready": bool(storage.get("rls_ready")),
+        "rls_enabled_tables": int(storage.get("rls_enabled_tables") or 0),
+        "rls_total_tables": int(storage.get("rls_total_tables") or 0),
+        "production_auth_ready": production_auth_ready,
+        "warnings": warnings,
+        "authenticated": bool(context.get("email") and context.get("owner_id")),
+        "current_user_email": str(context.get("email") or ""),
+        "current_owner_id": str(context.get("owner_id") or ""),
+        "current_provider": str(context.get("provider") or ""),
+    }
+
+
 @app.get("/api/categories", response_model=list[CategoryOut])
 def categories() -> list[dict]:
     with get_connection() as connection:
         return list_categories(connection)
+
+
+def normalized_terms(value: str) -> list[str]:
+    normalized_value = normalize(value)
+    return [term for term in re.split(r"\W+", normalized_value) if len(term) >= 2]
+
+
+def expanded_search_terms(query: str) -> list[str]:
+    base_terms = normalized_terms(query)
+    category = classify_service(query)
+    expanded = list(base_terms)
+    if category.id != "general":
+        expanded.extend(normalized_terms(" ".join([category.label, category.group, *category.keywords[:6], *category.synonyms[:4]])))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for term in expanded:
+        key = normalize(term)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+    return ordered
+
+
+def search_intent(query: str) -> str:
+    normalized = normalize(query)
+    if any(term in normalized for term in ("busca", "procura", "precisa", "demanda", "quer")):
+        return "demand"
+    if any(term in normalized for term in ("resolve", "faz", "oferece", "presta", "entrega", "servico", "servico", "ajuda com")):
+        return "solve"
+    if any(term in normalized for term in ("conecta", "introducao", "introduzir", "complementar", "complementaridade", "match")):
+        return "match"
+    return "generic"
+
+
+def semantic_query_terms(query: str) -> set[str]:
+    terms = set(expanded_search_terms(query))
+    category = classify_service(query)
+    terms.update(normalized_terms(category.label))
+    terms.update(normalized_terms(category.group))
+    terms.update(normalized_terms(" ".join(category.keywords[:10])))
+    terms.update(normalized_terms(" ".join(category.synonyms[:8])))
+    return {term for term in terms if len(term) >= 3}
+
+
+def semantic_overlap_score(query_terms: set[str], normalized_values: dict[str, str], fields: tuple[str, ...]) -> int:
+    if not query_terms:
+        return 0
+    score = 0
+    for field in fields:
+        value = normalized_values.get(field, "")
+        if not value:
+            continue
+        field_terms = {term for term in re.split(r"\W+", value) if len(term) >= 3}
+        overlap = query_terms & field_terms
+        score += len(overlap) * 7
+        if overlap and any(term in value for term in query_terms):
+            score += 4
+    return score
+
+
+def contact_search_score(contact: dict, query: str) -> int:
+    normalized_query = normalize(query)
+    if not normalized_query:
+        return 0
+
+    terms = expanded_search_terms(query) or [normalized_query]
+    semantic_terms = semantic_query_terms(query)
+    intent = search_intent(query)
+    searchable_values = {
+        "name": str(contact.get("name") or ""),
+        "service": str(contact.get("service") or ""),
+        "description": str(contact.get("description") or ""),
+        "demand": str(contact.get("demand") or ""),
+        "demand_tags": str(contact.get("demand_tags") or ""),
+        "solves": str(contact.get("solves") or ""),
+        "tags": str(contact.get("tags") or ""),
+        "note": str(contact.get("note") or ""),
+        "city": str(contact.get("city") or ""),
+        "address": str(contact.get("address") or ""),
+        "source": str(contact.get("source") or ""),
+        "organization": str(contact.get("organization") or ""),
+        "email": str(contact.get("email") or ""),
+        "instagram": str(contact.get("instagram") or ""),
+        "linkedin": str(contact.get("linkedin") or ""),
+        "custom_url": str(contact.get("custom_url") or ""),
+        "crm_status": str(contact.get("crm_status") or ""),
+        "crm_priority": str(contact.get("crm_priority") or ""),
+        "crm_note": str(contact.get("crm_note") or ""),
+        "ddd": str(contact.get("ddd") or ""),
+        "category": " ".join([str(contact.get("category", {}).get("label") or ""), str(contact.get("category", {}).get("group") or "")]),
+        "phones": " ".join(str(item.get("phone") or "") for item in contact.get("phones") or []),
+        "emails": " ".join(str(item.get("email") or "") for item in contact.get("emails") or []),
+        "tag_items": " ".join(str(item) for item in contact.get("tag_items") or []),
+        "custom_fields": " ".join(
+            " ".join(
+                [
+                    str(item.get("name") or ""),
+                    str(item.get("key") or ""),
+                    str(item.get("value") or ""),
+                ]
+            )
+            for item in contact.get("custom_field_values") or []
+        ),
+    }
+    normalized_values = {key: normalize(value) for key, value in searchable_values.items() if value}
+
+    score = 0
+    if normalized_query in normalized_values.get("name", ""):
+        score += 160
+    if normalized_query in normalized_values.get("service", ""):
+        score += 120
+    if normalized_query in normalized_values.get("solves", ""):
+        score += 120
+    if normalized_query in normalized_values.get("demand", ""):
+        score += 110
+    if normalized_query in normalized_values.get("tags", "") or normalized_query in normalized_values.get("tag_items", ""):
+        score += 100
+    if normalized_query in normalized_values.get("custom_fields", ""):
+        score += 95
+    if normalized_query in normalized_values.get("organization", ""):
+        score += 85
+    if normalized_query in normalized_values.get("ddd", ""):
+        score += 80
+    if normalized_query in normalized_values.get("source", ""):
+        score += 70
+    if normalized_query in normalized_values.get("emails", "") or normalized_query in normalized_values.get("email", ""):
+        score += 70
+    if normalized_query in normalized_values.get("phones", ""):
+        score += 65
+    if normalized_query in normalized_values.get("instagram", "") or normalized_query in normalized_values.get("linkedin", ""):
+        score += 60
+    if normalized_query in normalized_values.get("description", "") or normalized_query in normalized_values.get("note", ""):
+        score += 55
+    if normalized_query in normalized_values.get("city", "") or normalized_query in normalized_values.get("address", ""):
+        score += 40
+    if normalized_query in normalized_values.get("crm_status", "") or normalized_query in normalized_values.get("crm_priority", ""):
+        score += 35
+    if normalized_query in normalized_values.get("category", ""):
+        score += 30
+    if intent == "demand" and normalized_query in normalized_values.get("demand", ""):
+        score += 45
+    if intent == "solve" and (normalized_query in normalized_values.get("service", "") or normalized_query in normalized_values.get("solves", "")):
+        score += 45
+    if intent == "match" and contact.get("potential_matches"):
+        score += 28
+    if contact.get("platform_match"):
+        score += 12
+    if contact.get("public_profile_match"):
+        score += 8
+    score += semantic_overlap_score(
+        semantic_terms,
+        normalized_values,
+        ("service", "solves", "demand", "demand_tags", "tags", "tag_items", "description", "custom_fields", "organization", "category"),
+    )
+
+    for term in terms:
+        if term in normalized_values.get("name", ""):
+            score += 14
+        if term in normalized_values.get("service", "") or term in normalized_values.get("solves", ""):
+            score += 10
+        if term in normalized_values.get("demand", "") or term in normalized_values.get("demand_tags", ""):
+            score += 9
+        if term in normalized_values.get("tags", "") or term in normalized_values.get("tag_items", ""):
+            score += 8
+        if term in normalized_values.get("custom_fields", ""):
+            score += 8
+        if term in normalized_values.get("organization", ""):
+            score += 6
+        if term in normalized_values.get("phones", "") or term in normalized_values.get("emails", ""):
+            score += 6
+        if intent == "demand" and term in normalized_values.get("demand", ""):
+            score += 10
+        if intent == "solve" and (term in normalized_values.get("service", "") or term in normalized_values.get("solves", "")):
+            score += 10
+        if intent == "match":
+            for candidate in contact.get("potential_matches") or []:
+                haystack = normalize(" ".join([candidate.get("name") or "", candidate.get("service") or "", " ".join(candidate.get("overlap") or [])]))
+                if term in haystack:
+                    score += 12
+    return score
+
+
+def public_profile_search_score(profile: dict, query: str) -> int:
+    normalized_query = normalize(query)
+    if not normalized_query:
+        return 0
+    intent = search_intent(query)
+    search_text = normalize(
+        " ".join(
+            [
+                str(profile.get("name") or ""),
+                str(profile.get("service") or ""),
+                str(profile.get("description") or ""),
+                str(profile.get("demand") or ""),
+                str(profile.get("solves") or ""),
+                str(profile.get("tags") or ""),
+                str(profile.get("area") or ""),
+                str(profile.get("email") or ""),
+                str(profile.get("phone") or ""),
+                str(profile.get("whatsapp") or ""),
+                str(profile.get("instagram") or ""),
+                str(profile.get("linkedin") or ""),
+                str(profile.get("custom_url") or ""),
+                str(profile.get("category", {}).get("label") or ""),
+                str(profile.get("category", {}).get("group") or ""),
+            ]
+        )
+    )
+    score = 0
+    normalized_name = normalize(profile.get("name") or "")
+    normalized_service = normalize(profile.get("service") or "")
+    normalized_solves = normalize(profile.get("solves") or "")
+    normalized_demand = normalize(profile.get("demand") or "")
+    normalized_tags = normalize(profile.get("tags") or "")
+    normalized_area = normalize(profile.get("area") or "")
+    normalized_email = normalize(profile.get("email") or "")
+    normalized_phone = normalize(profile.get("phone") or "")
+    normalized_instagram = normalize(profile.get("instagram") or "")
+    normalized_linkedin = normalize(profile.get("linkedin") or "")
+    normalized_description = normalize(profile.get("description") or "")
+    semantic_terms = semantic_query_terms(query)
+    if normalized_query in normalized_name:
+        score += 140
+    if normalized_query in normalized_service or normalized_query in normalized_solves:
+        score += 120
+    if normalized_query in normalized_demand:
+        score += 105
+    if normalized_query in normalized_tags:
+        score += 95
+    if normalized_query in normalized_area:
+        score += 65
+    score += semantic_overlap_score(
+        semantic_terms,
+        {
+            "name": normalized_name,
+            "service": normalized_service,
+            "solves": normalized_solves,
+            "demand": normalized_demand,
+            "tags": normalized_tags,
+            "area": normalized_area,
+            "description": normalized_description,
+            "search_text": search_text,
+        },
+        ("service", "solves", "demand", "tags", "area", "description", "search_text"),
+    )
+    if normalized_query in normalized_email or normalized_query in normalized_phone:
+        score += 60
+    if normalized_query in normalized_instagram or normalized_query in normalized_linkedin:
+        score += 55
+    if normalized_query in normalized_description:
+        score += 50
+    if intent == "demand" and normalized_query in normalized_demand:
+        score += 42
+    if intent == "solve" and (normalized_query in normalized_service or normalized_query in normalized_solves):
+        score += 42
+    for term in expanded_search_terms(query):
+        if term in search_text:
+            score += 10
+        if term in normalized_name:
+            score += 14
+        if term in normalized_service or term in normalized_solves:
+            score += 10
+        if term in normalized_demand or term in normalized_tags:
+            score += 8
+    return score
+
+
+def push_vapid_config() -> dict | None:
+    private_key = os.getenv("WEB_PUSH_VAPID_PRIVATE_KEY", "").strip()
+    subject = os.getenv("WEB_PUSH_VAPID_SUBJECT", "").strip()
+    if not private_key or not subject:
+        return None
+    return {"private_key": private_key, "subject": subject}
+
+
+def pad_base64url(value: str) -> str:
+    return value + ("=" * ((4 - len(value) % 4) % 4))
+
+
+def resolve_vapid_private_key(value: str) -> str:
+    candidate = str(value or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=503, detail="WEB_PUSH_VAPID_PRIVATE_KEY nÃ£o foi configurada.")
+    if "BEGIN PRIVATE KEY" in candidate or "BEGIN EC PRIVATE KEY" in candidate:
+        return candidate
+    possible_path = Path(candidate)
+    if possible_path.exists():
+        return possible_path.read_text(encoding="utf-8")
+    if serialization is None:
+        raise HTTPException(status_code=503, detail="cryptography nÃ£o estÃ¡ instalada para decodificar WEB_PUSH_VAPID_PRIVATE_KEY.")
+    try:
+        decoded = base64.urlsafe_b64decode(pad_base64url(candidate).encode("utf-8"))
+        private_key = serialization.load_der_private_key(decoded, password=None)
+        pem_bytes = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        return pem_bytes.decode("utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="WEB_PUSH_VAPID_PRIVATE_KEY invÃ¡lida. Use PEM, caminho para PEM ou PKCS8 DER em base64url.") from exc
+
+
+def send_push_payload(subscription: dict, payload: dict) -> None:
+    config = push_vapid_config()
+    if webpush is None:
+        raise HTTPException(status_code=503, detail="pywebpush nÃ£o estÃ¡ instalado no backend.")
+    if config is None:
+        raise HTTPException(status_code=503, detail="WEB_PUSH_VAPID_PRIVATE_KEY e WEB_PUSH_VAPID_SUBJECT sÃ£o obrigatÃ³rios para envio de push.")
+    webpush(
+        subscription_info={
+            "endpoint": subscription["endpoint"],
+            "keys": {
+                "p256dh": subscription.get("p256dh_key") or "",
+                "auth": subscription.get("auth_key") or "",
+            },
+        },
+        data=json.dumps(payload, ensure_ascii=False),
+        vapid_private_key=resolve_vapid_private_key(config["private_key"]),
+        vapid_claims={"sub": config["subject"]},
+    )
+
+
+def user_allows_external_push(connection, owner_id: str) -> bool:
+    row = find_user_by_id(connection, owner_id)
+    if row is None:
+        return True
+    preference = str(row["notification_preference"] or "relevant").strip().lower()
+    return preference == "relevant"
+
+
+def push_dispatch_fingerprint(*parts) -> str:
+    payload = json.dumps([str(part or "").strip() for part in parts], ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def parse_dispatch_timestamp(value: str | None) -> float | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidates = [raw]
+    if raw.endswith("Z"):
+        candidates.append(f"{raw[:-1]}+00:00")
+    for candidate in candidates:
+        try:
+            return datetime.fromisoformat(candidate).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def merge_suggestions_fingerprint(suggestions: list[dict]) -> str:
+    pairs = [
+        f"{item['primary_contact']['id']}:{item['duplicate_contact']['id']}"
+        for item in suggestions[:8]
+        if item.get("primary_contact") and item.get("duplicate_contact")
+    ]
+    return push_dispatch_fingerprint("duplicates", len(suggestions), *pairs)
+
+
+def dispatch_owner_push(
+    connection,
+    owner_id: str,
+    title: str,
+    body: str,
+    route: str,
+    tag: str,
+    *,
+    event_key: str | None = None,
+    fingerprint: str | None = None,
+    cooldown_minutes: int = 240,
+) -> dict:
+    normalized_event_key = normalize(event_key or tag or route)
+    normalized_fingerprint = str(fingerprint or push_dispatch_fingerprint(tag, title, body, route)).strip()[:120]
+    if normalized_event_key and cooldown_minutes > 0:
+        existing_event = get_push_dispatch_event(connection, owner_id, normalized_event_key)
+        if existing_event and existing_event.get("fingerprint") == normalized_fingerprint:
+            last_sent_at = parse_dispatch_timestamp(existing_event.get("last_sent_at"))
+            if last_sent_at is not None and (datetime.now().timestamp() - last_sent_at) < cooldown_minutes * 60:
+                return {"sent": 0, "failed": 0, "removed": 0}
+    if not user_allows_external_push(connection, owner_id):
+        return {"sent": 0, "failed": 0, "removed": 0}
+    if push_vapid_config() is None or webpush is None:
+        return {"sent": 0, "failed": 0, "removed": 0}
+    subscriptions = list_push_subscriptions(connection, owner_id)
+    if not subscriptions:
+        return {"sent": 0, "failed": 0, "removed": 0}
+
+    sent = 0
+    failed = 0
+    removed = 0
+    payload = {
+        "title": title[:120],
+        "body": body[:500],
+        "tag": tag[:120],
+        "data": {"route": route[:240]},
+    }
+    for subscription in subscriptions:
+        try:
+            send_push_payload(subscription, payload)
+            sent += 1
+        except HTTPException:
+            raise
+        except WebPushException as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None) or getattr(getattr(exc, "response", None), "status", None)
+            if status_code in {404, 410}:
+                delete_push_subscription(connection, int(subscription["id"]), owner_id)
+                removed += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    if sent > 0 and normalized_event_key:
+        upsert_push_dispatch_event(connection, owner_id, normalized_event_key, normalized_fingerprint, sent)
+    return {"sent": sent, "failed": failed, "removed": removed}
+
+
+def due_follow_up_contacts(rows: list[dict], horizon_hours: int = 24) -> list[dict]:
+    now = datetime.now()
+    horizon = now + timedelta(hours=horizon_hours)
+    due: list[dict] = []
+    for contact in rows:
+        raw = str(contact.get("next_follow_up_at") or "").strip()
+        if not raw:
+            continue
+        try:
+            target = datetime.fromisoformat(raw[:16])
+        except ValueError:
+            continue
+        if now <= target <= horizon:
+            due.append(contact)
+    due.sort(key=lambda item: item.get("next_follow_up_at") or "")
+    return due
+
+
+def build_search_insights(query: str, private_results: list[dict], public_results: list[dict]) -> list[str]:
+    insights: list[str] = []
+    if private_results:
+        linked = [item for item in private_results if item.get("platform_match") or item.get("public_profile_match")]
+        if linked:
+            insights.append(f"{len(linked)} contato(s) privado(s) têm vínculo provável com usuários ou perfis públicos.")
+        complementary = [item for item in private_results if item.get("potential_matches")]
+        if complementary:
+            top = complementary[0]
+            preview = ", ".join(match["name"] for match in (top.get("potential_matches") or [])[:2])
+            if preview:
+                insights.append(f"Melhor complementaridade agora: {top['name']} pode se conectar com {preview}.")
+    if public_results:
+        people = [item for item in public_results if (item.get("kind") or "group") == "person"]
+        if people:
+            insights.append(f"{len(people)} perfil(is) público(s) pessoal(is) apareceram para \"{query}\".")
+    return insights[:4]
+
+
+def import_integrations_catalog() -> list[dict]:
+    return [
+        {
+            "provider": "google_contacts",
+            "label": "Google Contacts",
+            "status": "implemented",
+            "mode": "oauth",
+            "description": "Importação real já disponível via conta Google conectada.",
+            "supported_formats": ["oauth"],
+            "available": True,
+            "action_label": "Importar agora",
+        },
+        {
+            "provider": "apple_contacts_native",
+            "label": "Apple Contacts",
+            "status": "coming_soon",
+            "mode": "native_oauth",
+            "description": "Conector nativo planejado. Enquanto isso, use VCF exportado do app Contatos ou do iCloud.",
+            "supported_formats": ["oauth", "vcf"],
+            "available": False,
+            "action_label": "Em breve",
+        },
+        {
+            "provider": "outlook_native",
+            "label": "Outlook",
+            "status": "coming_soon",
+            "mode": "native_oauth",
+            "description": "Conector OAuth planejado. O parser atual já aceita CSV compatível do Outlook.",
+            "supported_formats": ["oauth", "csv"],
+            "available": False,
+            "action_label": "Em breve",
+        },
+        {
+            "provider": "linkedin_native",
+            "label": "LinkedIn",
+            "status": "coming_soon",
+            "mode": "native_connector",
+            "description": "Fluxo guiado planejado. No MVP, continue com CSV exportado compatível.",
+            "supported_formats": ["csv"],
+            "available": False,
+            "action_label": "Em breve",
+        },
+    ]
+
+
+def dispatch_priority_pushes(connection, owner_id: str, kinds: list[str] | None = None) -> dict:
+    normalized_kinds = {normalize(item) for item in (kinds or ["follow_up", "duplicates", "matches"])}
+    events: list[str] = []
+    sent = 0
+    failed = 0
+    removed = 0
+
+    sync_owner_contact_platform_links(connection, owner_id)
+    private_rows = connection.execute(
+        "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC, id DESC",
+        (owner_id,),
+    ).fetchall()
+    private_contacts = [row_to_contact(row, connection) for row in private_rows]
+    if "follow_up" in normalized_kinds:
+        due = due_follow_up_contacts(private_contacts)
+        if due:
+            first_due = due[0]
+            result = dispatch_owner_push(
+                connection,
+                owner_id,
+                "Follow-up próximo",
+                f"{first_due['name']} precisa de atenção até {format_follow_up(first_due['next_follow_up_at'])}.",
+                "/crm",
+                "follow-up-due",
+            )
+            events.append("follow_up")
+            sent += result["sent"]
+            failed += result["failed"]
+            removed += result["removed"]
+
+    if "duplicates" in normalized_kinds:
+        duplicates = list_merge_suggestions(connection, owner_id)
+        if duplicates:
+            result = dispatch_owner_push(
+                connection,
+                owner_id,
+                "Duplicados para revisar",
+                f"Há {len(duplicates)} sugestão(ões) de merge pendentes na sua agenda.",
+                "/duplicados",
+                "duplicates-pending",
+            )
+            events.append("duplicates")
+            sent += result["sent"]
+            failed += result["failed"]
+            removed += result["removed"]
+
+    if "matches" in normalized_kinds:
+        matched = [item for item in private_contacts if item.get("potential_matches")]
+        if matched:
+            top = matched[0]
+            candidate = (top.get("potential_matches") or [{}])[0]
+            if candidate.get("name"):
+                result = dispatch_owner_push(
+                    connection,
+                    owner_id,
+                    "Nova complementaridade",
+                    f"{top['name']} combina com {candidate['name']} pela leitura atual da rede.",
+                    "/grafo",
+                    "network-match",
+                )
+                events.append("matches")
+                sent += result["sent"]
+                failed += result["failed"]
+                removed += result["removed"]
+
+    return {"sent": sent, "failed": failed, "removed": removed, "events": events}
+
+
+def dispatch_priority_pushes(connection, owner_id: str, kinds: list[str] | None = None) -> dict:
+    normalized_kinds = {normalize(item) for item in (kinds or ["follow_up", "duplicates", "matches"])}
+    events: list[str] = []
+    sent = 0
+    failed = 0
+    removed = 0
+
+    sync_owner_contact_platform_links(connection, owner_id)
+    private_rows = connection.execute(
+        "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC, id DESC",
+        (owner_id,),
+    ).fetchall()
+    private_contacts = [row_to_contact(row, connection) for row in private_rows]
+
+    if "follow_up" in normalized_kinds:
+        due = due_follow_up_contacts(private_contacts)
+        if due:
+            first_due = due[0]
+            result = dispatch_owner_push(
+                connection,
+                owner_id,
+                "Follow-up prÃ³ximo",
+                f"{first_due['name']} precisa de atenÃ§Ã£o atÃ© {format_follow_up(first_due['next_follow_up_at'])}.",
+                "/crm",
+                "follow-up-due",
+                event_key="follow_up",
+                fingerprint=push_dispatch_fingerprint("follow_up", first_due["id"], follow_up_slot(first_due.get("next_follow_up_at"))),
+                cooldown_minutes=180,
+            )
+            if result["sent"] > 0:
+                events.append("follow_up")
+            sent += result["sent"]
+            failed += result["failed"]
+            removed += result["removed"]
+
+    if "duplicates" in normalized_kinds:
+        duplicates = list_merge_suggestions(connection, owner_id)
+        if duplicates:
+            result = dispatch_owner_push(
+                connection,
+                owner_id,
+                "Duplicados para revisar",
+                f"HÃ¡ {len(duplicates)} sugestÃ£o(Ãµes) de merge pendentes na sua agenda.",
+                "/duplicados",
+                "duplicates-pending",
+                event_key="duplicates",
+                fingerprint=merge_suggestions_fingerprint(duplicates),
+                cooldown_minutes=360,
+            )
+            if result["sent"] > 0:
+                events.append("duplicates")
+            sent += result["sent"]
+            failed += result["failed"]
+            removed += result["removed"]
+
+    if "matches" in normalized_kinds:
+        matched = [item for item in private_contacts if item.get("potential_matches")]
+        if matched:
+            top = matched[0]
+            candidate = (top.get("potential_matches") or [{}])[0]
+            if candidate.get("name"):
+                result = dispatch_owner_push(
+                    connection,
+                    owner_id,
+                    "Nova complementaridade",
+                    f"{top['name']} combina com {candidate['name']} pela leitura atual da rede.",
+                    "/grafo",
+                    "network-match",
+                    event_key="matches",
+                    fingerprint=push_dispatch_fingerprint("matches", top["id"], candidate.get("id") or candidate.get("name"), candidate.get("service")),
+                    cooldown_minutes=240,
+                )
+                if result["sent"] > 0:
+                    events.append("matches")
+                sent += result["sent"]
+                failed += result["failed"]
+                removed += result["removed"]
+
+    return {"sent": sent, "failed": failed, "removed": removed, "events": events}
 
 
 @app.get("/api/contacts", response_model=list[ContactOut])
@@ -286,18 +1072,25 @@ def contacts(
     normalized_query = normalize(query)
     owner_id = authenticated_owner_id(user_id)
     with get_connection() as connection:
+        sync_owner_contact_platform_links(connection, owner_id)
         rows = connection.execute(
             "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC, id DESC",
             (owner_id,),
         ).fetchall()
-        results = []
+        results: list[tuple[int, dict]] = []
         for row in rows:
-          category_match = category == "all" or row["category_id"] == category
-          search_match = not normalized_query or normalized_query in row["search_text"]
-          if category_match and search_match:
-              results.append(row_to_contact(row, connection))
+            category_match = category == "all" or row["category_id"] == category
+            if not category_match:
+                continue
+            contact = row_to_contact(row, connection)
+            if not normalized_query:
+                results.append((0, contact))
+                continue
+            score = contact_search_score(contact, query)
+            if score > 0:
+                results.append((score, contact))
 
-    return results
+    return [contact for _, contact in sorted(results, key=lambda item: (item[0], item[1]["created_at"], item[1]["id"]), reverse=True)]
 
 
 def follow_up_slot(value: str | None) -> str:
@@ -336,8 +1129,29 @@ def create_contact(payload: ContactCreate) -> dict:
             data["address"] = user["address"] or data.get("address")
             data["source"] = "Perfil cadastrado"
         row = insert_contact(connection, data)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Contato não encontrado.")
+        saved_contact = row_to_contact(row, connection)
+        if due_follow_up_contacts([saved_contact], horizon_hours=48):
+            dispatch_owner_push(
+                connection,
+                owner_id,
+                "Follow-up agendado",
+                f"{saved_contact['name']} entrou na fila de follow-up para {format_follow_up(saved_contact['next_follow_up_at'])}.",
+                "/crm",
+                "follow-up-scheduled",
+            )
+        if list_merge_suggestions(connection, owner_id):
+            dispatch_owner_push(
+                connection,
+                owner_id,
+                "Duplicados sugeridos",
+                "A agenda encontrou possíveis duplicados para revisão manual.",
+                "/duplicados",
+                "duplicates-detected",
+            )
         connection.commit()
-        return row_to_contact(row, connection)
+        return saved_contact
 
 
 @app.put("/api/contacts/{contact_id}", response_model=ContactOut)
@@ -354,10 +1168,29 @@ def edit_contact(contact_id: int, payload: ContactCreate) -> dict:
             data["address"] = user["address"] or data.get("address")
             data["source"] = "Perfil cadastrado"
         row = update_contact(connection, contact_id, data)
-        connection.commit()
+        saved_contact = row_to_contact(row, connection) if row is not None else None
         if row is None:
             raise HTTPException(status_code=404, detail="Contato não encontrado.")
-        return row_to_contact(row, connection)
+        if due_follow_up_contacts([saved_contact], horizon_hours=48):
+            dispatch_owner_push(
+                connection,
+                owner_id,
+                "Follow-up atualizado",
+                f"{saved_contact['name']} ficou com follow-up em {format_follow_up(saved_contact['next_follow_up_at'])}.",
+                "/crm",
+                "follow-up-updated",
+            )
+        if list_merge_suggestions(connection, owner_id):
+            dispatch_owner_push(
+                connection,
+                owner_id,
+                "Duplicados sugeridos",
+                "A agenda ainda tem possíveis duplicados para revisão manual.",
+                "/duplicados",
+                "duplicates-detected",
+            )
+        connection.commit()
+        return saved_contact
 
 
 @app.delete("/api/contacts/{contact_id}", status_code=204, response_class=Response)
@@ -630,6 +1463,156 @@ def edit_group_contact_custom_fields(group_id: int, contact_id: int, payload: Gr
         return contact
 
 
+@app.get("/api/chat/threads", response_model=list[ChatThreadOut])
+def chat_threads(user_id: str = Query(default="demo-user")) -> list[dict]:
+    with get_connection() as connection:
+        return list_chat_threads(connection, authenticated_owner_id(user_id))
+
+
+@app.post("/api/chat/threads", response_model=ChatThreadOut, status_code=201)
+def create_private_chat_thread(payload: ChatThreadCreate) -> dict:
+    owner_id = authenticated_owner_id(payload.user_id)
+    with get_connection() as connection:
+        thread = create_chat_thread(connection, owner_id, payload.model_dump())
+        connection.commit()
+        return thread
+
+
+@app.get("/api/chat/threads/{thread_id}/messages", response_model=list[ChatMessageOut])
+def chat_thread_messages(thread_id: int, user_id: str = Query(default="demo-user")) -> list[dict]:
+    owner_id = authenticated_owner_id(user_id)
+    with get_connection() as connection:
+        assert_thread_access(connection, thread_id, owner_id)
+        return list_chat_messages(connection, thread_id, owner_id)
+
+
+@app.post("/api/chat/threads/{thread_id}/messages", response_model=ChatMessageOut, status_code=201)
+def create_private_chat_message(thread_id: int, payload: ChatMessageCreate) -> dict:
+    owner_id = authenticated_owner_id(payload.user_id)
+    with get_connection() as connection:
+        assert_thread_access(connection, thread_id, owner_id)
+        try:
+            message = create_chat_message(connection, thread_id, owner_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        connection.commit()
+        return message
+
+
+@app.get("/api/import-jobs", response_model=list[ImportJobOut])
+def import_jobs(user_id: str = Query(default="demo-user")) -> list[dict]:
+    with get_connection() as connection:
+        return list_import_jobs(connection, authenticated_owner_id(user_id))
+
+
+@app.post("/api/import-jobs", response_model=ImportJobOut, status_code=201)
+def create_contact_import_job(payload: ImportJobCreate) -> dict:
+    owner_id = authenticated_owner_id(payload.user_id)
+    with get_connection() as connection:
+        try:
+            job = create_import_job(connection, owner_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if int(job.get("imported_count") or 0) > 0:
+            dispatch_owner_push(
+                connection,
+                owner_id,
+                "Importação concluída",
+                f"{job['imported_count']} contato(s) entraram na sua agenda via {job['source']}.",
+                "/importar",
+                "import-complete",
+            )
+        connection.commit()
+        return job
+
+
+@app.get("/api/import-integrations", response_model=list[ImportIntegrationOut])
+def import_integrations() -> list[dict]:
+    return import_integrations_catalog()
+
+
+@app.get("/api/push-subscriptions", response_model=list[PushSubscriptionOut])
+def push_subscriptions(user_id: str = Query(default="demo-user")) -> list[dict]:
+    with get_connection() as connection:
+        return list_push_subscriptions(connection, authenticated_owner_id(user_id))
+
+
+@app.post("/api/push-subscriptions", response_model=PushSubscriptionOut, status_code=201)
+def create_push_subscription(payload: PushSubscriptionCreate) -> dict:
+    owner_id = authenticated_owner_id(payload.user_id)
+    with get_connection() as connection:
+        try:
+            subscription = upsert_push_subscription(connection, owner_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        connection.commit()
+        return subscription
+
+
+@app.delete("/api/push-subscriptions/{subscription_id}", status_code=204, response_class=Response)
+def delete_push_subscription_entry(subscription_id: int, user_id: str = Query(default="demo-user")) -> Response:
+    owner_id = authenticated_owner_id(user_id)
+    with get_connection() as connection:
+        if not delete_push_subscription(connection, subscription_id, owner_id):
+            raise HTTPException(status_code=404, detail="InscriÃƒÂ§ÃƒÂ£o de push nÃƒÂ£o encontrada.")
+        connection.commit()
+    return Response(status_code=204)
+
+
+@app.post("/api/push-subscriptions/test")
+def send_test_push_notification(payload: PushTestNotificationIn) -> dict:
+    owner_id = authenticated_owner_id(payload.user_id)
+    with get_connection() as connection:
+        subscriptions = list_push_subscriptions(connection, owner_id)
+        if payload.subscription_id is not None:
+            subscriptions = [item for item in subscriptions if int(item["id"]) == int(payload.subscription_id)]
+        if not subscriptions:
+            raise HTTPException(status_code=404, detail="Nenhum dispositivo inscrito para este usuÃ¡rio.")
+
+        sent = 0
+        failed = 0
+        removed = 0
+        last_error = ""
+        push_payload = {
+            "title": str(payload.title or "Network Intelligence CRM")[:120],
+            "body": str(payload.body or "Seu dispositivo estÃ¡ pronto para receber alertas.")[:500],
+            "tag": "network-intelligence-test",
+            "data": {"route": str(payload.route or "/configuracoes")[:240]},
+        }
+
+        for subscription in subscriptions:
+            try:
+                send_push_payload(subscription, push_payload)
+                sent += 1
+            except HTTPException:
+                raise
+            except WebPushException as exc:
+                status_code = getattr(getattr(exc, "response", None), "status_code", None) or getattr(getattr(exc, "response", None), "status", None)
+                if status_code in {404, 410}:
+                    delete_push_subscription(connection, int(subscription["id"]), owner_id)
+                    removed += 1
+                else:
+                    failed += 1
+                    last_error = str(exc)
+            except Exception as exc:
+                failed += 1
+                last_error = str(exc)
+
+        connection.commit()
+        if sent == 0 and failed > 0:
+            raise HTTPException(status_code=502, detail=f"NÃ£o foi possÃ­vel enviar o push de teste. {last_error}".strip())
+        return {"sent": sent, "failed": failed, "removed": removed}
+
+
+@app.post("/api/push-subscriptions/dispatch", response_model=PushDispatchOut)
+def dispatch_push_notifications(payload: PushDispatchIn) -> dict:
+    owner_id = authenticated_owner_id(payload.user_id)
+    with get_connection() as connection:
+        result = dispatch_priority_pushes(connection, owner_id, payload.kinds or None)
+        connection.commit()
+        return result
+
+
 @app.post("/api/users", response_model=UserOut)
 def save_user(payload: UserCreate) -> dict:
     context = auth_context_or_unauthorized()
@@ -640,7 +1623,8 @@ def save_user(payload: UserCreate) -> dict:
         data["email"] = context["email"]
         if not data.get("name"):
             data["name"] = context["email"].split("@", 1)[0]
-        data["google_connected"] = True
+        if context.get("provider") == "google":
+            data["google_connected"] = True
     with get_connection() as connection:
         try:
             row = upsert_user(connection, data)
@@ -650,10 +1634,28 @@ def save_user(payload: UserCreate) -> dict:
         return row_to_user(row)
 
 
+@app.post("/api/auth/session", response_model=UserOut)
+def sync_auth_session(payload: AuthSessionIn) -> dict:
+    context = auth_context_or_unauthorized()
+    data = payload.model_dump()
+    if context:
+        if normalize(data["email"]) != normalize(context["email"]):
+            raise HTTPException(status_code=401, detail="Token Supabase nÃ£o corresponde ao email informado.")
+        data["sub"] = context["sub"]
+        data["email"] = context["email"]
+        data["auth_provider"] = context.get("provider") or data.get("auth_provider") or ""
+        if not data.get("name"):
+            data["name"] = context["email"].split("@", 1)[0]
+    with get_connection() as connection:
+        row = upsert_auth_user(connection, data)
+        connection.commit()
+        return row_to_user(row)
+
+
 @app.post("/api/login", response_model=UserOut)
 def login(payload: LoginIn) -> dict:
-    if supabase_auth_required():
-        raise HTTPException(status_code=403, detail="Use Google ou magic link via Supabase para entrar.")
+    if supabase_auth_required() or not legacy_password_login_enabled():
+        raise HTTPException(status_code=403, detail="Login por senha legado desabilitado. Use Google ou magic link via Supabase.")
     with get_connection() as connection:
         row = authenticate_user(connection, payload.email, payload.password)
         if row is None:
@@ -776,16 +1778,25 @@ def public_profiles(query: str = Query(default="")) -> list[dict]:
             "SELECT * FROM users WHERE public_visible = true ORDER BY datetime(created_at) DESC, id DESC"
         ).fetchall()
 
-    results = []
+    results: list[tuple[int, dict]] = []
     for row in rows:
-        if not normalized_query or normalized_query in row["search_text"]:
-            results.append(row_to_public_profile(row))
+        profile = row_to_public_profile(row)
+        if not normalized_query:
+            results.append((0, profile))
+            continue
+        score = public_profile_search_score(profile, query)
+        if score > 0:
+            results.append((score, profile))
     for row in user_rows:
         profile = row_to_public_user_profile(row)
-        if not normalized_query or normalized_query in profile["search_text"]:
-            results.append(profile)
+        if not normalized_query:
+            results.append((0, profile))
+            continue
+        score = public_profile_search_score(profile, query)
+        if score > 0:
+            results.append((score, profile))
 
-    return results
+    return [profile for _, profile in sorted(results, key=lambda item: (item[0], item[1].get("score", 0), item[1].get("people", 0), item[1]["id"]), reverse=True)]
 
 
 @app.get("/api/search", response_model=SearchOut)
@@ -797,6 +1808,195 @@ def search(query: str = Query(default=""), user_id: str = Query(default="demo-us
         "private_results": private_results,
         "public_results": public_results,
         "has_private_results": len(private_results) > 0,
+        "insights": build_search_insights(query, private_results, public_results),
+    }
+
+
+def graph_text_items(value: str | list | None, limit: int = 8) -> list[str]:
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = re.split(r"[,;|\n]+", str(value or ""))
+    items: list[str] = []
+    seen: set[str] = set()
+    for raw_item in raw_items:
+        item = str(raw_item or "").strip()
+        key = normalize(item)
+        if not item or not key or key in seen:
+            continue
+        seen.add(key)
+        items.append(item[:80])
+        if len(items) >= limit:
+            break
+    return items
+
+
+def graph_token_items(value: str | None, limit: int = 6) -> list[str]:
+    blocked = {"precisa", "busca", "para", "com", "uma", "uns", "das", "dos", "que", "atual", "atualmente"}
+    tokens = [token for token in re.split(r"[^a-z0-9]+", normalize(value or "")) if len(token) >= 4 and token not in blocked]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+        if len(ordered) >= limit:
+            break
+    return ordered
+
+
+def add_graph_node(nodes: dict[str, dict], node_id: str, label: str, node_type: str, scope: str, weight: float = 1, meta: dict | None = None) -> None:
+    if node_id in nodes:
+        nodes[node_id]["weight"] = max(float(nodes[node_id].get("weight") or 1), float(weight or 1))
+        nodes[node_id]["meta"] = {**nodes[node_id].get("meta", {}), **(meta or {})}
+        return
+    nodes[node_id] = {
+        "id": node_id,
+        "label": label,
+        "type": node_type,
+        "scope": scope,
+        "weight": weight,
+        "meta": meta or {},
+    }
+
+
+def add_graph_edge(edges: dict[str, dict], source: str, target: str, edge_type: str, weight: float = 1, meta: dict | None = None) -> None:
+    edge_id = f"{edge_type}:{source}:{target}"
+    if edge_id in edges:
+        edges[edge_id]["weight"] = max(float(edges[edge_id].get("weight") or 1), float(weight or 1))
+        return
+    edges[edge_id] = {
+        "id": edge_id,
+        "source": source,
+        "target": target,
+        "type": edge_type,
+        "weight": weight,
+        "meta": meta or {},
+    }
+
+
+def add_contact_to_graph(nodes: dict[str, dict], edges: dict[str, dict], contact: dict, scope: str, hub_id: str = "user:me") -> None:
+    contact_id = f"contact:{contact['id']}"
+    add_graph_node(
+        nodes,
+        contact_id,
+        contact["name"],
+        "contact",
+        scope,
+        2.5 + len(contact.get("potential_matches") or []),
+        {
+            "contact_id": contact["id"],
+            "ddd": contact.get("ddd") or "",
+            "source": contact.get("source") or "",
+            "platform_match": bool(contact.get("platform_match")),
+            "public_profile_match": bool(contact.get("public_profile_match")),
+        },
+    )
+    add_graph_edge(edges, hub_id, contact_id, "owns_contact" if scope == "private" else "contains_contact", 1)
+    for tag in graph_text_items(contact.get("tag_items") or contact.get("tags")):
+        node_id = f"tag:{normalize(tag)}"
+        add_graph_node(nodes, node_id, tag, "tag", scope, 1.8)
+        add_graph_edge(edges, contact_id, node_id, "has_tag", 1.4)
+    if contact.get("source"):
+        node_id = f"source:{normalize(contact['source'])}"
+        add_graph_node(nodes, node_id, contact["source"], "source", scope, 1.2)
+        add_graph_edge(edges, contact_id, node_id, "imported_from", 1)
+    if contact.get("ddd"):
+        node_id = f"ddd:{contact['ddd']}"
+        add_graph_node(nodes, node_id, f"DDD {contact['ddd']}", "ddd", scope, 1.3)
+        add_graph_edge(edges, contact_id, node_id, "has_ddd", 1)
+    if contact.get("organization"):
+        node_id = f"org:{normalize(contact['organization'])}"
+        add_graph_node(nodes, node_id, contact["organization"], "organization", scope, 1.4)
+        add_graph_edge(edges, contact_id, node_id, "linked_to_organization", 1.2)
+    for token in graph_token_items(" ".join([contact.get("demand") or "", contact.get("demand_tags") or ""])):
+        node_id = f"demand:{token}"
+        add_graph_node(nodes, node_id, token, "demand", scope, 1.2)
+        add_graph_edge(edges, contact_id, node_id, "demands", 1.2)
+    for token in graph_token_items(" ".join([contact.get("solves") or "", contact.get("service") or ""])):
+        node_id = f"solve:{token}"
+        add_graph_node(nodes, node_id, token, "solution", scope, 1.2)
+        add_graph_edge(edges, contact_id, node_id, "solves", 1.2)
+    if contact.get("platform_match"):
+        match = contact["platform_match"]
+        node_id = f"user:{match['user_id']}"
+        add_graph_node(nodes, node_id, match.get("name") or "UsuÃ¡rio da plataforma", "platform_user", "public", 2, match)
+        add_graph_edge(edges, contact_id, node_id, "linked_to_platform_user", 2, {"confidence": match.get("confidence")})
+    if contact.get("public_profile_match"):
+        match = contact["public_profile_match"]
+        node_id = f"public_profile:{match['profile_id']}"
+        add_graph_node(nodes, node_id, match.get("name") or "Perfil pÃºblico", "public_profile", "public", 1.8, match)
+        add_graph_edge(edges, contact_id, node_id, "matches_public_profile", 1.8, {"confidence": match.get("confidence")})
+    for match in contact.get("potential_matches") or []:
+        target_id = f"contact:{match.get('contact_id')}" if match.get("contact_id") else f"match:{normalize(match.get('name') or '')}"
+        if target_id not in nodes:
+            add_graph_node(nodes, target_id, match.get("name") or "Match potencial", match.get("kind") or "potential_match", scope, 1.5, match)
+        add_graph_edge(edges, contact_id, target_id, "potential_match", max(1, float(match.get("score") or 1) / 30), {"reason": match.get("reason"), "overlap": match.get("overlap")})
+
+
+@app.get("/api/graph", response_model=GraphOut)
+def graph(
+    scope: str = Query(default="private"),
+    user_id: str = Query(default="demo-user"),
+    group_id: int | None = Query(default=None),
+) -> dict:
+    normalized_scope = normalize(scope or "private") or "private"
+    owner_id = "" if normalized_scope == "public" else authenticated_owner_id(user_id)
+    nodes: dict[str, dict] = {}
+    edges: dict[str, dict] = {}
+    filters = {
+        "node_types": ["contact", "tag", "source", "ddd", "demand", "solution", "organization", "platform_user", "public_profile", "group"],
+        "edge_types": ["owns_contact", "contains_contact", "has_tag", "imported_from", "has_ddd", "demands", "solves", "linked_to_platform_user", "matches_public_profile", "potential_match", "belongs_to_group"],
+    }
+
+    with get_connection() as connection:
+        sync_owner_contact_platform_links(connection, owner_id)
+        if normalized_scope == "group":
+            if group_id is None or not can_access_group(connection, int(group_id), owner_id):
+                raise HTTPException(status_code=403, detail="VocÃª nÃ£o pode acessar este grupo.")
+            group = find_group_by_id(connection, int(group_id))
+            if group is None:
+                raise HTTPException(status_code=404, detail="Grupo nÃ£o encontrado.")
+            hub_id = f"group:{group_id}"
+            add_graph_node(nodes, hub_id, group["name"], "group", "group", 3, {"area": group["area"], "description": group["description"]})
+            contact_rows = list_group_contacts(connection, int(group_id), owner_id)
+            for contact in contact_rows:
+                add_contact_to_graph(nodes, edges, contact, "group", hub_id)
+                add_graph_edge(edges, f"contact:{contact['id']}", hub_id, "belongs_to_group", 1.6)
+        elif normalized_scope == "public":
+            hub_id = "public:network"
+            add_graph_node(nodes, hub_id, "Rede pÃºblica", "public_network", "public", 3)
+            for profile in public_profiles():
+                node_id = f"public_profile:{profile['id']}"
+                add_graph_node(nodes, node_id, profile["name"], profile.get("kind") or "public_profile", "public", 1 + float(profile.get("score") or 0), profile)
+                add_graph_edge(edges, hub_id, node_id, "publicly_visible", 1)
+                for tag in graph_text_items(profile.get("tags") or profile.get("service")):
+                    tag_id = f"tag:{normalize(tag)}"
+                    add_graph_node(nodes, tag_id, tag, "tag", "public", 1.4)
+                    add_graph_edge(edges, node_id, tag_id, "has_tag", 1)
+        else:
+            hub_id = "user:me"
+            add_graph_node(nodes, hub_id, "Minha rede", "private_network", "private", 3)
+            rows = connection.execute(
+                "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC, id DESC",
+                (owner_id,),
+            ).fetchall()
+            for row in rows:
+                add_contact_to_graph(nodes, edges, row_to_contact(row, connection), "private", hub_id)
+            for group in list_groups_for_user(connection, owner_id):
+                group_node_id = f"group:{group['id']}"
+                add_graph_node(nodes, group_node_id, group["name"], "group", "group", 2, {"area": group.get("area"), "member_count": group.get("member_count")})
+                for contact in list_group_contacts(connection, int(group["id"]), owner_id):
+                    contact_node_id = f"contact:{contact['id']}"
+                    if contact_node_id in nodes:
+                        add_graph_edge(edges, contact_node_id, group_node_id, "belongs_to_group", 1.5)
+
+    return {
+        "scope": normalized_scope,
+        "nodes": list(nodes.values()),
+        "edges": list(edges.values()),
+        "filters": filters,
     }
 
 
@@ -1348,14 +2548,46 @@ def call_openai_chat(message: str, rows: list, suggestions: list[dict]) -> str |
     return extract_openai_text(data) or None
 
 
+def load_ai_chat_rows(connection, owner_id: str, group_id: int | None = None) -> list:
+    if group_id is None:
+        return connection.execute(
+            "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC, id DESC",
+            (owner_id,),
+        ).fetchall()
+    if not can_access_group(connection, int(group_id), owner_id):
+        raise HTTPException(status_code=403, detail="VocÃª nÃ£o pode acessar este grupo.")
+    return connection.execute(
+        """
+        SELECT contacts.*
+        FROM group_contacts
+        JOIN contacts ON contacts.id = group_contacts.contact_id
+        WHERE group_contacts.group_id = ?
+        ORDER BY datetime(group_contacts.created_at) DESC, contacts.id DESC
+        """,
+        (int(group_id),),
+    ).fetchall()
+
+
 @app.post("/api/ai/chat", response_model=AiChatOut)
 def ai_chat(payload: AiChatIn) -> dict:
     owner_id = authenticated_owner_id(payload.user_id)
     with get_connection() as connection:
-        rows = connection.execute(
-            "SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC, id DESC",
-            (owner_id,),
-        ).fetchall()
+        thread_id = payload.thread_id
+        if payload.group_id is None:
+            if thread_id is None:
+                thread = create_chat_thread(connection, owner_id, {"title": ai_thread_title_from_message(payload.message)})
+                thread_id = int(thread["id"])
+            else:
+                assert_thread_access(connection, thread_id, owner_id)
+        rows = load_ai_chat_rows(connection, owner_id, payload.group_id)
+
+    if payload.group_id is not None and not rows:
+        return {
+            "answer": "Esse grupo ainda nÃ£o tem contatos compartilhados para eu analisar.",
+            "suggestions": [],
+            "provider": "local",
+            "thread_id": None,
+        }
 
     action_suggestions = build_action_suggestions(payload.message, rows, payload.target_contact_id)
     organization_suggestions = [] if looks_like_action_request(payload.message) else build_contact_suggestions(rows)
@@ -1388,4 +2620,34 @@ def ai_chat(payload: AiChatIn) -> dict:
         if not action_suggestions and not locals().get("clarification"):
             answer = local_chat_answer(payload.message, rows, suggestions)
 
-    return {"answer": answer, "suggestions": suggestions, "provider": provider}
+    if payload.group_id is None and thread_id is not None:
+        with get_connection() as connection:
+            assert_thread_access(connection, int(thread_id), owner_id)
+            create_chat_message(
+                connection,
+                int(thread_id),
+                owner_id,
+                {
+                    "role": "user",
+                    "text": payload.message,
+                },
+            )
+            create_chat_message(
+                connection,
+                int(thread_id),
+                owner_id,
+                {
+                    "role": "assistant",
+                    "text": answer,
+                    "provider": provider,
+                    "suggestions": suggestions,
+                },
+            )
+            connection.commit()
+
+    return {
+        "answer": answer,
+        "suggestions": suggestions,
+        "provider": provider,
+        "thread_id": int(thread_id) if payload.group_id is None and thread_id is not None else None,
+    }

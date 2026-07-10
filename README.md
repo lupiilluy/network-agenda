@@ -15,7 +15,7 @@ O nome do repositorio ainda e `network-agenda`, mas o produto e apresentado no a
 - grupos compartilhados com chat, grafo, membros, contatos e campos customizados proprios;
 - rede publica com cards, feed, perfis visiveis e exploracao em grafo;
 - perfil proprio separado do perfil publico;
-- importacao via Google Contacts, CSV e cadastro manual;
+- importacao via Google Contacts, CSV, VCF, cadastro manual e exports compativeis de Outlook/LinkedIn;
 - sugestao de duplicados por email/telefone com merge manual;
 - campos customizados por agenda e por grupo;
 - chat de copiloto com resposta local estruturada e suporte opcional a OpenAI;
@@ -25,17 +25,20 @@ O nome do repositorio ainda e `network-agenda`, mas o produto e apresentado no a
 
 ## Autenticacao
 
-O projeto hoje trabalha em modo hibrido:
+O projeto agora assume fluxo `Supabase-first`:
 
-- `Google login` implementado;
-- `Email magic link` implementado quando Supabase Auth estiver configurado;
-- `Email e senha` continuam disponiveis apenas no modo local/legado, quando Supabase nao estiver exigido;
-- `Apple login` aparece como placeholder `em breve`.
+- `Google login` implementado via Supabase Auth;
+- `Email magic link` implementado via Supabase Auth;
+- `Apple login` implementado via Supabase Auth;
+- `Email e senha` legado fica desabilitado por padrao.
 
-Regra importante:
+Regras importantes:
 
-- quando `SUPABASE_JWT_SECRET` estiver configurado no backend, a API entra em modo `Supabase-first` e bloqueia login local por senha;
-- no fluxo legado/local, algumas operacoes do perfil ainda exigem conta Google conectada.
+- o frontend precisa de `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` para abrir login com Google, Apple e magic link;
+- o backend valida bearer token de sessao via `SUPABASE_URL` e/ou `SUPABASE_JWT_SECRET`;
+- `VITE_WEB_PUSH_PUBLIC_KEY` habilita o registro real do dispositivo para web push;
+- o login local por senha so volta se voce habilitar explicitamente `ALLOW_LEGACY_PASSWORD_LOGIN=true`;
+- usuarios autenticados por magic link nao dependem de conta Google para salvar perfil, abrir rede publica ou navegar no app.
 
 ## Importacao e dados
 
@@ -147,6 +150,12 @@ App local:
 http://127.0.0.1:5174
 ```
 
+Diagnostico rapido de auth:
+
+```powershell
+.\scripts\check-auth-readiness.ps1
+```
+
 ## Variaveis de ambiente
 
 Copie os exemplos:
@@ -171,8 +180,10 @@ VITE_GOOGLE_MAPS_API_KEY=sua_chave_google_maps
 ```env
 DATABASE_URL=
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:5174,http://localhost:5174
+APP_ENV=development
 SUPABASE_URL=https://seu-projeto.supabase.co
 SUPABASE_JWT_SECRET=
+ALLOW_LEGACY_PASSWORD_LOGIN=false
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
@@ -182,6 +193,7 @@ OPENAI_MODEL=gpt-4o-mini
 - sem `DATABASE_URL`, a API sobe com SQLite local em `backend/data/network_agenda.sqlite3`;
 - com `DATABASE_URL=postgresql://...`, a API usa Postgres/Supabase;
 - o bootstrap de producao pode usar `supabase/schema.sql`;
+- se o SQL Editor nao estiver disponivel, use `scripts/apply-supabase-schema.ps1`;
 - o backend tambem contem o schema SQL em `backend/app/postgres_schema.sql`.
 
 ## Endpoints principais
@@ -208,12 +220,20 @@ POST   /api/groups/{group_id}/members
 GET    /api/groups/{group_id}/contacts
 POST   /api/groups/{group_id}/messages
 
+POST   /api/auth/session
 POST   /api/users
-POST   /api/login
-POST   /api/google-login
+POST   /api/login              # legado, desabilitado por padrao
+POST   /api/google-login       # suporte legado e testes
 GET    /api/public-profiles
 GET    /api/search
 POST   /api/ai/chat
+GET    /api/import-jobs
+POST   /api/import-jobs
+GET    /api/import-integrations
+GET    /api/push-subscriptions
+POST   /api/push-subscriptions
+POST   /api/push-subscriptions/test
+POST   /api/push-subscriptions/dispatch
 ```
 
 ## Validacao
@@ -245,6 +265,7 @@ Arquivos de apoio:
 
 - `docs/DEPLOYMENT.md`
 - `docs/GO_LIVE.md`
+- `docs/PRODUCTION_CHECKLIST.md`
 - `docs/SUPABASE.md`
 
 Fluxo esperado:
@@ -253,6 +274,13 @@ Fluxo esperado:
 2. configurar as variaveis de ambiente dos dois servicos;
 3. fazer `push` para `main`;
 4. deixar o auto deploy publicar frontend e backend.
+
+Validacao remota de go-live:
+
+```powershell
+.\scripts\check-auth-readiness.ps1 -Strict
+.\scripts\go-live.ps1 -ApiBaseUrl https://sua-api.onrender.com -VercelUrl https://seu-app.vercel.app -RunSmokeTest
+```
 
 ## Status resumido
 
@@ -270,8 +298,6 @@ Ja implementado:
 
 Ainda pendente ou parcial:
 
-- Apple login real;
 - importacao nativa de Apple Contacts, Outlook e LinkedIn;
-- push notifications reais;
 - rollout completo de Supabase Auth + RLS em producao;
-- automacoes mais avancadas de match e inteligencia de networking.
+- automacoes mais avancadas de match e inteligencia de networking, embora o MVP ja entregue match automatico com perfil publico/plataforma, complementaridade por contato e dispatch server-side de push por follow-up/importacao.

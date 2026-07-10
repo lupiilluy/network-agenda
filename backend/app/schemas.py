@@ -24,12 +24,14 @@ class ContactCreate(BaseModel):
     source: str | None = Field(default="Manual", max_length=80)
     description: str | None = Field(default="", max_length=1200)
     demand: str | None = Field(default="", max_length=800)
+    demand_tags: str | None = Field(default="", max_length=500)
     solves: str | None = Field(default="", max_length=800)
     tags: str | None = Field(default="", max_length=500)
     email: str | None = Field(default="", max_length=160)
     whatsapp: str | None = Field(default="", max_length=80)
     instagram: str | None = Field(default="", max_length=160)
     linkedin: str | None = Field(default="", max_length=200)
+    organization: str | None = Field(default="", max_length=200)
     custom_url: str | None = Field(default="", max_length=240)
     avatar_url: str | None = Field(default="", max_length=200000)
     custom_fields: str | None = Field(default="[]", max_length=2000)
@@ -47,6 +49,9 @@ class ContactCreate(BaseModel):
 class ContactOut(BaseModel):
     id: int
     owner_id: str
+    linked_user_id: str = ""
+    linked_user_name: str = ""
+    linked_user_email: str = ""
     name: str
     phone: str
     service: str
@@ -57,12 +62,14 @@ class ContactOut(BaseModel):
     source: str
     description: str
     demand: str
+    demand_tags: str = ""
     solves: str
     tags: str
     email: str
     whatsapp: str
     instagram: str
     linkedin: str
+    organization: str = ""
     custom_url: str
     avatar_url: str
     custom_fields: str
@@ -71,6 +78,9 @@ class ContactOut(BaseModel):
     tag_items: list[str] = []
     ddd: str = ""
     custom_field_values: list[dict] = []
+    platform_match: dict | None = None
+    public_profile_match: dict | None = None
+    potential_matches: list[dict] = []
     crm_status: str
     crm_priority: str
     last_contact_at: str
@@ -109,6 +119,7 @@ class SearchOut(BaseModel):
     private_results: list[ContactOut]
     public_results: list[PublicProfileOut]
     has_private_results: bool
+    insights: list[str] = []
 
 
 class AiSuggestionOut(BaseModel):
@@ -132,12 +143,109 @@ class AiChatIn(BaseModel):
     user_id: str = Field(default="demo-user", max_length=80)
     message: str = Field(min_length=1, max_length=1200)
     target_contact_id: int | None = None
+    group_id: int | None = None
+    thread_id: int | None = None
 
 
 class AiChatOut(BaseModel):
     answer: str
     suggestions: list[AiSuggestionOut] = []
     provider: str = "local"
+    thread_id: int | None = None
+
+
+class ChatThreadCreate(BaseModel):
+    user_id: str = Field(default="demo-user", max_length=80)
+    title: str | None = Field(default="", max_length=160)
+
+
+class ChatThreadOut(BaseModel):
+    id: int
+    owner_id: str
+    title: str
+    last_message_preview: str = ""
+    message_count: int = 0
+    created_at: str
+    updated_at: str
+
+
+class ChatMessageCreate(BaseModel):
+    user_id: str = Field(default="demo-user", max_length=80)
+    role: str = Field(min_length=1, max_length=30)
+    text: str = Field(min_length=1, max_length=4000)
+    provider: str | None = Field(default="", max_length=40)
+    suggestions: list[dict] = []
+    cta_label: str | None = Field(default="", max_length=120)
+    cta_route: str | None = Field(default="", max_length=240)
+
+
+class ChatMessageOut(BaseModel):
+    id: int
+    thread_id: int
+    owner_id: str
+    role: str
+    text: str
+    provider: str = ""
+    suggestions: list[dict] = []
+    cta: dict | None = None
+    created_at: str
+
+
+class ImportJobCreate(BaseModel):
+    user_id: str = Field(default="demo-user", max_length=80)
+    source: str = Field(min_length=2, max_length=80)
+    filename: str | None = Field(default="", max_length=240)
+    status: str = Field(default="completed", max_length=40)
+    total_count: int = Field(default=0, ge=0, le=100000)
+    imported_count: int = Field(default=0, ge=0, le=100000)
+    skipped_count: int = Field(default=0, ge=0, le=100000)
+    failed_count: int = Field(default=0, ge=0, le=100000)
+    details: str | None = Field(default="", max_length=1200)
+
+
+class ImportJobOut(BaseModel):
+    id: int
+    owner_id: str
+    source: str
+    filename: str = ""
+    status: str
+    total_count: int = 0
+    imported_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    details: str = ""
+    created_at: str
+
+
+class PushSubscriptionCreate(BaseModel):
+    user_id: str = Field(default="demo-user", max_length=80)
+    endpoint: str = Field(min_length=12, max_length=2000)
+    p256dh_key: str | None = Field(default="", max_length=600)
+    auth_key: str | None = Field(default="", max_length=600)
+    expiration_time: int | None = Field(default=None, ge=0)
+    user_agent: str | None = Field(default="", max_length=600)
+    device_label: str | None = Field(default="", max_length=160)
+
+
+class PushSubscriptionOut(BaseModel):
+    id: int
+    owner_id: str
+    endpoint: str
+    p256dh_key: str = ""
+    auth_key: str = ""
+    expiration_time: int | None = None
+    user_agent: str = ""
+    device_label: str = ""
+    created_at: str
+    updated_at: str
+
+
+class PushTestNotificationIn(BaseModel):
+    user_id: str = Field(default="demo-user", max_length=80)
+    subscription_id: int | None = None
+    title: str | None = Field(default="Network Intelligence CRM", max_length=120)
+    body: str | None = Field(default="Seu dispositivo está pronto para receber alertas.", max_length=500)
+    route: str | None = Field(default="/configuracoes", max_length=240)
 
 
 class MergeSuggestionOut(BaseModel):
@@ -147,6 +255,18 @@ class MergeSuggestionOut(BaseModel):
     match_value: str
     primary_contact: ContactOut
     duplicate_contact: ContactOut
+
+
+class PushDispatchIn(BaseModel):
+    user_id: str = Field(default="demo-user", max_length=80)
+    kinds: list[str] = []
+
+
+class PushDispatchOut(BaseModel):
+    sent: int = 0
+    failed: int = 0
+    removed: int = 0
+    events: list[str] = []
 
 
 class MergeDecisionIn(BaseModel):
@@ -345,6 +465,48 @@ class GoogleLoginIn(BaseModel):
     picture: str | None = Field(default="", max_length=300)
 
 
+class AuthSessionIn(BaseModel):
+    sub: str | None = Field(default="", max_length=160)
+    email: str = Field(min_length=4, max_length=160)
+    name: str | None = Field(default="", max_length=120)
+    picture: str | None = Field(default="", max_length=300)
+    auth_provider: str | None = Field(default="", max_length=40)
+
+
+class AuthStatusOut(BaseModel):
+    supabase_auth_required: bool
+    production_auth_enforced: bool = False
+    demo_fallback_enabled: bool = True
+    configured_supabase_url: bool
+    configured_supabase_jwt_secret: bool
+    configured_web_push_vapid: bool
+    jwt_library_available: bool
+    legacy_password_login_enabled: bool
+    jwt_validation_mode: str
+    database_dialect: str = ""
+    rls_supported: bool = False
+    rls_ready: bool = False
+    rls_enabled_tables: int = 0
+    rls_total_tables: int = 0
+    production_auth_ready: bool = False
+    warnings: list[str] = []
+    authenticated: bool
+    current_user_email: str = ""
+    current_owner_id: str = ""
+    current_provider: str = ""
+
+
+class ImportIntegrationOut(BaseModel):
+    provider: str
+    label: str
+    status: str
+    mode: str
+    description: str
+    supported_formats: list[str] = []
+    available: bool = False
+    action_label: str = ""
+
+
 class AddressOptionOut(BaseModel):
     address: str
     city: str
@@ -357,3 +519,28 @@ class AddressOptionOut(BaseModel):
 class AddressLookupOut(BaseModel):
     query: str
     results: list[AddressOptionOut]
+
+
+class GraphNodeOut(BaseModel):
+    id: str
+    label: str
+    type: str
+    scope: str = "private"
+    weight: float = 1
+    meta: dict = {}
+
+
+class GraphEdgeOut(BaseModel):
+    id: str
+    source: str
+    target: str
+    type: str
+    weight: float = 1
+    meta: dict = {}
+
+
+class GraphOut(BaseModel):
+    scope: str
+    nodes: list[GraphNodeOut]
+    edges: list[GraphEdgeOut]
+    filters: dict = {}

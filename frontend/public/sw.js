@@ -1,4 +1,4 @@
-const CACHE_NAME = 'network-intelligence-v4'
+const CACHE_NAME = 'network-intelligence-v5'
 const APP_SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png']
 
 function isSameOrigin(request) {
@@ -75,4 +75,47 @@ self.addEventListener('message', (event) => {
   if (event.data?.type === 'SKIP_WAITING') {
     self.skipWaiting()
   }
+})
+
+self.addEventListener('push', (event) => {
+  const payload = (() => {
+    if (!event.data) return {}
+    try {
+      return event.data.json()
+    } catch {
+      return { title: 'Network Intelligence CRM', body: event.data.text() }
+    }
+  })()
+
+  const title = payload.title || 'Network Intelligence CRM'
+  const options = {
+    body: payload.body || 'Você recebeu uma nova atualização da sua rede.',
+    icon: payload.icon || '/icon-192.png',
+    badge: payload.badge || '/icon-192.png',
+    tag: payload.tag || 'network-intelligence-notification',
+    data: payload.data || {},
+  }
+
+  event.waitUntil(self.registration.showNotification(title, options))
+})
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close()
+  const route = event.notification.data?.route || '/'
+
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
+      const existingClient = clients.find((client) => 'focus' in client)
+      if (existingClient) {
+        if ('navigate' in existingClient) {
+          existingClient.navigate(route).catch(() => {})
+        }
+        return existingClient.focus()
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(route)
+      }
+      return undefined
+    }),
+  )
 })

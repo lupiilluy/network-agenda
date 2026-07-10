@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import database, main
-from app.schemas import AiChatIn, ContactCreate, CustomFieldDefinitionIn, GoogleLoginIn, GroupContactCustomFieldsIn, GroupContactLinkIn, GroupCreate, GroupMemberCreate, GroupMessageCreate, UserCreate
+from app.schemas import AiChatIn, ChatMessageCreate, ChatThreadCreate, ContactCreate, CustomFieldDefinitionIn, GoogleLoginIn, GroupContactCustomFieldsIn, GroupContactLinkIn, GroupCreate, GroupMemberCreate, GroupMessageCreate, ImportJobCreate, PushDispatchIn, PushSubscriptionCreate, PushTestNotificationIn, UserCreate
 
 
 def contact_payload(**overrides):
@@ -46,6 +46,26 @@ class NetworkAgendaApiTests(unittest.TestCase):
 
     def test_health(self):
         self.assertEqual(main.health()["status"], "ok")
+
+    def test_auth_status_reports_defaults(self):
+        client = TestClient(main.app)
+        response = client.get("/api/auth/status")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["supabase_auth_required"])
+        self.assertFalse(payload["configured_supabase_url"])
+        self.assertFalse(payload["configured_supabase_jwt_secret"])
+        self.assertFalse(payload["configured_web_push_vapid"])
+        self.assertTrue(payload["jwt_library_available"])
+        self.assertFalse(payload["legacy_password_login_enabled"])
+        self.assertEqual(payload["jwt_validation_mode"], "disabled")
+        self.assertEqual(payload["database_dialect"], "sqlite")
+        self.assertFalse(payload["rls_supported"])
+        self.assertFalse(payload["rls_ready"])
+        self.assertFalse(payload["production_auth_ready"])
+        self.assertGreaterEqual(len(payload["warnings"]), 1)
+        self.assertFalse(payload["authenticated"])
 
     def test_postgres_sql_translation(self):
         sql = database.to_postgres_sql("SELECT * FROM contacts WHERE owner_id = ? ORDER BY datetime(created_at) DESC")
@@ -106,25 +126,234 @@ class NetworkAgendaApiTests(unittest.TestCase):
                 name="Contato Estruturado",
                 phone="+55 11 98888-7777",
                 email="contato@example.com",
+                phones=[
+                    {"phone": "11 97777-6666", "label": "Comercial"},
+                    {"phone": "11 96666-5555", "label": "Suporte"},
+                ],
+                emails=[
+                    {"email": "financeiro@example.com", "label": "Financeiro"},
+                ],
                 tags="limpeza, evento",
                 custom_fields='[{"label":"Origem","value":"Evento ABC"}]',
             )
         )
 
         self.assertEqual(created["ddd"], "11")
-        self.assertEqual([item["phone_digits"] for item in created["phones"]], ["5511988887777"])
-        self.assertEqual(created["emails"][0]["normalized_email"], "contato@example.com")
+        self.assertEqual([item["phone_digits"] for item in created["phones"]], ["5511988887777", "11977776666", "11966665555"])
+        self.assertEqual([item["normalized_email"] for item in created["emails"]], ["contato@example.com", "financeiro@example.com"])
         self.assertEqual(created["tag_items"], ["evento", "limpeza"])
         self.assertEqual(created["custom_field_values"][0]["value"], "Evento ABC")
 
         with database.get_connection() as connection:
             phone_rows = connection.execute("SELECT * FROM contact_phones WHERE contact_id = ?", (created["id"],)).fetchall()
+            email_rows = connection.execute("SELECT * FROM contact_emails WHERE contact_id = ?", (created["id"],)).fetchall()
             tag_rows = connection.execute("SELECT * FROM contact_tags WHERE contact_id = ?", (created["id"],)).fetchall()
             field_rows = connection.execute("SELECT * FROM custom_field_values WHERE contact_id = ?", (created["id"],)).fetchall()
 
-        self.assertEqual(len(phone_rows), 1)
+        self.assertEqual(len(phone_rows), 3)
+        self.assertEqual(len(email_rows), 2)
         self.assertEqual(len(tag_rows), 2)
         self.assertEqual(len(field_rows), 1)
+
+    def test_contact_demand_tags_are_persisted_and_searchable(self):
+        created = main.create_contact(
+            contact_payload(
+                owner_id="owner-a",
+                name="Clara Mendes",
+                phone="11 97777-4444",
+                service="consultoria operacional",
+                demand="Precisa estruturar comercial e rotina financeira.",
+                demand_tags="comercial, financeiro",
+            )
+        )
+
+        self.assertEqual(created["demand_tags"], "comercial, financeiro")
+
+        updated = main.edit_contact(
+            created["id"],
+            contact_payload(
+                owner_id="owner-a",
+                name="Clara Mendes",
+                phone="11 97777-4444",
+                service="consultoria operacional",
+                demand="Agora busca apoio jurídico.",
+                demand_tags="juridico, contrato",
+            ),
+        )
+
+        self.assertEqual(updated["demand_tags"], "juridico, contrato")
+        search_results = main.contacts(query="contrato", category="all", user_id="owner-a")
+        self.assertEqual([contact["id"] for contact in search_results], [created["id"]])
+
+    def test_contact_organization_is_persisted_and_searchable(self):
+        created = main.create_contact(
+            contact_payload(
+                owner_id="owner-a",
+                name="Beatriz Rocha",
+                phone="11 97777-1111",
+                service="consultora",
+                organization="Nova Ponte Consultoria",
+            )
+        )
+
+        self.assertEqual(created["organization"], "Nova Ponte Consultoria")
+
+        updated = main.edit_contact(
+            created["id"],
+            contact_payload(
+                owner_id="owner-a",
+                name="Beatriz Rocha",
+                phone="11 97777-1111",
+                service="consultora",
+                organization="Nova Ponte Ventures",
+            ),
+        )
+
+        self.assertEqual(updated["organization"], "Nova Ponte Ventures")
+        search_results = main.contacts(query="ventures", category="all", user_id="owner-a")
+        self.assertEqual([contact["id"] for contact in search_results], [created["id"]])
+
+    def test_contact_persists_link_to_existing_platform_user(self):
+        owner = main.google_login(
+            GoogleLoginIn(
+                sub="owner-link-contact",
+                email="owner-link@example.com",
+                name="Owner Link",
+            )
+        )
+        linked_user = main.save_user(
+            UserCreate(
+                name="Pessoa da Plataforma",
+                email="plataforma@example.com",
+                password="123456",
+                phone="11 97777-3300",
+                google_connected=True,
+            )
+        )
+
+        created = main.create_contact(
+            contact_payload(
+                owner_id=str(owner["id"]),
+                name="Contato que vira usuario",
+                phone=linked_user["phone"],
+                email=linked_user["email"],
+                service="consultoria",
+            )
+        )
+
+        self.assertEqual(created["linked_user_id"], str(linked_user["id"]))
+        self.assertEqual(created["linked_user_name"], linked_user["name"])
+        self.assertEqual(created["linked_user_email"], linked_user["email"])
+
+    def test_existing_contact_links_after_platform_user_registers(self):
+        owner = main.google_login(
+            GoogleLoginIn(
+                sub="owner-link-later",
+                email="owner-link-later@example.com",
+                name="Owner Later",
+            )
+        )
+        contact = main.create_contact(
+            contact_payload(
+                owner_id=str(owner["id"]),
+                name="Contato futuro usuario",
+                phone="11 98888-7711",
+                email="futuro.usuario@example.com",
+                service="arquitetura",
+            )
+        )
+        self.assertEqual(contact["linked_user_id"], "")
+
+        linked_user = main.save_user(
+            UserCreate(
+                name="Futuro Usuario",
+                email="futuro.usuario@example.com",
+                password="123456",
+                phone="11 98888-7711",
+                google_connected=True,
+            )
+        )
+
+        contacts = main.contacts(query="", category="all", user_id=str(owner["id"]))
+        linked_contact = next(item for item in contacts if item["id"] == contact["id"])
+
+        self.assertEqual(linked_contact["linked_user_id"], str(linked_user["id"]))
+        self.assertEqual(linked_contact["linked_user_name"], linked_user["name"])
+
+    def test_contact_exposes_public_profile_match_and_potential_matches(self):
+        owner = main.save_user(
+            UserCreate(
+                name="Dona da Agenda",
+                email="owner-meta@example.com",
+                password="123456",
+                phone="11 97777-8800",
+                google_connected=True,
+            )
+        )
+        public_user = main.save_user(
+            UserCreate(
+                name="Bianca Limpeza",
+                email="bianca.limpeza@example.com",
+                password="123456",
+                phone="11 97777-8801",
+                google_connected=True,
+                public_visible=True,
+                public_description="Profissional aberta para networking.",
+                public_solves="Limpeza residencial e pós-obra.",
+                public_tags="limpeza, faxina, pós-obra",
+            )
+        )
+        main.create_contact(
+            contact_payload(
+                owner_id=str(owner["id"]),
+                name="Resolve limpeza",
+                phone="11 97777-8802",
+                service="limpeza residencial",
+                tags="limpeza, faxina",
+                solves="Limpeza de casa e pós-obra.",
+            )
+        )
+
+        created = main.create_contact(
+            contact_payload(
+                owner_id=str(owner["id"]),
+                name="Bianca da rede",
+                phone=public_user["phone"],
+                email=public_user["email"],
+                service="contato para revisar",
+                demand="Precisa de ajuda com limpeza de apartamento.",
+                demand_tags="limpeza, apartamento",
+            )
+        )
+
+        self.assertEqual(created["platform_match"]["user_id"], str(public_user["id"]))
+        self.assertEqual(created["public_profile_match"]["source_user_id"], public_user["id"])
+        self.assertGreaterEqual(len(created["potential_matches"]), 1)
+        self.assertEqual(created["potential_matches"][0]["name"], "Resolve limpeza")
+
+    def test_contact_does_not_link_to_owner_itself(self):
+        owner = main.save_user(
+            UserCreate(
+                name="Dono da Agenda",
+                email="self-link@example.com",
+                password="123456",
+                phone="11 97777-8899",
+                google_connected=True,
+            )
+        )
+
+        created = main.create_contact(
+            contact_payload(
+                owner_id=str(owner["id"]),
+                name="Meu proprio contato",
+                phone=owner["phone"],
+                email=owner["email"],
+                service="perfil pessoal",
+            )
+        )
+
+        self.assertEqual(created["linked_user_id"], "")
+        self.assertEqual(created["linked_user_name"], "")
 
     def test_chat_prepares_follow_up_for_selected_contact(self):
         contact = main.create_contact(contact_payload(owner_id="owner-a", name="Aline Prado", phone="11 90000-2222"))
@@ -140,6 +369,386 @@ class NetworkAgendaApiTests(unittest.TestCase):
         self.assertEqual(response["provider"], "local")
         self.assertEqual(response["suggestions"][0]["action"], "set_crm")
         self.assertIn("T14:00", response["suggestions"][0]["next_follow_up_at"])
+
+    def test_group_ai_chat_uses_shared_group_contacts_scope(self):
+        admin = main.save_user(
+            UserCreate(
+                name="Admin Copiloto Grupo",
+                email="admin-copiloto-grupo@example.com",
+                password="123456",
+                phone="11 97777-1000",
+                google_connected=True,
+                role="admin",
+            )
+        )
+        main.create_contact(contact_payload(owner_id=str(admin["id"]), name="Contato Privado", phone="11 97777-1001", service="advogado"))
+        shared_contact = main.create_contact(
+            contact_payload(
+                owner_id=str(admin["id"]),
+                name="Bianca Limpeza",
+                phone="11 97777-1002",
+                service="limpeza residencial",
+                tags="limpeza, faxina",
+            )
+        )
+        group = main.create_shared_group(
+            GroupCreate(
+                owner_id=str(admin["id"]),
+                name="Grupo de Limpeza",
+                area="Limpeza",
+                people_goal=3,
+                description="Grupo para testar busca do copiloto.",
+            )
+        )
+        main.create_group_contact(
+            group["id"],
+            GroupContactLinkIn(
+                requester_id=str(admin["id"]),
+                owner_id=str(admin["id"]),
+                contact_id=shared_contact["id"],
+            ),
+        )
+
+        response = main.ai_chat(
+            AiChatIn(
+                user_id=str(admin["id"]),
+                group_id=group["id"],
+                message="quem pode ajudar com limpeza?",
+            )
+        )
+
+        self.assertEqual(response["provider"], "local")
+        self.assertIn("Bianca Limpeza", response["answer"])
+        self.assertNotIn("Contato Privado", response["answer"])
+
+    def test_group_ai_chat_requires_group_access(self):
+        admin = main.save_user(
+            UserCreate(
+                name="Admin Copiloto Privado",
+                email="admin-copiloto-privado@example.com",
+                password="123456",
+                phone="11 97777-2000",
+                google_connected=True,
+                role="admin",
+            )
+        )
+        outsider = main.google_login(
+            GoogleLoginIn(
+                sub="outsider-group-ai",
+                email="outsider-group-ai@example.com",
+                name="Outsider",
+            )
+        )
+        shared_contact = main.create_contact(
+            contact_payload(
+                owner_id=str(admin["id"]),
+                name="Contato Restrito",
+                phone="11 97777-2001",
+                service="limpeza comercial",
+                tags="limpeza",
+            )
+        )
+        group = main.create_shared_group(
+            GroupCreate(
+                owner_id=str(admin["id"]),
+                name="Grupo Restrito",
+                area="Limpeza",
+                people_goal=3,
+                description="Grupo fechado.",
+            )
+        )
+        main.create_group_contact(
+            group["id"],
+            GroupContactLinkIn(
+                requester_id=str(admin["id"]),
+                owner_id=str(admin["id"]),
+                contact_id=shared_contact["id"],
+            ),
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            main.ai_chat(
+                AiChatIn(
+                    user_id=str(outsider["id"]),
+                    group_id=group["id"],
+                    message="quem resolve limpeza?",
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 403)
+
+    def test_private_ai_chat_creates_thread_and_persists_messages(self):
+        contact = main.create_contact(
+            contact_payload(
+                owner_id="owner-chat",
+                name="Paulo Financeiro",
+                phone="11 97777-3100",
+                service="consultoria financeira",
+                tags="financeiro, planejamento",
+            )
+        )
+
+        response = main.ai_chat(
+            AiChatIn(
+                user_id="owner-chat",
+                message="quem pode ajudar com financeiro?",
+                target_contact_id=contact["id"],
+            )
+        )
+
+        self.assertIsInstance(response["thread_id"], int)
+
+        threads = main.chat_threads(user_id="owner-chat")
+        self.assertEqual(len(threads), 1)
+        self.assertEqual(threads[0]["id"], response["thread_id"])
+        self.assertGreaterEqual(threads[0]["message_count"], 2)
+
+        messages = main.chat_thread_messages(response["thread_id"], user_id="owner-chat")
+        self.assertEqual([message["role"] for message in messages], ["user", "assistant"])
+        self.assertEqual(messages[0]["text"], "quem pode ajudar com financeiro?")
+        self.assertEqual(messages[1]["provider"], response["provider"])
+
+    def test_chat_message_endpoint_appends_to_existing_thread(self):
+        thread = main.create_private_chat_thread(ChatThreadCreate(user_id="owner-thread", title="Follow-up"))
+
+        saved = main.create_private_chat_message(
+            thread["id"],
+            ChatMessageCreate(
+                user_id="owner-thread",
+                role="assistant",
+                text="Abra o CRM para revisar os próximos follow-ups.",
+                provider="local",
+                suggestions=[],
+                cta_label="Ver no CRM",
+                cta_route="/crm",
+            ),
+        )
+
+        messages = main.chat_thread_messages(thread["id"], user_id="owner-thread")
+
+        self.assertEqual(saved["cta"]["route"], "/crm")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["text"], "Abra o CRM para revisar os próximos follow-ups.")
+
+    def test_import_jobs_are_logged_by_owner(self):
+        created = main.create_contact_import_job(
+            ImportJobCreate(
+                user_id="owner-import",
+                source="CSV",
+                filename="contatos.csv",
+                status="completed",
+                total_count=12,
+                imported_count=10,
+                skipped_count=1,
+                failed_count=1,
+                details="Arquivo com cabeçalho padrão.",
+            )
+        )
+        main.create_contact_import_job(
+            ImportJobCreate(
+                user_id="other-import",
+                source="Google Contacts",
+                filename="",
+                status="completed",
+                total_count=3,
+                imported_count=3,
+            )
+        )
+
+        jobs = main.import_jobs(user_id="owner-import")
+
+        self.assertEqual([job["id"] for job in jobs], [created["id"]])
+        self.assertEqual(jobs[0]["filename"], "contatos.csv")
+        self.assertEqual(jobs[0]["imported_count"], 10)
+
+    def test_push_subscriptions_are_upserted_and_scoped_by_owner(self):
+        created = main.create_push_subscription(
+            PushSubscriptionCreate(
+                user_id="owner-push",
+                endpoint="https://push.example.com/subscriptions/abc",
+                p256dh_key="p256dh-key",
+                auth_key="auth-key",
+                device_label="Chrome desktop",
+            )
+        )
+        updated = main.create_push_subscription(
+            PushSubscriptionCreate(
+                user_id="owner-push",
+                endpoint="https://push.example.com/subscriptions/abc",
+                p256dh_key="p256dh-key-2",
+                auth_key="auth-key-2",
+                device_label="Android PWA",
+            )
+        )
+
+        owner_subscriptions = main.push_subscriptions(user_id="owner-push")
+        other_subscriptions = main.push_subscriptions(user_id="owner-other")
+
+        self.assertEqual(created["id"], updated["id"])
+        self.assertEqual(owner_subscriptions[0]["device_label"], "Android PWA")
+        self.assertEqual(owner_subscriptions[0]["p256dh_key"], "p256dh-key-2")
+        self.assertEqual(other_subscriptions, [])
+
+    def test_contacts_search_matches_custom_field_values(self):
+        main.create_contact(
+            contact_payload(
+                owner_id="owner-search",
+                name="Bruna Eventos",
+                phone="11 97777-4433",
+                service="cerimonialista",
+                custom_field_values=[
+                    {
+                        "name": "Especialidade",
+                        "key": "especialidade",
+                        "field_type": "text_short",
+                        "scope_type": "user",
+                        "scope_id": "",
+                        "value": "casamentos de luxo",
+                    }
+                ],
+            )
+        )
+
+        results = main.contacts(query="casamentos luxo", category="all", user_id="owner-search")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["name"], "Bruna Eventos")
+
+    def test_search_returns_insights_for_matches(self):
+        owner = main.save_user(
+            UserCreate(
+                name="Owner Search",
+                email="owner-search-insights@example.com",
+                password="123456",
+                phone="11 97777-4430",
+                google_connected=True,
+            )
+        )
+        main.create_contact(
+            contact_payload(
+                owner_id=str(owner["id"]),
+                name="Carlos Resolve",
+                phone="11 97777-4431",
+                service="consultoria financeira",
+                solves="Resolve financeiro, fluxo de caixa e precificação.",
+                tags="financeiro, precificação",
+            )
+        )
+        main.create_contact(
+            contact_payload(
+                owner_id=str(owner["id"]),
+                name="Ana Busca",
+                phone="11 97777-4432",
+                service="loja",
+                demand="Busca ajuda com financeiro e precificação.",
+                demand_tags="financeiro, precificação",
+            )
+        )
+
+        result = main.search(query="quem pode ajudar com financeiro?", user_id=str(owner["id"]))
+
+        self.assertTrue(result["has_private_results"])
+        self.assertGreaterEqual(len(result["insights"]), 1)
+
+    def test_import_integrations_endpoint_exposes_native_and_file_modes(self):
+        integrations = main.import_integrations()
+
+        providers = {item["provider"]: item for item in integrations}
+        self.assertEqual(providers["google_contacts"]["status"], "implemented")
+        self.assertEqual(providers["apple_contacts_native"]["status"], "coming_soon")
+        self.assertIn("vcf", providers["apple_contacts_native"]["supported_formats"])
+
+    def test_dispatch_push_notifications_sends_due_follow_up(self):
+        main.create_push_subscription(
+            PushSubscriptionCreate(
+                user_id="owner-push-auto",
+                endpoint="https://push.example.com/subscriptions/auto-1",
+                p256dh_key="p256dh-key",
+                auth_key="auth-key",
+                device_label="Android PWA",
+            )
+        )
+        main.create_contact(
+            contact_payload(
+                owner_id="owner-push-auto",
+                name="Contato urgente",
+                phone="11 97777-4440",
+                next_follow_up_at=(main.datetime.now() + main.timedelta(hours=3)).isoformat(timespec="minutes"),
+            )
+        )
+        os.environ["WEB_PUSH_VAPID_PRIVATE_KEY"] = "test-private-key"
+        os.environ["WEB_PUSH_VAPID_SUBJECT"] = "mailto:test@example.com"
+        try:
+            with patch.object(main, "resolve_vapid_private_key", return_value="pem-private-key"), patch.object(main, "webpush", return_value=None):
+                result = main.dispatch_push_notifications(PushDispatchIn(user_id="owner-push-auto", kinds=["follow_up"]))
+        finally:
+            os.environ.pop("WEB_PUSH_VAPID_PRIVATE_KEY", None)
+            os.environ.pop("WEB_PUSH_VAPID_SUBJECT", None)
+
+        self.assertGreaterEqual(result["sent"], 1)
+        self.assertIn("follow_up", result["events"])
+
+    def test_dispatch_push_notifications_deduplicates_recent_follow_up_event(self):
+        main.create_push_subscription(
+            PushSubscriptionCreate(
+                user_id="owner-push-repeat",
+                endpoint="https://push.example.com/subscriptions/repeat-1",
+                p256dh_key="p256dh-key",
+                auth_key="auth-key",
+                device_label="Android PWA",
+            )
+        )
+        main.create_contact(
+            contact_payload(
+                owner_id="owner-push-repeat",
+                name="Contato repetido",
+                phone="11 97777-4449",
+                next_follow_up_at=(main.datetime.now() + main.timedelta(hours=2)).isoformat(timespec="minutes"),
+            )
+        )
+        os.environ["WEB_PUSH_VAPID_PRIVATE_KEY"] = "test-private-key"
+        os.environ["WEB_PUSH_VAPID_SUBJECT"] = "mailto:test@example.com"
+        try:
+            with patch.object(main, "resolve_vapid_private_key", return_value="pem-private-key"), patch.object(main, "webpush", return_value=None):
+                first = main.dispatch_push_notifications(PushDispatchIn(user_id="owner-push-repeat", kinds=["follow_up"]))
+                second = main.dispatch_push_notifications(PushDispatchIn(user_id="owner-push-repeat", kinds=["follow_up"]))
+        finally:
+            os.environ.pop("WEB_PUSH_VAPID_PRIVATE_KEY", None)
+            os.environ.pop("WEB_PUSH_VAPID_SUBJECT", None)
+
+        self.assertGreaterEqual(first["sent"], 1)
+        self.assertIn("follow_up", first["events"])
+        self.assertEqual(second["sent"], 0)
+        self.assertEqual(second["events"], [])
+
+    def test_push_test_notification_uses_registered_subscriptions(self):
+        main.create_push_subscription(
+            PushSubscriptionCreate(
+                user_id="owner-push-test",
+                endpoint="https://push.example.com/subscriptions/test-1",
+                p256dh_key="p256dh-key",
+                auth_key="auth-key",
+                device_label="Chrome desktop",
+            )
+        )
+        os.environ["WEB_PUSH_VAPID_PRIVATE_KEY"] = "test-private-key"
+        os.environ["WEB_PUSH_VAPID_SUBJECT"] = "mailto:test@example.com"
+        try:
+            with patch.object(main, "resolve_vapid_private_key", return_value="pem-private-key"), patch.object(main, "webpush", return_value=None):
+                result = main.send_test_push_notification(
+                    PushTestNotificationIn(
+                        user_id="owner-push-test",
+                        title="Teste",
+                        body="Funcionou",
+                        route="/configuracoes",
+                    )
+                )
+        finally:
+            os.environ.pop("WEB_PUSH_VAPID_PRIVATE_KEY", None)
+            os.environ.pop("WEB_PUSH_VAPID_SUBJECT", None)
+
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(result["failed"], 0)
 
     def test_profile_save_requires_google_connection(self):
         payload = UserCreate(
@@ -187,6 +796,78 @@ class NetworkAgendaApiTests(unittest.TestCase):
         )
 
         self.assertTrue(user["google_connected"])
+
+    def test_local_login_is_disabled_by_default(self):
+        client = TestClient(main.app)
+        response = client.post(
+            "/api/login",
+            json={"email": "demo@network.local", "password": "123456"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("legado desabilitado", response.json()["detail"])
+
+    def test_supabase_auth_session_sync_keeps_email_provider_without_google_flag(self):
+        os.environ["SUPABASE_JWT_SECRET"] = "test-secret"
+        try:
+            token = jwt.encode(
+                {
+                    "sub": "supabase-email-user",
+                    "email": "email-provider@example.com",
+                    "aud": "authenticated",
+                    "app_metadata": {"provider": "email"},
+                },
+                "test-secret",
+                algorithm="HS256",
+            )
+            client = TestClient(main.app)
+            response = client.post(
+                "/api/auth/session",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "sub": "spoofed-sub",
+                    "email": "email-provider@example.com",
+                    "name": "Email Provider",
+                    "auth_provider": "email",
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["email"], "email-provider@example.com")
+            self.assertFalse(response.json()["google_connected"])
+        finally:
+            os.environ.pop("SUPABASE_JWT_SECRET", None)
+
+    def test_supabase_auth_session_sync_marks_google_provider_as_connected(self):
+        os.environ["SUPABASE_JWT_SECRET"] = "test-secret"
+        try:
+            token = jwt.encode(
+                {
+                    "sub": "supabase-google-user",
+                    "email": "google-provider@example.com",
+                    "aud": "authenticated",
+                    "app_metadata": {"provider": "google"},
+                },
+                "test-secret",
+                algorithm="HS256",
+            )
+            client = TestClient(main.app)
+            response = client.post(
+                "/api/auth/session",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "sub": "spoofed-sub",
+                    "email": "google-provider@example.com",
+                    "name": "Google Provider",
+                    "auth_provider": "email",
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["email"], "google-provider@example.com")
+            self.assertTrue(response.json()["google_connected"])
+        finally:
+            os.environ.pop("SUPABASE_JWT_SECRET", None)
 
     def test_supabase_token_owner_overrides_client_owner_id(self):
         os.environ["SUPABASE_JWT_SECRET"] = "test-secret"
@@ -298,6 +979,36 @@ class NetworkAgendaApiTests(unittest.TestCase):
         finally:
             os.environ.pop("SUPABASE_URL", None)
 
+    def test_production_env_blocks_demo_fallback_without_supabase(self):
+        os.environ["APP_ENV"] = "production"
+        try:
+            client = TestClient(main.app)
+            status_response = client.get("/api/auth/status")
+            contacts_response = client.get("/api/contacts?user_id=test-user")
+
+            self.assertEqual(status_response.status_code, 200)
+            self.assertTrue(status_response.json()["production_auth_enforced"])
+            self.assertFalse(status_response.json()["demo_fallback_enabled"])
+            self.assertEqual(contacts_response.status_code, 503)
+        finally:
+            os.environ.pop("APP_ENV", None)
+
+    def test_auth_status_reports_production_not_ready_on_sqlite_even_with_supabase_url(self):
+        os.environ["SUPABASE_URL"] = "https://qbqqfkvvbvsdpwsajkha.supabase.co"
+        try:
+            client = TestClient(main.app)
+            response = client.get("/api/auth/status")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertTrue(payload["supabase_auth_required"])
+            self.assertEqual(payload["database_dialect"], "sqlite")
+            self.assertFalse(payload["production_auth_ready"])
+            self.assertFalse(payload["rls_ready"])
+            self.assertIn("SQLite", " ".join(payload["warnings"]))
+        finally:
+            os.environ.pop("SUPABASE_URL", None)
+
     def test_supabase_jwks_claims_are_used_when_secret_is_missing(self):
         os.environ["SUPABASE_URL"] = "https://qbqqfkvvbvsdpwsajkha.supabase.co"
         try:
@@ -375,6 +1086,35 @@ class NetworkAgendaApiTests(unittest.TestCase):
         self.assertEqual([item["message"] for item in messages], ["Bem-vindos ao grupo."])
         self.assertEqual(cleared.status_code, 204)
         self.assertEqual(messages_after_clear, [])
+
+    def test_graph_endpoint_exposes_semantic_nodes_and_edges(self):
+        main.create_contact(
+            contact_payload(
+                owner_id="owner-graph",
+                name="Contato Grafo",
+                phone="11 96666-7777",
+                service="limpeza residencial",
+                tags="limpeza, condomínio",
+                demand="Busca parceria com síndicos.",
+                demand_tags="condomínio",
+                solves="Limpeza pós-obra.",
+                organization="Rede Alfa",
+            )
+        )
+
+        graph = main.graph(scope="private", user_id="owner-graph")
+        node_types = {node["type"] for node in graph["nodes"]}
+        edge_types = {edge["type"] for edge in graph["edges"]}
+
+        self.assertIn("contact", node_types)
+        self.assertIn("tag", node_types)
+        self.assertIn("ddd", node_types)
+        self.assertIn("demand", node_types)
+        self.assertIn("solution", node_types)
+        self.assertIn("organization", node_types)
+        self.assertIn("has_tag", edge_types)
+        self.assertIn("demands", edge_types)
+        self.assertIn("solves", edge_types)
 
     def test_standard_user_cannot_create_group(self):
         user = main.google_login(
