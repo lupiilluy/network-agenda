@@ -4,6 +4,13 @@ Repositorio do MVP atual do produto `Network Intelligence CRM`, um webapp PWA-fi
 
 O nome do repositorio ainda e `network-agenda`, mas o produto e apresentado no app como `Network Intelligence CRM`.
 
+## Deploy atual
+
+- Frontend em producao: `https://frontend-three-mauve-91.vercel.app`
+- API em producao: `https://network-agenda-api.onrender.com`
+- Banco principal: Supabase Postgres
+- Auth principal: Supabase Auth
+
 ## MVP atual
 
 - onboarding em 5 passos: login, perfil, visibilidade publica, importacao e primeiros insights;
@@ -154,6 +161,12 @@ Diagnostico rapido de auth:
 
 ```powershell
 .\scripts\check-auth-readiness.ps1
+```
+
+Verificacao local completa:
+
+```powershell
+.\scripts\verify.ps1
 ```
 
 ## Variaveis de ambiente

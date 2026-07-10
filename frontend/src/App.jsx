@@ -3363,8 +3363,8 @@ function CrmPage({ contacts, onEdit, onCompleteFollowUp, onCancelFollowUp, onNav
     <div className="space-y-4">
       <PageTitle
         eyebrow="CRM"
-        title="Relacionamentos e follow-ups"
-        description="Acompanhe conversas, oportunidades e próximos contatos da sua rede."
+        title="Pipeline de relacionamento"
+        description="Acompanhe conversas, follow-ups e oportunidades com a sua rede em uma visão clara e acionável."
         action={
           <button type="button" onClick={() => onNavigate(ROUTES.NEW)} className="primary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
             <Plus size={17} />
