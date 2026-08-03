@@ -135,7 +135,7 @@ function ImportIntegrationCard({ integration, onNavigate, onImportGoogleContacts
   )
 }
 
-export default function SettingsPageSection({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, customFieldDefinitions, importIntegrations, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onRetryPendingMutation, onDismissPendingMutation, onExportContacts, onClearRecents, onSaveCustomField, onDeleteCustomField, onSaveUser, onSendPushTest, onLogout }) {
+export default function SettingsPageSection({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, customFieldDefinitions, importIntegrations, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onRetryPendingMutation, onDismissPendingMutation, onDiscardGoogleImportPending, onExportContacts, onClearRecents, onSaveCustomField, onDeleteCustomField, onSaveUser, onSendPushTest, onLogout }) {
   const visibleName = user?.name || 'Perfil'
   const googleContactsImported = Boolean(user?.googleContactsImportedAt)
   const [notificationPreference, setNotificationPreference] = useState(user?.notificationPreference || 'relevant')
@@ -173,6 +173,11 @@ export default function SettingsPageSection({ user, contacts, duplicateCount, ba
               <Cloud size={17} />
               Sincronizar agora
             </button>
+            {pendingMutations.some((mutation) => mutation.type === 'contact:create' && mutation.payload?.source === 'Google People API') ? (
+              <button type="button" onClick={onDiscardGoogleImportPending} className="secondary-button inline-flex h-10 items-center justify-center gap-2 rounded-lg px-3 text-sm font-black">
+                Descartar importações antigas
+              </button>
+            ) : null}
           </div>
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
             {pendingMutations.slice(0, 6).map((mutation) => (
