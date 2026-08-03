@@ -13933,13 +13933,13 @@ export default function App() {
         const importIntegrationsPath = '/api/import-integrations'
         const [remoteContacts, remoteProfiles, remoteUsers, remoteDuplicates, remoteGroups, remoteCustomFields, remoteChatThreads, remoteImportJobs] = await Promise.all([
           contactsPath ? apiRequest(contactsPath) : Promise.resolve([]),
-          apiRequest('/api/public-profiles'),
-          apiRequest('/api/users'),
-          duplicatesPath ? apiRequest(duplicatesPath) : Promise.resolve([]),
-          groupsPath ? apiRequest(groupsPath) : Promise.resolve([]),
-          customFieldsPath ? apiRequest(customFieldsPath) : Promise.resolve([]),
-          chatThreadsPath ? apiRequest(chatThreadsPath) : Promise.resolve([]),
-          importJobsPath ? apiRequest(importJobsPath) : Promise.resolve([]),
+          apiRequest('/api/public-profiles').catch(() => []),
+          apiRequest('/api/users').catch(() => []),
+          duplicatesPath ? apiRequest(duplicatesPath).catch(() => []) : Promise.resolve([]),
+          groupsPath ? apiRequest(groupsPath).catch(() => []) : Promise.resolve([]),
+          customFieldsPath ? apiRequest(customFieldsPath).catch(() => []) : Promise.resolve([]),
+          chatThreadsPath ? apiRequest(chatThreadsPath).catch(() => []) : Promise.resolve([]),
+          importJobsPath ? apiRequest(importJobsPath).catch(() => []) : Promise.resolve([]),
         ])
         const remoteImportIntegrations = await apiRequest(importIntegrationsPath).catch(() => [])
         if (cancelled) return
