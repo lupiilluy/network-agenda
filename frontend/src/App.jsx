@@ -7102,7 +7102,7 @@ function GroupAdminPage({
   )
 }
 
-function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, customFieldDefinitions, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onRetryPendingMutation, onDismissPendingMutation, onExportContacts, onClearRecents, onSaveCustomField, onDeleteCustomField, onSaveUser, onSendPushTest, onLogout }) {
+function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, customFieldDefinitions, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onRetryPendingMutation, onDismissPendingMutation, onDiscardGoogleImportPending, onExportContacts, onClearRecents, onSaveCustomField, onDeleteCustomField, onSaveUser, onSendPushTest, onLogout }) {
   const visibleName = user?.name || 'Perfil'
   const googleContactsImported = Boolean(user?.googleContactsImportedAt)
   const [notificationPreference, setNotificationPreference] = useState(user?.notificationPreference || 'relevant')
@@ -7139,6 +7139,11 @@ function SettingsPage({ user, contacts, duplicateCount, backendOnline, pendingMu
               <Cloud size={17} />
               Sincronizar agora
             </button>
+            {pendingMutations.some((mutation) => mutation.type === 'contact:create' && mutation.payload?.source === 'Google People API') ? (
+              <button type="button" onClick={onDiscardGoogleImportPending} className="secondary-button inline-flex h-10 items-center justify-center gap-2 rounded-lg px-3 text-sm font-black">
+                Descartar importações antigas
+              </button>
+            ) : null}
           </div>
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
             {pendingMutations.slice(0, 6).map((mutation) => (
@@ -13579,6 +13584,15 @@ export default function App() {
     showToast('Alteração removida da fila offline.')
   }
 
+  function discardPendingGoogleImports(owner = user) {
+    const current = loadOfflineMutations(owner)
+    const next = current.filter((mutation) => !(mutation.type === 'contact:create' && mutation.payload?.source === 'Google People API'))
+    const removed = current.length - next.length
+    saveOfflineMutations(owner, next)
+    setPendingMutations(next)
+    if (removed) showToast(`${removed} importação${removed === 1 ? '' : 'ões'} antiga${removed === 1 ? '' : 's'} removida${removed === 1 ? '' : 's'} da fila.`)
+  }
+
   function reconcilePendingContactCreates(owner, remoteContacts) {
     const phoneKeys = new Set((remoteContacts ?? []).map((contact) => onlyDigits(contact.phone)).filter(Boolean))
     const emailKeys = new Set((remoteContacts ?? []).map((contact) => normalize(contact.email).trim()).filter(Boolean))
@@ -16246,6 +16260,7 @@ export default function App() {
         onSyncPending={syncPendingNow}
         onRetryPendingMutation={retryPendingMutation}
         onDismissPendingMutation={dismissPendingMutation}
+        onDiscardGoogleImportPending={discardPendingGoogleImports}
         onExportContacts={exportContacts}
         onClearRecents={clearRecentSearches}
         onSaveCustomField={saveCustomFieldDefinition}
