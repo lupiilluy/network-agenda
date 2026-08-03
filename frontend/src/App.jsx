@@ -15774,19 +15774,20 @@ export default function App() {
     async function syncSupabaseSession(session) {
       if (!active || !session?.user?.email) return
       try {
-        const response = await apiRequest('/api/google-login', {
+        const response = await apiRequest('/api/auth/session', {
           method: 'POST',
           body: JSON.stringify({
             sub: session.user.id,
             email: session.user.email,
             name: session.user.user_metadata?.full_name || session.user.user_metadata?.name || session.user.email,
             picture: session.user.user_metadata?.avatar_url || '',
+            auth_provider: session.user.app_metadata?.provider || 'email',
           }),
         })
         const loggedUser = apiUserToLocal(response)
         if (!loggedUser || !active) return
         setBackendOnline(true)
-        rememberUser(loggedUser)
+        rememberUser(loggedUser, Number(session.expires_at || 0) * 1000)
         navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
       } catch {
         if (active) showToast('A sessão foi criada, mas não consegui sincronizar o perfil.')
