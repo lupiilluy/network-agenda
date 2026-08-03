@@ -13579,6 +13579,21 @@ export default function App() {
     showToast('Alteração removida da fila offline.')
   }
 
+  function reconcilePendingContactCreates(owner, remoteContacts) {
+    const phoneKeys = new Set((remoteContacts ?? []).map((contact) => onlyDigits(contact.phone)).filter(Boolean))
+    const emailKeys = new Set((remoteContacts ?? []).map((contact) => normalize(contact.email).trim()).filter(Boolean))
+    const next = updateOfflineMutations(owner, (current) =>
+      current.filter((mutation) => {
+        if (mutation.type !== 'contact:create') return true
+        const payload = mutation.payload ?? {}
+        const phone = onlyDigits(payload.phone)
+        const email = normalize(payload.email).trim()
+        return !(phone && phoneKeys.has(phone)) && !(email && emailKeys.has(email))
+      }),
+    )
+    setPendingMutations(next)
+  }
+
   async function retryPendingMutation(mutation, owner = user) {
     if (!mutation?.id) return
     patchOfflineMutation(owner, mutation.id, resetOfflineMutationState(mutation))
@@ -13943,6 +13958,7 @@ export default function App() {
         ])
         const remoteImportIntegrations = await apiRequest(importIntegrationsPath).catch(() => [])
         if (cancelled) return
+        if (user) reconcilePendingContactCreates(user, remoteContacts)
         const localUsers = remoteUsers.map(apiUserToLocal).filter(Boolean)
         setContacts(remoteContacts)
         setPublicProfiles(remoteProfiles)
