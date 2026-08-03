@@ -15816,6 +15816,16 @@ export default function App() {
 
     async function restoreSupabaseSession() {
       try {
+        const query = new URLSearchParams(window.location.search)
+        const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+        const providerError = query.get('error_description') || hash.get('error_description')
+        if (providerError) {
+          // Supabase can return provider failures in either the query string or hash.
+          // Surface it in the login form instead of leaving the user on a blank retry.
+          window.history.replaceState({}, '', window.location.pathname)
+          throw new Error(decodeURIComponent(providerError))
+        }
+
         let { data, error } = await client.auth.getSession()
         if (error) throw error
         if (data.session) {
@@ -15823,7 +15833,7 @@ export default function App() {
           return
         }
 
-        const authorizationCode = new URLSearchParams(window.location.search).get('code')
+        const authorizationCode = query.get('code')
         if (!authorizationCode) return
 
         // Supabase normally exchanges the OAuth code automatically. If that did not
