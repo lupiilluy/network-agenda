@@ -2298,7 +2298,16 @@ async function fetchGoogleContacts(accessToken) {
   const response = await fetch(`https://people.googleapis.com/v1/people/me/connections?${params.toString()}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   })
-  if (!response.ok) throw new Error('Não foi possível ler os contatos do Google.')
+  if (!response.ok) {
+    let detail = ''
+    try {
+      const payload = await response.json()
+      detail = payload?.error?.message || ''
+    } catch {
+      // Keep a useful generic message when Google does not return JSON.
+    }
+    throw new Error(detail || 'Não foi possível ler os contatos do Google.')
+  }
   const data = await response.json()
   return (data.connections ?? []).map(googlePersonToContact).filter((contact) => contact.name && contact.phone)
 }
@@ -2327,7 +2336,7 @@ async function getGoogleProfileWithToken() {
 }
 
 async function getGoogleContactsOnly() {
-  const accessToken = await requestGoogleToken(GOOGLE_CONTACTS_SCOPE, 'consent')
+  const accessToken = await requestGoogleToken(`${GOOGLE_LOGIN_SCOPE} ${GOOGLE_CONTACTS_SCOPE}`, 'consent')
   return fetchGoogleContacts(accessToken)
 }
 
@@ -14224,8 +14233,11 @@ export default function App() {
     } catch (error) {
       if (isOfflineRequestError(error)) {
         queueLocalMutation({ type: 'contact:create', payload: newContact }, owner)
+        setBackendOnline(false)
+        return newContact
       }
       setBackendOnline(false)
+      throw error
     }
 
     return newContact
