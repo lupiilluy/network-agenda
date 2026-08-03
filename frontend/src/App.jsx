@@ -1,5 +1,6 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import { Suspense, lazy } from 'react'
+import { createClient } from '@supabase/supabase-js'
 import {
   Activity,
   ArrowLeft,
@@ -51,7 +52,10 @@ const API_BASE_URL =
   (import.meta.env.PROD ? 'https://network-agenda-api.onrender.com' : 'http://127.0.0.1:8006')
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? ''
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? ''
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? ''
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY ?? ''
 const GOOGLE_AUTH_ENABLED = Boolean(GOOGLE_CLIENT_ID)
+const SUPABASE_AUTH_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
 const GOOGLE_LOGIN_SCOPE = 'openid email profile'
 const GOOGLE_CONTACTS_SCOPE = 'https://www.googleapis.com/auth/contacts.readonly'
 const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
@@ -68,6 +72,21 @@ const AUTO_PUSH_STATE_STORAGE_KEY = 'network-agenda-auto-push-v1'
 const AUTO_PUSH_COOLDOWN_MS = 15 * 60 * 1000
 const DEFAULT_THEME = 'dark'
 import * as ReactLib from 'react'
+
+let supabaseClient = null
+
+function getSupabaseClient() {
+  if (!SUPABASE_AUTH_ENABLED) return null
+  if (!supabaseClient) supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  return supabaseClient
+}
+
+async function getSupabaseAccessToken() {
+  const client = getSupabaseClient()
+  if (!client) return ''
+  const { data } = await client.auth.getSession()
+  return data.session?.access_token ?? ''
+}
 
 function getLocalAuthHeaders() {
   try {
@@ -573,9 +592,11 @@ const dddCoordinates = {
 }
 
 async function apiRequest(path, options = {}) {
+  const accessToken = await getSupabaseAccessToken()
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
       'Content-Type': 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...getLocalAuthHeaders(),
       ...(options.headers ?? {}),
     },
@@ -12461,14 +12482,18 @@ function geocodeAddress(geocoder, address) {
   })
 }
 
-function LoginPage({ user, onGoogleLogin, onSwitchAccount, theme, onToggleTheme }) {
+function LoginPage({ user, onGoogleLogin, onPasswordLogin, onMagicLink, onSwitchAccount, theme, onToggleTheme }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
   const [status, setStatus] = useState('')
   const [isGoogleLoading, setIsGoogleLoading] = useState(false)
+  const [isPasswordLoading, setIsPasswordLoading] = useState(false)
+  const [isMagicLoading, setIsMagicLoading] = useState(false)
 
   return (
     <AuthLayout
-      title="Entre com sua conta Google"
-      description="Use apenas Google para abrir o Network Intelligence CRM. Depois do login, o app salva sua sessão localmente neste navegador."
+        title="Entre na sua conta"
+        description="Use e-mail e senha, Google ou magic link. Depois do login, o app salva sua sessão localmente neste navegador."
       theme={theme}
       onToggleTheme={onToggleTheme}
     >
@@ -12495,7 +12520,7 @@ function LoginPage({ user, onGoogleLogin, onSwitchAccount, theme, onToggleTheme 
           </div>
         ) : null}
         <div className="rounded-lg border border-slate-800 bg-slate-950/45 px-3 py-3 text-xs font-bold text-slate-400">
-          O acesso do app agora é exclusivo com Google. Não há login por Supabase, magic link, Apple ou senha.
+          Entre com e-mail e senha, Google ou receba um magic link no seu e-mail.
         </div>
         <button
           type="button"
@@ -12516,6 +12541,14 @@ function LoginPage({ user, onGoogleLogin, onSwitchAccount, theme, onToggleTheme 
           <Cloud size={18} />
           {isGoogleLoading ? 'Conectando...' : 'Continuar com Google'}
         </button>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <input value={email} onChange={(event) => setEmail(event.target.value)} className="field-input h-11" type="email" placeholder="voce@email.com" />
+          <input value={password} onChange={(event) => setPassword(event.target.value)} className="field-input h-11" type="password" placeholder="Senha" />
+        </div>
+        <button type="button" disabled={isPasswordLoading} onClick={async () => { if (!email.trim() || !password) { setStatus('Informe e-mail e senha.') ; return }; setIsPasswordLoading(true); setStatus('Entrando...'); try { await onPasswordLogin({ email: email.trim(), password }) } catch (error) { setStatus(error.message || 'Não foi possível entrar.') } finally { setIsPasswordLoading(false) } }} className="primary-button inline-flex h-11 w-full items-center justify-center rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60">{isPasswordLoading ? 'Entrando...' : 'Entrar com e-mail e senha'}</button>
+        <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+          <button type="button" disabled={isMagicLoading || !SUPABASE_AUTH_ENABLED} onClick={async () => { if (!email.trim()) { setStatus('Informe o e-mail para receber o link.') ; return }; setIsMagicLoading(true); setStatus('Enviando magic link...'); try { await onMagicLink(email); setStatus('Enviamos o magic link para seu e-mail.') } catch (error) { setStatus(error.message || 'Não foi possível enviar o magic link.') } finally { setIsMagicLoading(false) } }} className="secondary-button h-11 rounded-lg px-4 text-xs font-black disabled:cursor-not-allowed disabled:opacity-60">Enviar link</button>
+        </div>
         {status ? (
           <p className={['rounded-lg border p-3 text-sm font-bold', status.includes('Abrindo') || status.includes('Trocando') ? 'border-cyan-400/30 bg-cyan-500/10 text-cyan-100' : 'border-rose-400/30 bg-rose-500/10 text-rose-200'].join(' ')}>
             {status}
@@ -12526,6 +12559,7 @@ function LoginPage({ user, onGoogleLogin, onSwitchAccount, theme, onToggleTheme 
             Configure `VITE_GOOGLE_CLIENT_ID` no frontend para liberar o login.
           </p>
         ) : null}
+        {!SUPABASE_AUTH_ENABLED ? <p className="rounded-lg border border-amber-400/20 bg-amber-500/10 px-3 py-3 text-xs font-bold text-amber-100">Magic link exige `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` no ambiente local.</p> : null}
       </div>
     </AuthLayout>
   )
@@ -15715,6 +15749,48 @@ export default function App() {
     navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
   }
 
+  async function sendMagicLink(email) {
+    const client = getSupabaseClient()
+    if (!client) throw new Error('Configure as credenciais do Supabase para usar magic link.')
+    const { error } = await client.auth.signInWithOtp({ email: email.trim(), options: { emailRedirectTo: window.location.origin } })
+    if (error) throw error
+  }
+
+  useEffect(() => {
+    const client = getSupabaseClient()
+    if (!client) return undefined
+    let active = true
+
+    async function syncSupabaseSession(session) {
+      if (!active || !session?.user?.email) return
+      try {
+        const response = await apiRequest('/api/google-login', {
+          method: 'POST',
+          body: JSON.stringify({
+            sub: session.user.id,
+            email: session.user.email,
+            name: session.user.user_metadata?.full_name || session.user.user_metadata?.name || session.user.email,
+            picture: session.user.user_metadata?.avatar_url || '',
+          }),
+        })
+        const loggedUser = apiUserToLocal(response)
+        if (!loggedUser || !active) return
+        setBackendOnline(true)
+        rememberUser(loggedUser)
+        navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
+      } catch {
+        if (active) showToast('A sessão foi criada, mas não consegui sincronizar o perfil.')
+      }
+    }
+
+    client.auth.getSession().then(({ data }) => syncSupabaseSession(data.session))
+    const { data } = client.auth.onAuthStateChange((_event, session) => syncSupabaseSession(session))
+    return () => {
+      active = false
+      data.subscription.unsubscribe()
+    }
+  }, [])
+
   async function saveUser(nextUser, pendingContacts = [], options = {}) {
     let savedUser = normalizeUserDraft(nextUser)
     let queuedOffline = false
@@ -15900,7 +15976,7 @@ export default function App() {
       />
     )
   } else if (effectiveRoute.page === 'login') {
-    page = <LoginPage user={user} theme={theme} onToggleTheme={toggleTheme} onGoogleLogin={loginWithGoogle} onSwitchAccount={logout} />
+    page = <LoginPage user={user} theme={theme} onToggleTheme={toggleTheme} onGoogleLogin={loginWithGoogle} onPasswordLogin={loginUser} onMagicLink={sendMagicLink} onSwitchAccount={logout} />
   } else if (effectiveRoute.page === 'register') {
     page = <RegisterPage user={user} theme={theme} onToggleTheme={toggleTheme} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'publicProfile') {
