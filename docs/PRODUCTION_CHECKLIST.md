@@ -40,7 +40,7 @@ Se voce ja tiver `RENDER_API_KEY` e `VERCEL_TOKEN`, rode:
 .\scripts\provision-production.ps1
 ```
 
-Isso sincroniza os envs a partir de `frontend/.env.local` e `backend/.env.production.local`, cria os deploys e reduz o preenchimento manual ao minimo.
+Isso sincroniza os envs a partir de `frontend/.env.local`, `frontend/.env.production.local`, `backend/.env.local` e `backend/.env.production.local`, cria os deploys e reduz o preenchimento manual ao minimo.
 
 Depois que a URL final da Vercel existir, rode de novo:
 

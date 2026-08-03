@@ -18,7 +18,7 @@ Crie `backend/.env.local` a partir de `backend/.env.example`:
 ```env
 DATABASE_URL=
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:5174,http://localhost:5174
-SUPABASE_URL=https://seu-projeto.supabase.co
+ALLOW_LEGACY_PASSWORD_LOGIN=true
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
@@ -44,6 +44,6 @@ OPENAI_MODEL=gpt-4o-mini
 
 Sem `DATABASE_URL`, o banco SQLite fica em `backend/data/network_agenda.sqlite3` e e criado automaticamente.
 
-Com `DATABASE_URL=postgresql://...`, a API usa Postgres/Supabase e inicializa as tabelas com `app/postgres_schema.sql`.
+Com `DATABASE_URL=postgresql://...`, a API usa Postgres e inicializa as tabelas com `app/postgres_schema.sql`.
 
-Se `SUPABASE_URL` estiver configurada, a API passa a validar tokens do Supabase via JWKS (`ES256` ou `RS256`) mesmo sem `SUPABASE_JWT_SECRET`. Isso e o modo recomendado para projetos Supabase mais novos.
+O login do app agora e feito pelo frontend com Google e a sessao local do navegador. Para desenvolvimento local, mantenha `ALLOW_LEGACY_PASSWORD_LOGIN=true` para o backend aceitar a identidade salva no navegador.

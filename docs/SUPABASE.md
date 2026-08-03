@@ -80,6 +80,8 @@ O backend aceita `WEB_PUSH_VAPID_PRIVATE_KEY` em tres formatos:
 
 Com essas variaveis, o frontend usa Supabase para Google OAuth e magic link. O backend valida o bearer token via JWKS usando `SUPABASE_URL` e usa o usuario autenticado como dono real dos contatos.
 
+No Google Cloud, o cliente OAuth precisa aceitar `https://<project-ref>.supabase.co/auth/v1/callback` como `Authorized redirect URI`. O dominio do Vercel deve ficar na allowlist de redirecionamento do Supabase Auth.
+
 Nao use no navegador:
 
 ```env

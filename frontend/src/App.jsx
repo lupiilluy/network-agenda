@@ -1,5 +1,4 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
-import { createClient } from '@supabase/supabase-js'
 import { Suspense, lazy } from 'react'
 import {
   Activity,
@@ -50,10 +49,9 @@ import {
 const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? 'https://network-agenda-api.onrender.com' : 'http://127.0.0.1:8006')
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || ''
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? ''
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? ''
+const GOOGLE_AUTH_ENABLED = Boolean(GOOGLE_CLIENT_ID)
 const GOOGLE_LOGIN_SCOPE = 'openid email profile'
 const GOOGLE_CONTACTS_SCOPE = 'https://www.googleapis.com/auth/contacts.readonly'
 const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
@@ -68,23 +66,20 @@ const OFFLINE_DATA_STORAGE_KEY = 'network-agenda-offline-data-v1'
 const OFFLINE_MUTATION_STORAGE_KEY = 'network-agenda-offline-mutations-v1'
 const AUTO_PUSH_STATE_STORAGE_KEY = 'network-agenda-auto-push-v1'
 const AUTO_PUSH_COOLDOWN_MS = 15 * 60 * 1000
-const SUPABASE_AUTH_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
 const DEFAULT_THEME = 'dark'
-let supabaseClient = null
+import * as ReactLib from 'react'
 
-function getSupabaseClient() {
-  if (!SUPABASE_AUTH_ENABLED) return null
-  if (!supabaseClient) {
-    supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+function getLocalAuthHeaders() {
+  try {
+    const stored = loadStoredUser()
+    if (!stored?.email) return {}
+    return {
+      'X-Local-Auth-Email': String(stored.email),
+      'X-Local-Auth-Owner-Id': String(stored.id ?? stored.email ?? ''),
+    }
+  } catch {
+    return {}
   }
-  return supabaseClient
-}
-
-async function getSupabaseAccessToken() {
-  const client = getSupabaseClient()
-  if (!client) return ''
-  const { data } = await client.auth.getSession()
-  return data.session?.access_token ?? ''
 }
 
 const ROUTES = {
@@ -578,11 +573,10 @@ const dddCoordinates = {
 }
 
 async function apiRequest(path, options = {}) {
-  const accessToken = await getSupabaseAccessToken()
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
       'Content-Type': 'application/json',
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      ...getLocalAuthHeaders(),
       ...(options.headers ?? {}),
     },
     ...options,
@@ -1400,15 +1394,6 @@ function hasGoogleConnection(user) {
   return Boolean(user?.googleConnected || user?.googleProfileSyncedAt || user?.googleContactsImportedAt)
 }
 
-function inferSupabaseAuthProvider(session) {
-  const provider =
-    session?.user?.app_metadata?.provider ||
-    session?.user?.identities?.[0]?.provider ||
-    session?.user?.user_metadata?.provider ||
-    ''
-  return String(provider || '').trim().toLowerCase()
-}
-
 function urlBase64ToUint8Array(value) {
   const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/')
   const padding = '='.repeat((4 - (normalized.length % 4 || 4)) % 4)
@@ -1645,6 +1630,7 @@ function saveOfflineSnapshot(owner, payload) {
     chatMessages: payload.chatMessages ?? [],
     currentChatThreadId: payload.currentChatThreadId ?? null,
     importJobs: payload.importJobs ?? [],
+    importIntegrations: payload.importIntegrations ?? [],
     cachedAt: new Date().toISOString(),
   }
   writeStorageJson(OFFLINE_DATA_STORAGE_KEY, snapshots)
@@ -3058,6 +3044,214 @@ function DeferredGraphWorkspace(props) {
   )
 }
 
+/* Removed presentation preview.
+function PreviewPage({ onNavigate }) {
+  const [hasStarted, setHasStarted] = useState(false)
+  const [activeSection, setActiveSection] = useState('dashboard')
+  const [activeGraph, setActiveGraph] = useState('private')
+  const [demoQuery, setDemoQuery] = useState('')
+  const baseItems = [
+    ['Ana Ribeiro', 'Advogada trabalhista', 'Sao Paulo', 'legal', 'contratos', 'PMEs em expansao'],
+    ['Bruno Teles', 'Contador para negocios', 'Santo Andre', 'business', 'MEI', 'organizacao financeira'],
+    ['Camila Nunes', 'Designer de marca', 'Sao Paulo', 'tech', 'branding', 'lancamentos digitais'],
+    ['Diego Moraes', 'Eletricista residencial', 'Osasco', 'home', 'reforma', 'instalacoes urgentes'],
+    ['Elisa Prado', 'Consultora de RH', 'Campinas', 'business', 'pessoas', 'contratacao de times'],
+    ['Felipe Rocha', 'Desenvolvedor web', 'Sao Paulo', 'tech', 'sites', 'presenca digital'],
+    ['Gabriela Alves', 'Arquiteta', 'Sao Paulo', 'home', 'interiores', 'reformas residenciais'],
+    ['Henrique Luz', 'Fotografo corporativo', 'Rio de Janeiro', 'tech', 'conteudo', 'marcas pessoais'],
+    ['Isabela Costa', 'Corretora de seguros', 'Curitiba', 'business', 'seguros', 'protecao patrimonial'],
+    ['Joao Faria', 'Tecnico de ar condicionado', 'Sao Paulo', 'home', 'manutencao', 'conforto em casa'],
+  ]
+  const graphItems = baseItems.map(([name, service, city, categoryId, tag, demand], index) => ({
+    id: `preview-${activeGraph}-${index + 1}`,
+    name,
+    service,
+    city,
+    source: activeGraph === 'public' ? 'Perfil publico' : activeGraph === 'group' ? 'Grupo parceiros' : 'Agenda demonstracao',
+    ddd: index % 2 ? '11' : '21',
+    tags: [tag, categoryId],
+    demand: index % 2 ? demand : '',
+    solves: index % 2 ? '' : demand,
+    description: `Contato demonstrativo para apresentar o ${activeGraph === 'group' ? 'grafo de grupo' : activeGraph === 'public' ? 'grafo publico' : 'grafo privado'}.`,
+    category: { id: categoryId },
+    scopes: [activeGraph === 'public' ? 'publico' : 'interno', ...(activeGraph === 'group' ? ['grupo'] : [])],
+    groupIds: activeGraph === 'group' ? ['preview-partners'] : [],
+    groupNames: activeGraph === 'group' ? ['Parceiros de crescimento'] : [],
+    linkedPlatform: activeGraph !== 'private' && index % 3 === 0,
+    linkedLabel: index % 3 === 0 ? 'Perfil conectado' : '',
+  }))
+  const graphMeta = {
+    private: {
+      label: 'Grafo privado',
+      title: 'Agenda que revela oportunidades',
+      description: 'Contatos, demandas, solucoes, tags e fontes em uma leitura visual da sua rede.',
+    },
+    public: {
+      label: 'Grafo publico',
+      title: 'Rede visivel e conectada',
+      description: 'Perfis e servicos publicos para encontrar complementaridades sem expor a agenda real.',
+    },
+    group: {
+      label: 'Grafo de grupo',
+      title: 'Uma rede compartilhada por contexto',
+      description: 'Exemplo de grupo de parceiros com conexoes organizadas em um espaco comum.',
+    },
+  }[activeGraph]
+  const visibleDemoItems = graphItems.filter((item) => matchText(demoQuery, [item.name, item.service, item.city, item.tags, item.demand, item.solves]))
+  const sections = [
+    ['dashboard', 'Dashboard'],
+    ['agenda', 'Agenda'],
+    ['graphs', 'Grafos'],
+    ['network', 'Rede publica'],
+    ['groups', 'Grupos'],
+    ['operations', 'Operacoes'],
+  ]
+
+  if (!hasStarted) {
+    return (
+      <AuthLayout
+        title="Entre com sua conta Google"
+        description="Uma demonstracao navegavel do Network Intelligence CRM. Nesta previa, o login e simulado e nenhum dado real e acessado."
+      >
+        <div className="space-y-3">
+          <div className="rounded-lg border border-cyan-400/20 bg-cyan-500/10 px-3 py-3 text-xs font-bold text-cyan-100">
+            Modo apresentacao: a experiencia abaixo usa uma conta e uma rede demonstrativas.
+          </div>
+          <button
+            type="button"
+            onClick={() => setHasStarted(true)}
+            className="secondary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black"
+          >
+            <Cloud size={18} />
+            Continuar com Google
+          </button>
+          <button type="button" onClick={() => setHasStarted(true)} className="inline-flex h-10 w-full items-center justify-center rounded-lg text-xs font-black text-cyan-200">
+            Explorar sem autenticar
+          </button>
+          <p className="text-center text-xs font-semibold leading-5 text-slate-500">Para usar a conta real, abra o login oficial apos a apresentacao.</p>
+        </div>
+      </AuthLayout>
+    )
+  }
+
+  return (
+    <div className="space-y-5 py-4">
+      <PageTitle
+        eyebrow="Network Agenda · demonstracao"
+        title="Uma previa navegavel da sua rede"
+        description="Use esta tela para apresentar a experiencia, os grafos e os filtros sem entrar na conta ou carregar dados reais."
+        action={
+          <button type="button" onClick={() => onNavigate(ROUTES.LOGIN)} className="primary-button inline-flex h-10 items-center gap-2 rounded-lg px-4 text-sm font-black">
+            Entrar com Google
+            <ArrowRight size={16} />
+          </button>
+        }
+      />
+
+      <section className="grid gap-3 sm:grid-cols-3">
+        <Metric value="10" label="contatos demonstrativos" />
+        <Metric value="3" label="visoes de grafo" />
+        <Metric value="100%" label="sem dados reais" />
+      </section>
+
+      <nav className="flex gap-2 overflow-x-auto pb-1">
+        {sections.map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setActiveSection(id)}
+            className={['shrink-0 rounded-lg px-3 py-2 text-xs font-black', activeSection === id ? 'bg-cyan-400 text-slate-950' : 'border border-slate-700 text-slate-300'].join(' ')}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {activeSection === 'dashboard' ? (
+        <section className="grid gap-3 lg:grid-cols-[1.25fr_.75fr]">
+          <div className="glass-panel rounded-lg p-5">
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-300">Visao geral</p>
+            <h2 className="mt-1 text-xl font-black text-slate-100">A rede transforma agenda em proximas acoes.</h2>
+            <p className="mt-2 text-sm font-semibold leading-6 text-slate-400">Nesta demonstracao, 10 contatos formam conexoes por especialidade, cidade, demanda e solucao.</p>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+              {['3 oportunidades de match', '4 contatos para follow-up', '6 tags com alta recorrencia', '2 grupos ativos'].map((item) => (
+                <div key={item} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3 text-sm font-black text-slate-200">{item}</div>
+              ))}
+            </div>
+          </div>
+          <div className="glass-panel rounded-lg p-5">
+            <p className="text-xs font-black uppercase tracking-widest text-amber-300">Proxima acao</p>
+            <p className="mt-2 text-base font-black text-slate-100">Conectar Camila e Henrique</p>
+            <p className="mt-1 text-sm font-semibold leading-6 text-slate-400">Branding e fotografia corporativa aparecem como servicos complementares.</p>
+            <button type="button" onClick={() => setActiveSection('graphs')} className="secondary-button mt-4 h-10 rounded-lg px-3 text-xs font-black">Abrir conexao no grafo</button>
+          </div>
+        </section>
+      ) : null}
+
+      {activeSection === 'agenda' ? (
+        <section className="glass-panel rounded-lg p-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div><p className="text-xs font-black uppercase tracking-widest text-cyan-300">Agenda demonstrativa</p><h2 className="mt-1 text-xl font-black text-slate-100">Busque contatos e especialidades</h2></div>
+            <input value={demoQuery} onChange={(event) => setDemoQuery(event.target.value)} className="field-input h-10 sm:w-72" placeholder="Nome, servico ou cidade" />
+          </div>
+          <div className="mt-4 grid gap-2 md:grid-cols-2">
+            {visibleDemoItems.map((item) => <article key={item.id} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3"><p className="font-black text-slate-100">{item.name}</p><p className="mt-1 text-sm font-semibold text-slate-400">{item.service} · {item.city}</p><p className="mt-2 text-xs font-black text-cyan-200">#{item.tags[0]}</p></article>)}
+          </div>
+        </section>
+      ) : null}
+
+      {activeSection === 'graphs' ? <section className="glass-panel rounded-lg p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-300">Escolha a perspectiva</p>
+            <p className="mt-1 text-sm font-semibold text-slate-400">Os controles abaixo usam o mesmo canvas interativo da aplicacao.</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {[
+              ['private', 'Privado'],
+              ['public', 'Publico'],
+              ['group', 'Grupo'],
+            ].map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setActiveGraph(id)}
+                className={['rounded-lg px-3 py-2 text-xs font-black', activeGraph === id ? 'bg-cyan-400 text-slate-950' : 'border border-slate-700 text-slate-300'].join(' ')}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </section> : null}
+
+      {activeSection === 'graphs' ? <DeferredGraphWorkspace
+        key={activeGraph}
+        contextLabel={graphMeta.label}
+        title={graphMeta.title}
+        description={graphMeta.description}
+        items={graphItems}
+        emptyLabel="A demonstracao sempre inclui contatos de exemplo."
+      /> : null}
+
+      {activeSection === 'network' ? (
+        <section className="glass-panel rounded-lg p-4"><p className="text-xs font-black uppercase tracking-widest text-cyan-300">Rede publica</p><h2 className="mt-1 text-xl font-black text-slate-100">Perfis e servicos visiveis</h2><div className="mt-4 grid gap-2 md:grid-cols-3">{graphItems.slice(0, 6).map((item) => <article key={item.id} className="rounded-lg border border-slate-800 bg-slate-950/35 p-3"><p className="font-black text-slate-100">{item.name}</p><p className="mt-1 text-sm font-semibold text-slate-400">{item.service}</p><span className="mt-3 inline-block rounded-full bg-cyan-400/10 px-2 py-1 text-[10px] font-black text-cyan-200">perfil visivel</span></article>)}</div></section>
+      ) : null}
+
+      {activeSection === 'groups' ? (
+        <section className="grid gap-3 md:grid-cols-2"><article className="glass-panel rounded-lg p-4"><p className="text-xs font-black uppercase tracking-widest text-cyan-300">Grupo</p><h2 className="mt-1 text-xl font-black text-slate-100">Parceiros de crescimento</h2><p className="mt-2 text-sm font-semibold leading-6 text-slate-400">8 membros, 10 contatos compartilhados e conversas centralizadas por contexto.</p><button type="button" onClick={() => { setActiveGraph('group'); setActiveSection('graphs') }} className="secondary-button mt-4 h-10 rounded-lg px-3 text-xs font-black">Ver grafo do grupo</button></article><article className="glass-panel rounded-lg p-4"><p className="text-xs font-black uppercase tracking-widest text-amber-300">Colaboracao</p><p className="mt-2 text-base font-black text-slate-100">Campos, mensagens e contatos compartilhados</p><p className="mt-1 text-sm font-semibold leading-6 text-slate-400">A demonstracao mostra a estrutura sem registrar nenhuma alteracao.</p></article></section>
+      ) : null}
+
+      {activeSection === 'operations' ? (
+        <section className="grid gap-3 md:grid-cols-3">{[['Importacao', 'Google, CSV e historico de importacoes'], ['CRM', 'Pipeline, follow-up e prioridades'], ['Configuracoes', 'Perfil, conexoes, notificacoes e campos personalizados']].map(([title, text]) => <article key={title} className="glass-panel rounded-lg p-4"><p className="text-xs font-black uppercase tracking-widest text-cyan-300">Modulo</p><h2 className="mt-1 text-lg font-black text-slate-100">{title}</h2><p className="mt-2 text-sm font-semibold leading-6 text-slate-400">{text}</p><span className="mt-4 inline-block text-xs font-black text-slate-500">Disponivel apos entrar com Google</span></article>)}</section>
+      ) : null}
+
+      <p className="text-center text-xs font-semibold text-slate-500">Modo demonstracao: os filtros e o grafo funcionam normalmente, mas nenhuma informacao e salva.</p>
+    </div>
+  )
+}
+*/
+
 function DeferredNetworkGraphMap(props) {
   return (
     <Suspense fallback={<NetworkGraphMapLoading />}>
@@ -3965,13 +4159,13 @@ function DashboardAction({ icon: Icon, title, description, onClick }) {
   )
 }
 
-function ContactDetailPage({ contact, onEdit, onNavigate }) {
+function ContactDetailPage({ contact, onEdit, onNavigate, backPath }) {
   if (!contact) {
     return (
       <div className="space-y-4">
-        <button type="button" onClick={() => onNavigate(ROUTES.AGENDA)} className="inline-flex items-center gap-2 text-sm font-black text-slate-500">
+        <button type="button" onClick={() => onNavigate(backPath || ROUTES.AGENDA)} className="inline-flex items-center gap-2 text-sm font-black text-slate-500">
           <ArrowLeft size={16} />
-          Agenda
+          Voltar
         </button>
         <div className="glass-panel rounded-lg p-5">
           <p className="text-sm font-black text-slate-100">Contato não encontrado.</p>
@@ -4006,9 +4200,9 @@ function ContactDetailPage({ contact, onEdit, onNavigate }) {
 
   return (
     <div className="space-y-4">
-      <button type="button" onClick={() => onNavigate(ROUTES.AGENDA)} className="inline-flex items-center gap-2 text-sm font-black text-slate-500">
+      <button type="button" onClick={() => onNavigate(backPath || ROUTES.AGENDA)} className="inline-flex items-center gap-2 text-sm font-black text-slate-500">
         <ArrowLeft size={16} />
-        Agenda
+        Voltar
       </button>
 
       <section className="glass-panel rounded-lg p-4">
@@ -4522,6 +4716,21 @@ function contactPotentialMatches(contact) {
   return Array.isArray(contact?.potential_matches) ? contact.potential_matches : []
 }
 
+function searchResultHeadline(result, kind = 'private') {
+  if (!result) return ''
+  const name = String(result?.name || '').trim()
+  const service = String(result?.service || '').trim()
+  const demand = String(result?.demand || '').trim()
+  const solves = String(result?.solves || '').trim()
+  const tags = kind === 'private' ? contactTags(result) : tagList(result?.tags)
+  const bits = []
+  if (service) bits.push(service)
+  if (demand) bits.push(`demanda: ${demand.slice(0, 96)}`)
+  else if (solves) bits.push(`resolve: ${solves.slice(0, 96)}`)
+  else if (tags.length) bits.push(`tags: ${tags.slice(0, 3).join(', ')}`)
+  return name ? `${name} · ${bits.filter(Boolean).join(' · ')}`.trim() : bits.filter(Boolean).join(' · ')
+}
+
 function semanticSearchIntent(query) {
   const normalized = normalize(query)
   if (!normalized.trim()) return 'general'
@@ -4641,6 +4850,13 @@ function buildLocalSearchInsights(query, privateResults, publicResults) {
   const complementary = privateResults.filter((item) => contactPotentialMatches(item).length)
   const publicPeople = publicResults.filter((profile) => (profile.kind ?? 'group') === 'person')
   const publicGroups = publicResults.filter((profile) => (profile.kind ?? 'group') !== 'person')
+  const topPrivate = privateResults[0]
+  const topPublic = publicResults[0]
+
+  if (topPrivate) {
+    const headline = searchResultHeadline(topPrivate, 'private')
+    if (headline) insights.push(`Melhor resultado privado: ${headline}.`)
+  }
 
   if (linkedContacts.length) {
     insights.push(`${linkedContacts.length} contato(s) privado(s) têm vínculo com usuário real ou perfil público da plataforma.`)
@@ -4649,6 +4865,10 @@ function buildLocalSearchInsights(query, privateResults, publicResults) {
     const top = complementary[0]
     const preview = contactPotentialMatches(top).slice(0, 2).map((item) => item.name).join(', ')
     insights.push(preview ? `${top.name} apareceu com complementaridade forte para ${preview}.` : `${complementary.length} contato(s) privados mostram potencial de match.`)
+  }
+  if (topPublic) {
+    const headline = searchResultHeadline(topPublic, 'public')
+    if (headline) insights.push(`Melhor resultado público: ${headline}.`)
   }
   if (publicPeople.length) {
     insights.push(`${publicPeople.length} perfil(is) público(s) pessoal(is) entraram no radar para "${normalizedQuery}".`)
@@ -4812,10 +5032,15 @@ function graphLocationCoords(person, fallbackAddress = '') {
 }
 
 function buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser, groups, groupContactsById }) {
+  const safeContacts = Array.isArray(contacts) ? contacts : []
+  const safePublicProfiles = Array.isArray(publicProfiles) ? publicProfiles : []
+  const safeUsers = Array.isArray(users) ? users : []
+  const safeGroups = Array.isArray(groups) ? groups : []
+  const safeGroupContactsById = groupContactsById && typeof groupContactsById === 'object' ? groupContactsById : {}
   const groupIndex = new globalThis.Map()
 
-  groups.forEach((group) => {
-    const groupContacts = groupContactsById[group.id] ?? []
+  safeGroups.forEach((group) => {
+    const groupContacts = Array.isArray(safeGroupContactsById[group.id]) ? safeGroupContactsById[group.id] : []
     groupContacts.forEach((contact) => {
       const key = `${contact.owner_id}:${contact.id}`
       const current = groupIndex.get(key) ?? []
@@ -4824,8 +5049,8 @@ function buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser
     })
   })
 
-  const baseRecords = contacts.map((contact) => {
-    const link = resolveContactPlatformLink({ contact, publicProfiles, users, currentUser })
+  const baseRecords = safeContacts.map((contact) => {
+    const link = resolveContactPlatformLink({ contact, publicProfiles: safePublicProfiles, users: safeUsers, currentUser })
     const groupsForContact = groupIndex.get(`${contact.owner_id}:${contact.id}`) ?? []
     const location = graphLocationCoords(contact, contact.address || contact.city || '')
     const graphPoint = graphPositionFromCoords(location.coords)
@@ -4865,8 +5090,11 @@ function buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser
     }
   })
 
-  const offerSignalsById = new Map(baseRecords.map((record) => [record.id, new Set(contactOfferSignals(record))]))
-  const demandSignalsById = new Map(baseRecords.map((record) => [record.id, new Set(contactComplementaritySignals(record))]))
+  // Match suggestions are quadratic. Keep the interactive graph responsive on large agendas.
+  const clientMatchRecords = baseRecords.slice(0, 160)
+  const offerSignalsById = new globalThis.Map(clientMatchRecords.map((record) => [record.id, new Set(contactOfferSignals(record))]))
+  const demandSignalsById = new globalThis.Map(clientMatchRecords.map((record) => [record.id, new Set(contactComplementaritySignals(record))]))
+  const clientMatchIds = new Set(clientMatchRecords.map((record) => record.id))
 
   return baseRecords.map((record) => {
     const backendMatches = contactPotentialMatches(record.raw).map((match) => ({
@@ -4877,10 +5105,11 @@ function buildPrivateGraphRecords({ contacts, publicProfiles, users, currentUser
       reason: match.reason,
     }))
     if (backendMatches.length) return { ...record, potentialMatches: backendMatches.slice(0, 4) }
+    if (!clientMatchIds.has(record.id)) return { ...record, potentialMatches: [] }
     const matches = []
     const demandSignals = demandSignalsById.get(record.id) ?? new Set()
     if (!demandSignals.size) return { ...record, potentialMatches: [] }
-    baseRecords.forEach((candidate) => {
+    clientMatchRecords.forEach((candidate) => {
       if (candidate.id === record.id) return
       const offerSignals = offerSignalsById.get(candidate.id) ?? new Set()
       const overlap = [...demandSignals].filter((signal) => offerSignals.has(signal)).slice(0, 3)
@@ -5025,8 +5254,8 @@ function buildGroupGraphRecords({ group, members, contacts, publicProfiles, user
     }
   })
   const allRecords = [...memberRecords, ...sharedContactRecords]
-  const offerSignalsById = new Map(allRecords.map((record) => [record.id, new Set(contactOfferSignals(record))]))
-  const demandSignalsById = new Map(allRecords.map((record) => [record.id, new Set(contactComplementaritySignals(record))]))
+  const offerSignalsById = new globalThis.Map(allRecords.map((record) => [record.id, new Set(contactOfferSignals(record))]))
+  const demandSignalsById = new globalThis.Map(allRecords.map((record) => [record.id, new Set(contactComplementaritySignals(record))]))
 
   return allRecords.map((record) => {
     const matches = []
@@ -5044,8 +5273,11 @@ function buildGroupGraphRecords({ group, members, contacts, publicProfiles, user
 }
 
 function buildPublicGraphRecords({ publicProfiles, contacts }) {
-  return publicProfiles.map((profile) => {
-    const internalMatch = contacts.find((contact) => contactMatchesPublicProfile(contact, profile))
+  const safePublicProfiles = Array.isArray(publicProfiles) ? publicProfiles : []
+  const safeContacts = Array.isArray(contacts) ? contacts : []
+
+  return safePublicProfiles.map((profile) => {
+    const internalMatch = safeContacts.find((contact) => contactMatchesPublicProfile(contact, profile))
     const kind = (profile.kind ?? 'group') === 'person' ? 'person' : 'service'
     const location = graphLocationCoords(profile, profile.area || profile.service || profile.name || '')
     const graphPoint = graphPositionFromCoords(location.coords)
@@ -6438,7 +6670,7 @@ function ApiDocsPage({ onNavigate }) {
         <div className="mb-4 rounded-lg border border-cyan-400/15 bg-cyan-400/10 p-3">
           <p className="text-xs font-black uppercase tracking-widest text-cyan-300">Notas de produção</p>
           <p className="mt-1 text-sm font-semibold text-slate-400">
-            Use Bearer token do Supabase nas rotas privadas. Em produção, configure `APP_ENV=production` com `SUPABASE_URL` ou `SUPABASE_JWT_SECRET`; sem isso, o backend bloqueia fallback local.
+            O login usa Google e a sessão fica salva localmente neste navegador. Em produção, a API continua precisando de configuração de banco e CORS corretos.
           </p>
         </div>
         <div className="grid gap-3 md:grid-cols-2">
@@ -6471,7 +6703,30 @@ function ApiDocsPage({ onNavigate }) {
   )
 }
 
-function ImportContactsPage({ user, contacts, importJobs, isImporting, onImportGoogleContacts, onImportFile, onNavigate }) {
+function importIntegrationStatusMeta(status) {
+  switch (status) {
+    case 'implemented':
+      return {
+        label: 'Disponível',
+        tone: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-100',
+        icon: CheckCircle,
+      }
+    case 'blocked_by_credentials':
+      return {
+        label: 'Bloqueado por credenciais',
+        tone: 'border-amber-400/20 bg-amber-500/10 text-amber-100',
+        icon: Lock,
+      }
+    default:
+      return {
+        label: 'Em preparação',
+        tone: 'border-slate-700 bg-slate-950/60 text-slate-300',
+        icon: Circle,
+      }
+  }
+}
+
+function ImportContactsPage({ user, contacts, importJobs, importIntegrations, isImporting, onImportGoogleContacts, onImportFile, onNavigate }) {
   const fileInputRef = useRef(null)
   const googleConnected = hasGoogleConnection(user)
   const recentJobs = Array.isArray(importJobs) ? importJobs.slice(0, 6) : []
@@ -6524,6 +6779,40 @@ function ImportContactsPage({ user, contacts, importJobs, isImporting, onImportG
           </button>
         </article>
       </section>
+
+      {Array.isArray(importIntegrations) && importIntegrations.length ? (
+        <section className="glass-panel rounded-lg p-4">
+          <div className="mb-3">
+            <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Integrações nativas</p>
+            <h2 className="mt-1 text-base font-black text-slate-100">Preparadas, mas travadas por credenciais</h2>
+            <p className="mt-1 text-sm font-semibold text-slate-500">Esta tela mostra o que ainda depende de provedor. O restante do fluxo de importação já está pronto para uso.</p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-3">
+            {importIntegrations.map((integration) => {
+              const meta = importIntegrationStatusMeta(integration.status)
+              const StatusIcon = meta.icon
+              return (
+                <article key={integration.provider} className="rounded-lg border border-slate-800 bg-slate-950/35 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="truncate text-sm font-black text-slate-100">{integration.label}</h3>
+                      <p className="mt-1 text-xs font-semibold text-slate-500">{integration.description}</p>
+                    </div>
+                    <span className={['inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-widest', meta.tone].join(' ')}>
+                      <StatusIcon size={12} />
+                      {meta.label}
+                    </span>
+                  </div>
+                  {integration.blocked_reason ? (
+                    <p className="mt-3 text-sm font-semibold leading-6 text-amber-100/90">{integration.blocked_reason}</p>
+                  ) : null}
+                  {integration.setup_hint ? <p className="mt-2 text-sm font-semibold leading-6 text-slate-500">{integration.setup_hint}</p> : null}
+                </article>
+              )
+            })}
+          </div>
+        </section>
+      ) : null}
 
       <section className="glass-panel rounded-lg p-4">
         <div className="mb-4">
@@ -10562,10 +10851,20 @@ function GraphPage({ contacts, publicProfiles, users, groups, groupContactsById,
         title="Grafo privado"
         description="Leia sua agenda como rede sem misturar com grupos: tags, fontes, DDDs, demandas, soluções e vínculos com perfis públicos."
         action={
-          <button type="button" onClick={() => onNavigate(ROUTES.MAP)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
-            <MapPin size={17} />
-            Ver mapa
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => onNavigate(ROUTES.DASHBOARD)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+              <LayoutGrid size={17} />
+              Dashboard
+            </button>
+            <button type="button" onClick={() => onNavigate(ROUTES.IMPORT)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+              <Upload size={17} />
+              Importar contatos
+            </button>
+            <button type="button" onClick={() => onNavigate(ROUTES.MAP)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+              <MapPin size={17} />
+              Ver mapa
+            </button>
+          </div>
         }
       />
       <DeferredGraphWorkspace
@@ -10574,6 +10873,7 @@ function GraphPage({ contacts, publicProfiles, users, groups, groupContactsById,
         description="Filtre sua base por tag, fonte, DDD, demanda, solução, vínculo e contexto público com leitura semântica."
         items={privateGraphItems}
         emptyLabel="Nenhum contato corresponde aos filtros atuais."
+        onNavigate={onNavigate}
         onOpenItem={(item) => {
           if (item.actionKind === 'contact' && item.contactId) {
             onNavigate(`${ROUTES.CONTACT}/${item.contactId}`)
@@ -12161,66 +12461,45 @@ function geocodeAddress(geocoder, address) {
   })
 }
 
-function LoginPage({ onGoogleLogin, onAppleLogin, onMagicLink, supabaseAuthEnabled, authStatus, authStatusChecked, authStatusError, theme, onToggleTheme }) {
-  const [email, setEmail] = useState('')
-  const [errors, setErrors] = useState({})
+function LoginPage({ user, onGoogleLogin, onSwitchAccount, theme, onToggleTheme }) {
   const [status, setStatus] = useState('')
   const [isGoogleLoading, setIsGoogleLoading] = useState(false)
-  const [isAppleLoading, setIsAppleLoading] = useState(false)
-  const [isMagicLoading, setIsMagicLoading] = useState(false)
-  const authWarnings = Array.isArray(authStatus?.warnings) ? authStatus.warnings : []
-  const productionAuthReady = Boolean(authStatus?.production_auth_ready)
-  const authActionEnabled = supabaseAuthEnabled && (!import.meta.env.PROD || productionAuthReady)
 
   return (
     <AuthLayout
-      title="Sua agenda vira uma rede de oportunidades"
-      description="O Network Intelligence CRM organiza seus contatos, acompanha follow-ups, conecta perfis públicos e ajuda você a encontrar a pessoa certa pelo contexto certo."
+      title="Entre com sua conta Google"
+      description="Use apenas Google para abrir o Network Intelligence CRM. Depois do login, o app salva sua sessão localmente neste navegador."
       theme={theme}
       onToggleTheme={onToggleTheme}
     >
-      <form
-        onSubmit={(event) => {
-          event.preventDefault()
-        }}
-        noValidate
-        className="space-y-3"
-      >
-        <div className={['rounded-lg border px-3 py-3 text-xs font-bold', supabaseAuthEnabled ? 'border-cyan-400/20 bg-cyan-500/10 text-cyan-100' : 'border-amber-400/20 bg-amber-500/10 text-amber-100'].join(' ')}>
-          <p>{supabaseAuthEnabled ? 'Esta instalação está em modo Supabase-first.' : 'Faltam variáveis do Supabase no frontend.'}</p>
-          <p className={supabaseAuthEnabled ? 'mt-1 text-cyan-100/75' : 'mt-1 text-amber-100/75'}>
-            {supabaseAuthEnabled
-              ? 'Entre com Google, Apple ou magic link. Depois disso, o app abre a etapa de perfil se ainda faltar completar cadastro.'
-              : 'Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para habilitar OAuth e magic link.'}
-          </p>
+      <div className="space-y-3">
+        {user ? (
+          <div className="rounded-lg border border-cyan-400/20 bg-cyan-500/10 px-3 py-3 text-xs font-bold text-cyan-100">
+            <p>Há uma conta carregada neste navegador: {user.email || user.name || 'usuário atual'}.</p>
+            <p className="mt-1 text-cyan-100/75">Se esta for a conta errada, troque antes de seguir.</p>
+            <button
+              type="button"
+              onClick={async () => {
+                setStatus('Trocando de conta...')
+                try {
+                  await onSwitchAccount?.()
+                } catch (error) {
+                  setStatus(error.message || 'Não foi possível trocar de conta.')
+                }
+              }}
+              className="secondary-button mt-3 inline-flex h-9 items-center justify-center gap-2 rounded-lg px-3 text-[11px] font-black"
+            >
+              <LogOut size={14} />
+              Usar outra conta
+            </button>
+          </div>
+        ) : null}
+        <div className="rounded-lg border border-slate-800 bg-slate-950/45 px-3 py-3 text-xs font-bold text-slate-400">
+          O acesso do app agora é exclusivo com Google. Não há login por Supabase, magic link, Apple ou senha.
         </div>
-        {authStatus ? (
-          <div className={['rounded-lg border px-3 py-3 text-xs font-bold', productionAuthReady ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-100' : 'border-amber-400/20 bg-amber-500/10 text-amber-100'].join(' ')}>
-            <p>{productionAuthReady ? 'Backend pronto para auth de produção.' : 'Backend ainda não está pronto para auth de produção.'}</p>
-            <p className={productionAuthReady ? 'mt-1 text-emerald-100/75' : 'mt-1 text-amber-100/75'}>
-              {productionAuthReady
-                ? `Banco ${authStatus.database_dialect || 'desconhecido'} com RLS ativo em ${authStatus.rls_enabled_tables || 0}/${authStatus.rls_total_tables || 0} tabelas monitoradas.`
-                : (authWarnings[0] || 'Revise variáveis do Supabase, Postgres/Supabase e políticas RLS antes do go-live.')}
-            </p>
-          </div>
-        ) : null}
-        {!authStatus && authStatusChecked && authStatusError ? (
-          <div className="rounded-lg border border-amber-400/20 bg-amber-500/10 px-3 py-3 text-xs font-bold text-amber-100">
-            <p>Não consegui validar o backend de autenticação.</p>
-            <p className="mt-1 text-amber-100/75">{authStatusError}</p>
-          </div>
-        ) : null}
-        <Field label="Email para magic link" required error={errors.email}>
-          <input value={email} onChange={(event) => setEmail(event.target.value)} className={inputClass(errors.email)} type="email" placeholder="você@email.com" />
-        </Field>
-        {status ? (
-          <p className={['rounded-lg border p-3 text-sm font-bold', status.includes('Enviamos') || status.includes('Abrindo') ? 'border-cyan-400/30 bg-cyan-500/10 text-cyan-100' : 'border-rose-400/30 bg-rose-500/10 text-rose-200'].join(' ')}>
-            {status}
-          </p>
-        ) : null}
         <button
           type="button"
-          disabled={isGoogleLoading || !authActionEnabled}
+          disabled={isGoogleLoading || !GOOGLE_AUTH_ENABLED}
           onClick={async () => {
             setStatus('Abrindo Google...')
             setIsGoogleLoading(true)
@@ -12235,52 +12514,19 @@ function LoginPage({ onGoogleLogin, onAppleLogin, onMagicLink, supabaseAuthEnabl
           className="secondary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
         >
           <Cloud size={18} />
-          {isGoogleLoading ? 'Conectando...' : 'Entrar com Google'}
+          {isGoogleLoading ? 'Conectando...' : 'Continuar com Google'}
         </button>
-        <button
-          type="button"
-          disabled={isMagicLoading || !authActionEnabled}
-          onClick={async () => {
-            if (!email.trim()) {
-              setErrors((current) => ({ ...current, email: 'Informe o email para receber o link.' }))
-              return
-            }
-            setStatus('Enviando magic link...')
-            setIsMagicLoading(true)
-            try {
-              await onMagicLink(email.trim())
-              setStatus('Enviamos um link de acesso para seu email.')
-            } catch (error) {
-              setStatus(error.message || 'Não foi possível enviar o magic link.')
-            } finally {
-              setIsMagicLoading(false)
-            }
-          }}
-          className="secondary-button inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <Sparkles size={18} />
-          {isMagicLoading ? 'Enviando...' : 'Receber magic link'}
-        </button>
-        <button
-          type="button"
-          disabled={isAppleLoading || !authActionEnabled}
-          onClick={async () => {
-            setStatus('Abrindo Apple...')
-            setIsAppleLoading(true)
-            try {
-              await onAppleLogin()
-            } catch (error) {
-              setStatus(error.message || 'Não foi possível entrar com Apple.')
-            } finally {
-              setIsAppleLoading(false)
-            }
-          }}
-          className="secondary-button inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg text-sm font-black disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <Lock size={17} />
-          {isAppleLoading ? 'Conectando...' : 'Entrar com Apple'}
-        </button>
-      </form>
+        {status ? (
+          <p className={['rounded-lg border p-3 text-sm font-bold', status.includes('Abrindo') || status.includes('Trocando') ? 'border-cyan-400/30 bg-cyan-500/10 text-cyan-100' : 'border-rose-400/30 bg-rose-500/10 text-rose-200'].join(' ')}>
+            {status}
+          </p>
+        ) : null}
+        {!GOOGLE_AUTH_ENABLED ? (
+          <p className="rounded-lg border border-amber-400/20 bg-amber-500/10 px-3 py-3 text-xs font-bold text-amber-100">
+            Configure `VITE_GOOGLE_CLIENT_ID` no frontend para liberar o login.
+          </p>
+        ) : null}
+      </div>
     </AuthLayout>
   )
 }
@@ -13093,6 +13339,52 @@ function Toast({ message }) {
   )
 }
 
+class RouteErrorBoundary extends ReactLib.Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error) {
+    console.error('Route render error', error)
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children
+
+    return (
+      <section className="glass-panel rounded-lg p-5">
+        <p className="text-xs font-black uppercase tracking-widest text-rose-300">Erro de renderização</p>
+        <h2 className="mt-2 text-xl font-black text-slate-100">Esta área travou ao abrir</h2>
+        <p className="mt-2 text-sm font-semibold leading-6 text-slate-500">
+          O conteúdo da página encontrou um erro na renderização. Agora você vê esta saída em vez de tela branca.
+        </p>
+        <p className="mt-3 rounded-lg border border-rose-400/20 bg-rose-500/10 px-3 py-2 font-mono text-xs text-rose-100">
+          {String(this.state.error?.message || 'Erro sem mensagem.')}
+        </p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button type="button" onClick={() => this.props.onNavigate?.(ROUTES.DASHBOARD)} className="primary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+            <LayoutGrid size={16} />
+            Dashboard
+          </button>
+          <button type="button" onClick={() => this.props.onNavigate?.(ROUTES.GRAPH)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+            <Route size={16} />
+            Grafo privado
+          </button>
+          <button type="button" onClick={() => this.props.onNavigate?.(ROUTES.AGENDA)} className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-black">
+            <ContactRound size={16} />
+            Agenda
+          </button>
+        </div>
+      </section>
+    )
+  }
+}
+
 function getRecommendedGroups(publicProfiles, user, query) {
   const interests = user?.interests ?? []
   const filtered = publicProfiles.filter((profile) => matchText(query, [profile.name, profile.service, profile.area, profile.category?.label]))
@@ -13121,21 +13413,20 @@ export default function App() {
   const [chatThreads, setChatThreads] = useState(() => Array.isArray(initialOfflineData?.chatThreads) ? initialOfflineData.chatThreads : [])
   const [currentChatThreadId, setCurrentChatThreadId] = useState(() => initialOfflineData?.currentChatThreadId ?? null)
   const [importJobs, setImportJobs] = useState(() => Array.isArray(initialOfflineData?.importJobs) ? initialOfflineData.importJobs : [])
+  const [importIntegrations, setImportIntegrations] = useState(() => Array.isArray(initialOfflineData?.importIntegrations) ? initialOfflineData.importIntegrations : [])
   const [backendOnline, setBackendOnline] = useState(false)
   const [browserOnline, setBrowserOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine)
   const [syncNonce, setSyncNonce] = useState(0)
   const [pendingMutations, setPendingMutations] = useState(() => loadOfflineMutations(user))
   const [theme, setTheme] = useState(loadThemePreference)
   const [onboardingComplete, setOnboardingComplete] = useState(() => loadOnboardingCompletion(user))
-  const [authStatus, setAuthStatus] = useState(null)
-  const [authStatusChecked, setAuthStatusChecked] = useState(false)
-  const [authStatusError, setAuthStatusError] = useState('')
   const [queryDraft, setQueryDraft] = useState('')
   const [searchResults, setSearchResults] = useState(null)
   const [isSearching, setIsSearching] = useState(false)
   const [searchError, setSearchError] = useState('')
   const [route, setRoute] = useState(parsePath)
   const [recents, setRecents] = useState(loadRecentSearches)
+  const lastNonDetailPathRef = useRef(ROUTES.DASHBOARD)
   const emptyContactForm = {
     name: '',
     phone: '',
@@ -13189,7 +13480,6 @@ export default function App() {
     typeof window !== 'undefined' && 'Notification' in window ? window.Notification.permission : 'unsupported',
   )
   const [chatMessages, setChatMessages] = useState(() => Array.isArray(initialOfflineData?.chatMessages) && initialOfflineData.chatMessages.length ? initialOfflineData.chatMessages : defaultChatMessages())
-  const lastSupabaseUserRef = useRef('')
   const autoPushInFlightRef = useRef(false)
 
   function refreshPendingMutations(owner = user) {
@@ -13233,6 +13523,7 @@ export default function App() {
     setChatMessages(Array.isArray(snapshot.chatMessages) && snapshot.chatMessages.length ? snapshot.chatMessages : defaultChatMessages())
     setCurrentChatThreadId(snapshot.currentChatThreadId ?? null)
     setImportJobs(Array.isArray(snapshot.importJobs) ? snapshot.importJobs : [])
+    setImportIntegrations(Array.isArray(snapshot.importIntegrations) ? snapshot.importIntegrations : [])
     return true
   }
 
@@ -13436,32 +13727,6 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    let cancelled = false
-
-    async function loadAuthStatus() {
-      try {
-        const status = await apiRequest('/api/auth/status')
-        if (!cancelled) {
-          setAuthStatus(status)
-          setAuthStatusError('')
-          setAuthStatusChecked(true)
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setAuthStatus(null)
-          setAuthStatusError(error.message || 'API de status não respondeu.')
-          setAuthStatusChecked(true)
-        }
-      }
-    }
-
-    void loadAuthStatus()
-    return () => {
-      cancelled = true
-    }
-  }, [browserOnline, user?.id, user?.email])
-
-  useEffect(() => {
     if (!user || notificationPermission !== 'granted' || !browserOnline) return undefined
     let cancelled = false
 
@@ -13521,68 +13786,6 @@ export default function App() {
       metaThemeColor.setAttribute('content', theme === 'light' ? '#f6f8fc' : '#050812')
     }
   }, [theme])
-
-  useEffect(() => {
-    const client = getSupabaseClient()
-    if (!client) return undefined
-    let active = true
-
-    async function syncSession(session) {
-      if (!active) return
-      if (!session?.user?.email) {
-        clearStoredSessionUser()
-        setUser(null)
-        setPendingMutations([])
-        return
-      }
-      if (lastSupabaseUserRef.current === session.user.id && user?.email === session.user.email) return
-      lastSupabaseUserRef.current = session.user.id
-      try {
-        const response = await apiRequest('/api/auth/session', {
-          method: 'POST',
-          body: JSON.stringify({
-            sub: session.user.id,
-            email: session.user.email,
-            name: session.user.user_metadata?.full_name || session.user.user_metadata?.name || session.user.email,
-            picture: session.user.user_metadata?.avatar_url || '',
-            auth_provider: inferSupabaseAuthProvider(session),
-          }),
-        })
-        const loggedUser = apiUserToLocal(response)
-        if (!loggedUser || !active) return
-        setBackendOnline(true)
-        rememberUser(loggedUser, Number(session.expires_at || 0) * 1000)
-        if (isCadastroIncomplete(loggedUser)) {
-          navigate(ROUTES.REGISTER)
-        } else if (parsePath().page === 'login') {
-          navigate(ROUTES.DASHBOARD)
-        }
-      } catch {
-        if (active) {
-          setBackendOnline(false)
-          showToast('Sessão Supabase ativa, mas não consegui sincronizar o perfil.')
-        }
-      }
-    }
-
-    client.auth.getSession().then(({ data }) => syncSession(data.session))
-    const { data } = client.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_OUT') {
-        lastSupabaseUserRef.current = ''
-        clearStoredSessionUser()
-        setUser(null)
-        setPendingMutations([])
-        setRoute({ page: 'login', categoryId: null })
-        return
-      }
-      syncSession(session)
-    })
-
-    return () => {
-      active = false
-      data.subscription.unsubscribe()
-    }
-  }, [])
 
   useEffect(() => {
     if (!user) return undefined
@@ -13649,6 +13852,7 @@ export default function App() {
         const customFieldsPath = user ? `/api/custom-fields?user_id=${encodeURIComponent(contactOwnerId(user))}&scope_type=user&scope_id=` : null
         const chatThreadsPath = user ? `/api/chat/threads?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
         const importJobsPath = user ? `/api/import-jobs?user_id=${encodeURIComponent(contactOwnerId(user))}` : null
+        const importIntegrationsPath = '/api/import-integrations'
         const [remoteContacts, remoteProfiles, remoteUsers, remoteDuplicates, remoteGroups, remoteCustomFields, remoteChatThreads, remoteImportJobs] = await Promise.all([
           contactsPath ? apiRequest(contactsPath) : Promise.resolve([]),
           apiRequest('/api/public-profiles'),
@@ -13659,6 +13863,7 @@ export default function App() {
           chatThreadsPath ? apiRequest(chatThreadsPath) : Promise.resolve([]),
           importJobsPath ? apiRequest(importJobsPath) : Promise.resolve([]),
         ])
+        const remoteImportIntegrations = await apiRequest(importIntegrationsPath).catch(() => [])
         if (cancelled) return
         const localUsers = remoteUsers.map(apiUserToLocal).filter(Boolean)
         setContacts(remoteContacts)
@@ -13669,6 +13874,7 @@ export default function App() {
         setCustomFieldDefinitions(remoteCustomFields)
         setChatThreads(remoteChatThreads)
         setImportJobs(remoteImportJobs)
+        setImportIntegrations(remoteImportIntegrations)
         saveOfflineSnapshot(user, {
           contacts: remoteContacts,
           publicProfiles: remoteProfiles,
@@ -13683,6 +13889,7 @@ export default function App() {
           chatMessages,
           currentChatThreadId,
           importJobs: remoteImportJobs,
+          importIntegrations: remoteImportIntegrations,
         })
         setBackendOnline(true)
         if (syncSummary.synced > 0) {
@@ -13724,8 +13931,9 @@ export default function App() {
       chatMessages,
       currentChatThreadId,
       importJobs,
+      importIntegrations,
     })
-  }, [user?.id, user?.email, contacts, publicProfiles, networkUsers, duplicateSuggestions, sharedGroups, groupContactsById, groupMessagesById, customFieldDefinitions, groupCustomFieldsById, chatThreads, chatMessages, currentChatThreadId, importJobs, backendOnline])
+  }, [user?.id, user?.email, contacts, publicProfiles, networkUsers, duplicateSuggestions, sharedGroups, groupContactsById, groupMessagesById, customFieldDefinitions, groupCustomFieldsById, chatThreads, chatMessages, currentChatThreadId, importJobs, importIntegrations, backendOnline])
 
   useEffect(() => {
     if (!user) return
@@ -13848,6 +14056,8 @@ export default function App() {
   }, [toast])
 
   function navigate(path) {
+    const currentPath = `${window.location.pathname}${window.location.search || ''}`
+    lastNonDetailPathRef.current = currentPath
     window.history.pushState({}, '', path)
     setRoute(parsePath())
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -15487,39 +15697,22 @@ export default function App() {
   }
 
   async function loginWithGoogle() {
-    const client = getSupabaseClient()
-    if (!client) {
-      throw new Error('Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para entrar com Google.')
-    }
-    const { error } = await client.auth.signInWithOAuth({
-      provider: 'google',
-      options: { redirectTo: window.location.origin },
+    const { profile } = await getGoogleProfileWithToken()
+    const response = await apiRequest('/api/google-login', {
+      method: 'POST',
+      body: JSON.stringify({
+        sub: profile.sub || profile.email,
+        email: profile.email,
+        name: profile.name || profile.email,
+        picture: profile.picture || '',
+      }),
     })
-    if (error) throw error
-  }
-
-  async function loginWithApple() {
-    const client = getSupabaseClient()
-    if (!client) {
-      throw new Error('Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para entrar com Apple.')
-    }
-    const { error } = await client.auth.signInWithOAuth({
-      provider: 'apple',
-      options: { redirectTo: window.location.origin },
-    })
-    if (error) throw error
-  }
-
-  async function sendMagicLink(email) {
-    const client = getSupabaseClient()
-    if (!client) {
-      throw new Error('Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para usar magic link.')
-    }
-    const { error } = await client.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: window.location.origin },
-    })
-    if (error) throw error
+    const loggedUser = apiUserToLocal(response)
+    if (!loggedUser) throw new Error('Usuário não encontrado.')
+    setBackendOnline(true)
+    rememberUser(loggedUser)
+    showToast('Login realizado com Google.')
+    navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
   }
 
   async function saveUser(nextUser, pendingContacts = [], options = {}) {
@@ -15576,8 +15769,12 @@ export default function App() {
     navigate(options.redirectTo ?? nextRoute)
   }
 
-  function logout() {
-    void getSupabaseClient()?.auth.signOut()
+  async function logout() {
+    try {
+      window.google?.accounts?.id?.disableAutoSelect?.()
+    } catch {
+      // Ignore Google cleanup failures.
+    }
     setUser(null)
     setPendingMutations([])
     clearStoredSessionUser()
@@ -15703,7 +15900,7 @@ export default function App() {
       />
     )
   } else if (effectiveRoute.page === 'login') {
-    page = <LoginPage theme={theme} onToggleTheme={toggleTheme} onGoogleLogin={loginWithGoogle} onAppleLogin={loginWithApple} onMagicLink={sendMagicLink} supabaseAuthEnabled={SUPABASE_AUTH_ENABLED} authStatus={authStatus} authStatusChecked={authStatusChecked} authStatusError={authStatusError} />
+    page = <LoginPage user={user} theme={theme} onToggleTheme={toggleTheme} onGoogleLogin={loginWithGoogle} onSwitchAccount={logout} />
   } else if (effectiveRoute.page === 'register') {
     page = <RegisterPage user={user} theme={theme} onToggleTheme={toggleTheme} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'publicProfile') {
@@ -15750,12 +15947,12 @@ export default function App() {
       />
     )
   } else if (effectiveRoute.page === 'import') {
-    page = <ImportContactsPage user={user} contacts={contactsWithCategory} importJobs={importJobs} isImporting={isImporting} onImportGoogleContacts={importGoogleContactsFromSettings} onImportFile={handleImportFile} onNavigate={navigate} />
+    page = <ImportContactsPage user={user} contacts={contactsWithCategory} importJobs={importJobs} importIntegrations={importIntegrations} isImporting={isImporting} onImportGoogleContacts={importGoogleContactsFromSettings} onImportFile={handleImportFile} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'graph') {
     page = <GraphPage contacts={contactsWithCategory} publicProfiles={publicProfilesWithCategory} users={networkUsers} groups={sharedGroups} groupContactsById={groupContactsById} user={user} onNavigate={navigate} onOpenGroup={setSelectedGroup} />
   } else if (effectiveRoute.page === 'contact') {
     const selectedContact = contactsWithCategory.find((contact) => String(contact.id) === String(effectiveRoute.contactId))
-    page = <ContactDetailPage contact={selectedContact} onEdit={setEditingContact} onNavigate={navigate} />
+    page = <ContactDetailPage contact={selectedContact} onEdit={setEditingContact} onNavigate={navigate} backPath={lastNonDetailPathRef.current} />
   } else if (effectiveRoute.page === 'crm') {
     page = <CrmPage contacts={contactsWithCategory} onEdit={setEditingContact} onCompleteFollowUp={completeFollowUp} onCancelFollowUp={cancelFollowUp} onNavigate={navigate} onAsk={askCopilot} messages={chatMessages} isThinking={isChatThinking} />
   } else if (effectiveRoute.page === 'new') {
@@ -15835,6 +16032,7 @@ export default function App() {
         pendingMutations={pendingMutations}
         recents={recents}
         customFieldDefinitions={customFieldDefinitions}
+        importIntegrations={importIntegrations}
         onNavigate={navigate}
         onRefreshDuplicates={refreshDuplicates}
         onImportGoogleContacts={importGoogleContactsFromSettings}
@@ -15887,7 +16085,9 @@ export default function App() {
       onEnableNotifications={enableNotifications}
     >
       <Toast message={toast} />
-      {page}
+      <RouteErrorBoundary key={`${effectiveRoute.page}:${effectiveRoute.contactId ?? effectiveRoute.groupId ?? effectiveRoute.categoryId ?? ''}`} onNavigate={navigate}>
+        {page}
+      </RouteErrorBoundary>
       {editingContact ? <EditContactModal contact={editingContact} tagSuggestions={tagSuggestions} customFieldDefinitions={customFieldDefinitions} onClose={() => setEditingContact(null)} onSave={saveEditedContact} /> : null}
       {selectedGroup ? <GroupModal profile={selectedGroup} onClose={() => setSelectedGroup(null)} onToast={showToast} /> : null}
     </Shell>

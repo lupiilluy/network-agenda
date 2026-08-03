@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Map, Navigation, Route, Search, SlidersHorizontal, Sparkles, X } from 'lucide-react'
+import { ArrowLeft, Map, Navigation, Route, Search, SlidersHorizontal, Sparkles, Upload, X } from 'lucide-react'
 
 const GRAPH_PALETTE = {
   contact: '#F20574',
@@ -43,6 +43,8 @@ const GRAPH_FILTER_LABELS = {
 }
 
 const GRAPH_SEMANTIC_FILTERS = new Set(['interno', 'grupo', 'publico', 'tag', 'source', 'ddd', 'demand', 'solve', 'match', 'link', 'org'])
+const GRAPH_PREVIEW_LIMIT = 72
+const INITIAL_GRAPH_CONTACT_LIMIT = 5
 
 const fallbackCoordinates = {
   'avenida paulista': { lat: -23.561684, lng: -46.656139 },
@@ -313,7 +315,8 @@ function DetailRow({ label, value }) {
   )
 }
 
-function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, onOpenItem }) {
+function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, onOpenItem, onNavigate }) {
+  const safeItems = Array.isArray(items) ? items : []
   const [query, setQuery] = useState('')
   const [scopeFilter, setScopeFilter] = useState('all')
   const [tagFilter, setTagFilter] = useState('all')
@@ -326,13 +329,13 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [selectedId, setSelectedId] = useState('')
 
-  const tagOptions = useMemo(() => uniqueTextOptions(items.flatMap((item) => item.tags ?? [])), [items])
-  const sourceOptions = useMemo(() => uniqueTextOptions(items.map((item) => item.source)), [items])
-  const dddOptions = useMemo(() => uniqueTextOptions(items.map((item) => item.ddd)), [items])
+  const tagOptions = useMemo(() => uniqueTextOptions(safeItems.flatMap((item) => tagList(item?.tags))), [safeItems])
+  const sourceOptions = useMemo(() => uniqueTextOptions(safeItems.map((item) => item?.source)), [safeItems])
+  const dddOptions = useMemo(() => uniqueTextOptions(safeItems.map((item) => item?.ddd)), [safeItems])
   const groupOptions = useMemo(() => {
     const all = []
-    items.forEach((item) => {
-      ;(item.groupNames ?? []).forEach((groupName, index) => {
+    safeItems.forEach((item) => {
+      tagList(item?.groupNames).forEach((groupName, index) => {
         all.push({ id: item.groupIds?.[index] ?? groupName, name: groupName })
       })
     })
@@ -343,22 +346,22 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
       seen.add(key)
       return true
     })
-  }, [items])
+  }, [safeItems])
 
   const visibleItems = useMemo(() => {
-    return items.filter((item) => {
-      if (query.trim() && !matchText(query, [item.name, item.service, item.city, item.source, item.ddd, item.description, item.demand, item.solves, ...(item.demandTags ?? []), ...(item.tags ?? []), ...(item.groupNames ?? [])])) return false
+    return safeItems.filter((item) => {
+      if (query.trim() && !matchText(query, [item.name, item.service, item.city, item.source, item.ddd, item.description, item.demand, item.solves, ...tagList(item.demandTags), ...tagList(item.tags), ...tagList(item.groupNames)])) return false
       if (scopeFilter !== 'all' && !(item.scopes ?? []).includes(scopeFilter)) return false
-      if (tagFilter !== 'all' && !(item.tags ?? []).some((tag) => normalize(tag) === normalize(tagFilter))) return false
+      if (tagFilter !== 'all' && !tagList(item.tags).some((tag) => normalize(tag) === normalize(tagFilter))) return false
       if (sourceFilter !== 'all' && normalize(item.source) !== normalize(sourceFilter)) return false
       if (dddFilter !== 'all' && String(item.ddd || '') !== String(dddFilter)) return false
       if (groupFilter !== 'all' && !(item.groupIds ?? []).includes(groupFilter)) return false
-      if (onlyDemand && !item.demand?.trim()) return false
-      if (onlySolves && !item.solves?.trim()) return false
+      if (onlyDemand && !String(item.demand ?? '').trim()) return false
+      if (onlySolves && !String(item.solves ?? '').trim()) return false
       if (onlyLinked && !item.linkedPlatform) return false
       return true
     })
-  }, [items, query, scopeFilter, tagFilter, sourceFilter, dddFilter, groupFilter, onlyDemand, onlySolves, onlyLinked])
+  }, [safeItems, query, scopeFilter, tagFilter, sourceFilter, dddFilter, groupFilter, onlyDemand, onlySolves, onlyLinked])
 
   useEffect(() => {
     if (!visibleItems.length) {
@@ -371,9 +374,10 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
   }, [visibleItems, selectedId])
 
   const selectedItem = visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0] ?? null
+  const previewItems = useMemo(() => visibleItems.slice(0, GRAPH_PREVIEW_LIMIT), [visibleItems])
   const graphItems = useMemo(
     () =>
-      visibleItems.map((item) => ({
+      previewItems.map((item) => ({
         id: item.id,
         originalId: item.id,
         name: item.name,
@@ -383,18 +387,18 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
         src: item.source,
         note: [item.demand, item.solves, (item.tags ?? []).slice(0, 3).join(', ')].filter(Boolean).join(' · '),
         cat: item.category?.id ?? graphCatId(item),
-        tags: item.tags ?? [],
+        tags: tagList(item.tags),
         ddd: item.ddd ?? '',
         demand: item.demand ?? '',
         solves: item.solves ?? '',
         scopes: item.scopes ?? [],
       })),
-    [visibleItems],
+    [previewItems],
   )
 
   const summary = {
     nodes: visibleItems.length,
-    tags: new Set(visibleItems.flatMap((item) => item.tags ?? []).filter(Boolean)).size,
+    tags: new Set(visibleItems.flatMap((item) => tagList(item.tags)).filter(Boolean)).size,
     sources: new Set(visibleItems.map((item) => item.source).filter(Boolean)).size,
     ddds: new Set(visibleItems.map((item) => item.ddd).filter(Boolean)).size,
     demand: visibleItems.filter((item) => item.demand?.trim()).length,
@@ -424,6 +428,14 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
     setOnlySolves(false)
     setOnlyLinked(false)
   }
+
+  const hasBaseItems = safeItems.length > 0
+  const emptyStateTitle = hasBaseItems
+    ? 'Nenhum nó corresponde aos filtros atuais.'
+    : 'Seu grafo ainda não tem nós.'
+  const emptyStateDescription = hasBaseItems
+    ? emptyLabel
+    : 'Esta conta ainda não tem contatos suficientes para desenhar a rede. Importe contatos ou volte ao dashboard para ver os primeiros insights.'
 
   return (
     <section className="glass-panel rounded-lg p-4">
@@ -557,10 +569,55 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
             ) : null}
           </div>
 
+          {visibleItems.length > GRAPH_PREVIEW_LIMIT ? (
+            <p className="rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs font-semibold text-amber-100">
+              Exibindo os primeiros {GRAPH_PREVIEW_LIMIT} de {visibleItems.length} itens. Use a busca ou filtros para reduzir a rede exibida.
+            </p>
+          ) : null}
+
           {visibleItems.length ? (
             <NetworkGraph items={graphItems} selectedId={selectedItem?.id} onSelect={setSelectedId} showCategoryFilter={false} label="NETWORK · INTELLIGENCE GRAPH" />
           ) : (
-            <div className="rounded-lg border border-dashed border-slate-800 p-6 text-sm font-semibold text-slate-500">{emptyLabel}</div>
+            <div className="rounded-lg border border-dashed border-slate-800 p-6">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <p className="text-sm font-black text-slate-100">{emptyStateTitle}</p>
+                  <p className="mt-1 text-sm font-semibold leading-6 text-slate-500">{emptyStateDescription}</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {activeFilterCount ? (
+                    <button
+                      type="button"
+                      onClick={clearGraphFilters}
+                      className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-800 px-3 text-xs font-black text-slate-300"
+                    >
+                      <X size={14} />
+                      Limpar filtros
+                    </button>
+                  ) : null}
+                  {onNavigate ? (
+                    <button
+                      type="button"
+                      onClick={() => onNavigate('/dashboard')}
+                      className="secondary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-xs font-black"
+                    >
+                      <ArrowLeft size={14} />
+                      Dashboard
+                    </button>
+                  ) : null}
+                  {onNavigate ? (
+                    <button
+                      type="button"
+                      onClick={() => onNavigate('/import')}
+                      className="primary-button inline-flex h-10 items-center gap-2 rounded-lg px-3 text-xs font-black"
+                    >
+                      <Upload size={14} />
+                      Importar contatos
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
           )}
         </div>
 
@@ -576,11 +633,11 @@ function GraphWorkspace({ title, description, contextLabel, items, emptyLabel, o
                 <p className="mt-1 text-sm font-semibold text-slate-400">{selectedItem.service}</p>
                 <p className="mt-2 text-xs font-semibold text-slate-500">{selectedItem.city}</p>
                 <div className="mt-3 flex flex-wrap gap-1.5">
-                  {(selectedItem.scopes ?? []).map((scope) => <span key={scope} className="rounded-md border border-cyan-400/10 bg-cyan-400/10 px-2 py-1 text-[11px] font-black text-cyan-100">{scope}</span>)}
+                  {tagList(selectedItem.scopes).map((scope) => <span key={scope} className="rounded-md border border-cyan-400/10 bg-cyan-400/10 px-2 py-1 text-[11px] font-black text-cyan-100">{scope}</span>)}
                 </div>
-                {selectedItem.tags?.length ? (
+                {tagList(selectedItem.tags).length ? (
                   <div className="mt-3 flex flex-wrap gap-1.5">
-                    {selectedItem.tags.slice(0, 8).map((tag) => <span key={tag} className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1 text-[11px] font-black text-slate-300">{tag}</span>)}
+                    {tagList(selectedItem.tags).slice(0, 8).map((tag) => <span key={tag} className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1 text-[11px] font-black text-slate-300">{tag}</span>)}
                   </div>
                 ) : null}
                 <div className="mt-3 grid gap-2 text-sm">
@@ -1148,8 +1205,7 @@ function NetworkGraph({
     function render() {
       const state = stateRef.current
       state.tick += 1
-      if (state.autoRot) camRef.current.theta += 0.0022
-      camRef.current.phi = clampGraph(camRef.current.phi, -0.95, 0.95)
+      if (state.autoRot && !state.dragging) camRef.current.theta += 0.003
       renderCanvasGraph(ctx, W, H, DPR, nodes, edges, camRef.current, state, nodesRef)
       rafRef.current = window.requestAnimationFrame(render)
     }
@@ -1272,7 +1328,7 @@ function drawGraphLabel(ctx, text, x, y, fontSize, color, bgAlpha) {
 
 function graphNodePalette(node, depthBright, hover) {
   if (node.kind === 'contact') {
-    const base = GRAPH_PALETTE.contact
+    const base = node.col || GRAPH_PALETTE.contact
     return { fill: hexA(base, 0.96), stroke: hover ? hexA('#ffffff', 0.95) : hexA(base, 0.82), glow: hexA(base, 0.18), label: hexA('#f8fafc', 0.95), sublabel: hexA('#cbd5e1', 0.75) }
   }
   if (node.kind === 'semantic') {
@@ -1287,7 +1343,8 @@ function graphNodePalette(node, depthBright, hover) {
     return { fill: hexA('#0f172a', 0.86 + 0.02 * depthBright), stroke: hover ? hexA('#ffffff', 0.84) : hexA('#94a3b8', 0.28), glow: hexA('#94a3b8', 0.04 + 0.02 * depthBright), label: hexA('#e2e8f0', 0.95), sublabel: hexA('#94a3b8', 0.7) }
   }
   if (node.kind === 'cat') {
-    return { fill: hexA('#0f172a', 0.92), stroke: hover ? hexA('#ffffff', 0.84) : hexA('#64748b', 0.24), glow: hexA('#64748b', 0.03 + 0.02 * depthBright), label: hexA('#ffffff', 0.88), sublabel: hexA('#94a3b8', 0.65) }
+    const base = node.col || '#64748b'
+    return { fill: hexA('#0f172a', 0.92), stroke: hover ? hexA('#ffffff', 0.84) : hexA(base, 0.78), glow: hexA(base, 0.12 + 0.02 * depthBright), label: hexA('#ffffff', 0.88), sublabel: hexA('#94a3b8', 0.65) }
   }
   if (node.kind === 'group') {
     return { fill: hexA('#0f172a', 0.9), stroke: hover ? hexA('#ffffff', 0.84) : hexA('#64748b', 0.22), glow: hexA('#64748b', 0.03 + 0.02 * depthBright), label: hexA('#cbd5e1', 0.92), sublabel: hexA('#94a3b8', 0.65) }
@@ -1331,9 +1388,10 @@ function buildCanvasGraph(contacts, query, W, H) {
       ...(contact.tags ?? []),
       ...(contact.groupNames ?? []),
     ]))
-    .slice(0, 72)
+    // The landing graph is intentionally small: it must stay responsive during route changes.
+    .slice(0, INITIAL_GRAPH_CONTACT_LIMIT)
 
-  const nodes = [{ id: 'you', name: 'YOU', label: 'YOU', x: 0, y: 0, z: 0, r: 22, col: GRAPH_PALETTE.structure, kind: 'hub', catId: 'hub', alpha: 1 }]
+  const nodes = [{ id: 'you', name: 'YOU', label: 'YOU', x: 0, y: 0, z: 0, r: 22, col: '#06b6d4', kind: 'hub', catId: 'hub', alpha: 1 }]
   const edges = []
   const catNodeIds = new globalThis.Map()
   const groupNodeIds = new globalThis.Map()
@@ -1367,7 +1425,7 @@ function buildCanvasGraph(contacts, query, W, H) {
     { key: 'solve', label: 'resolve', ring: 364, z: -22, color: GRAPH_PALETTE.accent, limit: 8, size: 10, phase: -0.5, extract: (contact) => [contact.solves].filter(Boolean), keyOf: (value) => normalize(value), fullOf: (value) => String(value ?? '').trim(), displayOf: (value) => truncateGraphText(value, 26) },
     { key: 'link', label: 'usuário', ring: 266, z: 14, color: GRAPH_PALETTE.structure, limit: 12, size: 11, phase: 0.82, extract: (contact) => (contact.linkedPlatform && contact.linkedLabel ? [contact.linkedLabel] : []), keyOf: (value) => normalize(value), fullOf: (value) => String(value ?? '').trim(), displayOf: (value) => String(value ?? '').trim() },
     { key: 'org', label: 'empresa', ring: 410, z: 30, color: GRAPH_PALETTE.structure, limit: 8, size: 10, phase: 1.1, extract: (contact) => [contact.organization, contact.company, contact.org].filter(Boolean), keyOf: (value) => normalize(value), fullOf: (value) => String(value ?? '').trim(), displayOf: (value) => truncateGraphText(value, 28) },
-  ]
+  ].slice(0, 0)
 
   function addSemanticBucket(spec, value, contactId, catId, scopeTypes = []) {
     const fullLabel = spec.fullOf(value)
@@ -1400,7 +1458,7 @@ function buildCanvasGraph(contacts, query, W, H) {
     const angle = (Math.PI * 2 * index) / CATS.length
     const id = `cat-${cat.id}`
     catNodeIds.set(cat.id, id)
-    nodes.push({ id, name: cat.label, label: cat.label, x: Math.cos(angle) * 150, y: Math.sin(angle) * 150, z: 0, r: 14, col: GRAPH_PALETTE.structure, kind: 'cat', catId: cat.id, alpha: 1 })
+    nodes.push({ id, name: cat.label, label: cat.label, x: Math.cos(angle) * 150, y: Math.sin(angle) * 150, z: 0, r: 14, col: cat.col, kind: 'cat', catId: cat.id, alpha: 1 })
     edges.push({ a: 'you', b: id, k: 'hub', catId: cat.id, col: GRAPH_PALETTE.accent })
   })
 
@@ -1442,8 +1500,8 @@ function buildCanvasGraph(contacts, query, W, H) {
         x: Math.cos(angle) * 265,
         y: Math.sin(angle) * 265,
         z: (index % 3 - 1) * 45,
-        r: 19,
-        col: GRAPH_PALETTE.contact,
+        r: 13,
+        col: CATS.find((cat) => cat.id === catId)?.col ?? '#64748b',
         kind: contact.kind || 'contact',
         catId,
         semanticTypes: Array.isArray(contact.semanticTypes) ? contact.semanticTypes : graphContactSemanticTypes(contact),
@@ -1496,7 +1554,7 @@ function buildCanvasGraph(contacts, query, W, H) {
   if (shouldShowGroups) {
     const groupsInGraph = new globalThis.Map()
     filteredContacts.forEach((contact) => {
-      ;(contact.groupNames ?? []).forEach((groupName, index) => {
+      tagList(contact.groupNames).forEach((groupName, index) => {
         const name = String(groupName ?? '').trim()
         const key = normalize(contact.groupIds?.[index] ?? name)
         if (!name || !key) return
@@ -1525,7 +1583,7 @@ function buildCanvasGraph(contacts, query, W, H) {
           y: Math.sin(angle) * 370,
           z: index % 2 === 0 ? 30 : -30,
           r: 11,
-          col: GRAPH_PALETTE.structure,
+          col: CATS.find((cat) => cat.id === group.catId)?.col ?? '#64748b',
           kind: 'group',
           catId: group.catId,
           dashed: true,
@@ -1555,7 +1613,7 @@ function buildCanvasGraph(contacts, query, W, H) {
       })
     })
 
-    ;(contact.groupNames ?? []).forEach((groupName, index) => {
+    tagList(contact.groupNames).forEach((groupName, index) => {
       const groupId = groupNodeIds.get(normalize(contact.groupIds?.[index] ?? groupName))
       if (groupId) edges.push({ a: contactId, b: groupId, k: 'group', catId: contact.cat })
     })
@@ -1564,7 +1622,7 @@ function buildCanvasGraph(contacts, query, W, H) {
   const seenMatches = new Set()
   filteredContacts.forEach((contact) => {
     const fromId = `contact-${contact.id}`
-    ;(contact.potentialMatches ?? []).forEach((match) => {
+    ;(Array.isArray(contact.potentialMatches) ? contact.potentialMatches : []).forEach((match) => {
       const toId = String(match.id || '')
       if (!contactNodeMap.has(toId)) return
       const pairKey = [fromId, toId].sort().join('::')

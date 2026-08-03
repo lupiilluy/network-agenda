@@ -30,6 +30,20 @@ function Read-EnvFile {
   return $values
 }
 
+function Read-EnvFiles {
+  param([string[]]$Paths)
+
+  $values = @{}
+  foreach ($path in $Paths) {
+    $fileValues = Read-EnvFile -Path $path
+    foreach ($entry in $fileValues.GetEnumerator()) {
+      $values[$entry.Key] = $entry.Value
+    }
+  }
+
+  return $values
+}
+
 function First-Defined {
   param(
     [hashtable]$Sources,
@@ -173,8 +187,14 @@ function Set-VercelEnvVar {
 }
 
 function Get-LocalProductionValues {
-  $frontendEnv = Read-EnvFile -Path (Join-Path $frontendDir ".env.local")
-  $backendEnv = Read-EnvFile -Path (Join-Path $backendDir ".env.production.local")
+  $frontendEnv = Read-EnvFiles -Paths @(
+    (Join-Path $frontendDir ".env.local"),
+    (Join-Path $frontendDir ".env.production.local")
+  )
+  $backendEnv = Read-EnvFiles -Paths @(
+    (Join-Path $backendDir ".env.local"),
+    (Join-Path $backendDir ".env.production.local")
+  )
 
   return @{
     frontend = $frontendEnv
@@ -269,3 +289,4 @@ if (-not $SkipVercelDeploy) {
 Write-Output ""
 Write-Output "Bootstrap concluido."
 Write-Output "Se o CORS final ainda nao foi definido, rode novamente com -FrontendUrl https://seu-app.vercel.app"
+Write-Output "O script le frontend/.env.local e frontend/.env.production.local, e faz o mesmo no backend."

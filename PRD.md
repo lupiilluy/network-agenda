@@ -195,7 +195,7 @@ Ja entregue:
 
 Pendente:
 
-- conectores nativos/OAuth para Apple Contacts e Outlook;
+- conectores nativos/OAuth para Apple Contacts e Outlook continuam bloqueados por credenciais e ativacao de provedor;
 - automacao mais guiada para imports de LinkedIn alem do CSV compativel.
 
 ### 4.7 Duplicacao e merge

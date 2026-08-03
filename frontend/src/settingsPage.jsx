@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import {
+  AlertTriangle,
   CheckCircle,
   Circle,
   Cloud,
   Compass,
+  Lock,
   MessageCircle,
   Pencil,
   Route,
@@ -28,11 +30,117 @@ import {
   offlineMutationTitle,
 } from './App.jsx'
 
-export default function SettingsPageSection({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, customFieldDefinitions, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onRetryPendingMutation, onDismissPendingMutation, onExportContacts, onClearRecents, onSaveCustomField, onDeleteCustomField, onSaveUser, onSendPushTest, onLogout }) {
+function integrationStatusMeta(status) {
+  switch (status) {
+    case 'implemented':
+      return {
+        label: 'Disponível',
+        tone: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-100',
+        icon: CheckCircle,
+      }
+    case 'blocked_by_credentials':
+      return {
+        label: 'Bloqueado por credenciais',
+        tone: 'border-amber-400/20 bg-amber-500/10 text-amber-100',
+        icon: Lock,
+      }
+    default:
+      return {
+        label: 'Em preparação',
+        tone: 'border-slate-700 bg-slate-950/60 text-slate-300',
+        icon: Circle,
+      }
+  }
+}
+
+function formatRequirementLabel(value) {
+  return String(value || '')
+    .replace(/^VITE_/, '')
+    .replace(/_/g, ' ')
+    .toLowerCase()
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase())
+}
+
+function ImportIntegrationCard({ integration, onNavigate, onImportGoogleContacts }) {
+  const status = integrationStatusMeta(integration.status)
+  const StatusIcon = status.icon
+  const isBlocked = integration.status === 'blocked_by_credentials'
+  const supportedFormats = Array.isArray(integration.supported_formats) ? integration.supported_formats : []
+  const requirements = Array.isArray(integration.credential_requirements) ? integration.credential_requirements : []
+
+  return (
+    <article className="action-card rounded-lg p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-black text-slate-100">{integration.label}</h3>
+            <span className={['inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-widest', status.tone].join(' ')}>
+              <StatusIcon size={12} />
+              {status.label}
+            </span>
+          </div>
+          <p className="mt-2 text-sm font-semibold leading-6 text-slate-500">{integration.description}</p>
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {supportedFormats.map((format) => (
+          <span key={format} className="rounded-full border border-slate-800 bg-slate-950/50 px-2.5 py-1 text-[11px] font-black uppercase tracking-widest text-slate-300">
+            {format}
+          </span>
+        ))}
+      </div>
+
+      {requirements.length ? (
+        <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/35 p-3">
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Credenciais esperadas</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {requirements.map((requirement) => (
+              <span key={requirement} className="rounded-md border border-slate-800 bg-slate-950/80 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                {formatRequirementLabel(requirement)}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {integration.blocked_reason ? (
+        <div className="mt-3 rounded-lg border border-amber-400/15 bg-amber-500/5 p-3">
+          <p className="flex items-start gap-2 text-sm font-semibold leading-6 text-amber-100/90">
+            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+            <span>{integration.blocked_reason}</span>
+          </p>
+        </div>
+      ) : null}
+
+      {integration.setup_hint ? <p className="mt-3 text-sm font-semibold leading-6 text-slate-500">{integration.setup_hint}</p> : null}
+
+      <button
+        type="button"
+        onClick={async () => {
+          if (integration.provider === 'google_contacts' && onImportGoogleContacts) {
+            await onImportGoogleContacts()
+            return
+          }
+          onNavigate?.(ROUTES.IMPORT)
+        }}
+        className={[
+          'mt-4 inline-flex h-10 items-center justify-center gap-2 rounded-lg px-3 text-sm font-black',
+          isBlocked ? 'secondary-button' : 'primary-button',
+        ].join(' ')}
+      >
+        {integration.action_label || (isBlocked ? 'Ver requisitos' : 'Abrir central')}
+      </button>
+    </article>
+  )
+}
+
+export default function SettingsPageSection({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, customFieldDefinitions, importIntegrations, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onRetryPendingMutation, onDismissPendingMutation, onExportContacts, onClearRecents, onSaveCustomField, onDeleteCustomField, onSaveUser, onSendPushTest, onLogout }) {
   const visibleName = user?.name || 'Perfil'
   const googleContactsImported = Boolean(user?.googleContactsImportedAt)
   const [notificationPreference, setNotificationPreference] = useState(user?.notificationPreference || 'relevant')
   const selectedNotification = NOTIFICATION_OPTIONS.find((option) => option.id === notificationPreference) ?? NOTIFICATION_OPTIONS[0]
+  const importCatalog = Array.isArray(importIntegrations) ? importIntegrations : []
 
   useEffect(() => {
     setNotificationPreference(user?.notificationPreference || 'relevant')
@@ -246,6 +354,43 @@ export default function SettingsPageSection({ user, contacts, duplicateCount, ba
             actionLabel="Abrir central"
             onAction={() => onNavigate(ROUTES.IMPORT)}
           />
+        </div>
+      </section>
+
+      <section className="glass-panel rounded-lg p-4">
+        <div className="mb-3">
+          <p className="text-xs font-black uppercase tracking-widest text-cyan-400">Conectores nativos</p>
+          <h2 className="mt-1 text-base font-black text-slate-100">Prontos no produto, bloqueados por credenciais</h2>
+          <p className="mt-1 text-sm font-semibold text-slate-500">A interface e os caminhos de importação já estão preparados. O bloqueio aqui é de credenciais e ativação de provedor, não de UX.</p>
+        </div>
+        <div className="grid gap-3 md:grid-cols-3">
+          {importCatalog.length ? importCatalog.map((integration) => (
+            <ImportIntegrationCard key={integration.provider} integration={integration} onNavigate={onNavigate} onImportGoogleContacts={onImportGoogleContacts} />
+          )) : (
+            <>
+              <article className="action-card rounded-lg p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-sm font-black text-slate-100">Apple Contacts nativo</h3>
+                  <span className="rounded-md border border-slate-700 bg-slate-950/60 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">Bloqueado</span>
+                </div>
+                <p className="mt-2 text-sm font-semibold text-slate-500">Conector preparado para ativação quando as credenciais Apple estiverem disponíveis.</p>
+              </article>
+              <article className="action-card rounded-lg p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-sm font-black text-slate-100">Outlook nativo</h3>
+                  <span className="rounded-md border border-slate-700 bg-slate-950/60 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">Bloqueado</span>
+                </div>
+                <p className="mt-2 text-sm font-semibold text-slate-500">Conector preparado para ativação quando as credenciais Microsoft estiverem disponíveis.</p>
+              </article>
+              <article className="action-card rounded-lg p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-sm font-black text-slate-100">LinkedIn guiado</h3>
+                  <span className="rounded-md border border-slate-700 bg-slate-950/60 px-2 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400">Bloqueado</span>
+                </div>
+                <p className="mt-2 text-sm font-semibold text-slate-500">Fluxo guiado preparado para ativação quando houver credenciais e liberação do provedor.</p>
+              </article>
+            </>
+          )}
         </div>
       </section>
 

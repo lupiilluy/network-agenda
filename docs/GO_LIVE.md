@@ -138,10 +138,25 @@ Sem as variaveis `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `SUPABASE_URL`,
 
 ## 4. Google OAuth
 
-No Google Cloud, adicione o dominio do Vercel em:
+No Google Cloud, o callback autorizado do cliente OAuth precisa apontar para o callback do projeto Supabase:
 
 ```text
-Authorized JavaScript origins
+Authorized redirect URIs
+```
+
+Exemplo:
+
+```text
+https://qbqqfkvvbvsdpwsajkha.supabase.co/auth/v1/callback
+```
+
+Se voce usar outro projeto Supabase, troque o `project-ref` no URL acima.
+
+No Supabase Auth, adicione o dominio do Vercel em:
+
+```text
+Site URL
+Additional Redirect URLs
 ```
 
 Exemplo:

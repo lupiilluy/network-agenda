@@ -59,6 +59,8 @@ Se voce ja tiver:
 - `RENDER_API_KEY`
 - `VERCEL_TOKEN`
 - `frontend/.env.local`
+- `frontend/.env.production.local`
+- `backend/.env.local`
 - `backend/.env.production.local`
 
 rode:

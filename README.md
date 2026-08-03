@@ -8,8 +8,8 @@ O nome do repositorio ainda e `network-agenda`, mas o produto e apresentado no a
 
 - Frontend em producao: `https://frontend-three-mauve-91.vercel.app`
 - API em producao: `https://network-agenda-api.onrender.com`
-- Banco principal: Supabase Postgres
-- Auth principal: Supabase Auth
+- Banco principal: Postgres gerenciado
+- Auth principal: Google OAuth direto no app
 
 ## MVP atual
 
@@ -32,20 +32,19 @@ O nome do repositorio ainda e `network-agenda`, mas o produto e apresentado no a
 
 ## Autenticacao
 
-O projeto agora assume fluxo `Supabase-first`:
+O projeto agora assume fluxo `Google-first`:
 
-- `Google login` implementado via Supabase Auth;
-- `Email magic link` implementado via Supabase Auth;
-- `Apple login` implementado via Supabase Auth;
-- `Email e senha` legado fica desabilitado por padrao.
+- `Google login` abre o fluxo direto do Google Identity Services;
+- a sessao fica salva localmente neste navegador;
+- o restante do app usa essa sessao local para identificar o usuario no backend;
+- `Email e senha`, `magic link` e `Apple login` nao fazem parte mais do fluxo de acesso.
 
 Regras importantes:
 
-- o frontend precisa de `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` para abrir login com Google, Apple e magic link;
-- o backend valida bearer token de sessao via `SUPABASE_URL` e/ou `SUPABASE_JWT_SECRET`;
+- o frontend precisa de `VITE_GOOGLE_CLIENT_ID` para abrir login com Google;
 - `VITE_WEB_PUSH_PUBLIC_KEY` habilita o registro real do dispositivo para web push;
-- o login local por senha so volta se voce habilitar explicitamente `ALLOW_LEGACY_PASSWORD_LOGIN=true`;
-- usuarios autenticados por magic link nao dependem de conta Google para salvar perfil, abrir rede publica ou navegar no app.
+- o backend continua aceitando a sessao local no navegador para identificar o usuario nas rotas privadas;
+- o login por senha local so volta se voce habilitar explicitamente `ALLOW_LEGACY_PASSWORD_LOGIN=true`.
 
 ## Importacao e dados
 
@@ -96,14 +95,13 @@ Rotas principais do frontend:
 - Vite
 - Tailwind CSS
 - Lucide React
-- Supabase JS
 - Canvas 2D nativo para os grafos
 
 ### Backend
 
 - FastAPI
 - SQLite local para desenvolvimento rapido
-- Postgres/Supabase para deploy
+- Postgres para deploy
 - Uvicorn
 
 ## Estrutura
@@ -182,8 +180,6 @@ Copy-Item backend/.env.example backend/.env.local
 
 ```env
 VITE_API_URL=http://127.0.0.1:8006
-VITE_SUPABASE_URL=https://seu-projeto.supabase.co
-VITE_SUPABASE_ANON_KEY=cole_aqui_a_anon_key
 VITE_GOOGLE_CLIENT_ID=seu_client_id_google
 VITE_GOOGLE_MAPS_API_KEY=sua_chave_google_maps
 ```
@@ -194,9 +190,7 @@ VITE_GOOGLE_MAPS_API_KEY=sua_chave_google_maps
 DATABASE_URL=
 CORS_ALLOWED_ORIGINS=http://127.0.0.1:5174,http://localhost:5174
 APP_ENV=development
-SUPABASE_URL=https://seu-projeto.supabase.co
-SUPABASE_JWT_SECRET=
-ALLOW_LEGACY_PASSWORD_LOGIN=false
+ALLOW_LEGACY_PASSWORD_LOGIN=true
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 ```
@@ -204,9 +198,8 @@ OPENAI_MODEL=gpt-4o-mini
 ## Banco de dados
 
 - sem `DATABASE_URL`, a API sobe com SQLite local em `backend/data/network_agenda.sqlite3`;
-- com `DATABASE_URL=postgresql://...`, a API usa Postgres/Supabase;
-- o bootstrap de producao pode usar `supabase/schema.sql`;
-- se o SQL Editor nao estiver disponivel, use `scripts/apply-supabase-schema.ps1`;
+- com `DATABASE_URL=postgresql://...`, a API usa Postgres;
+- o bootstrap de producao pode usar `backend/app/postgres_schema.sql`;
 - o backend tambem contem o schema SQL em `backend/app/postgres_schema.sql`.
 
 ## Endpoints principais
@@ -272,14 +265,13 @@ Stack de publicacao prevista pelo repositorio:
 
 - `frontend` no Vercel;
 - `backend` no Render via `render.yaml`;
-- `database` no Supabase Postgres.
+- `database` no Postgres gerenciado.
 
 Arquivos de apoio:
 
 - `docs/DEPLOYMENT.md`
 - `docs/GO_LIVE.md`
 - `docs/PRODUCTION_CHECKLIST.md`
-- `docs/SUPABASE.md`
 
 Fluxo esperado:
 
@@ -311,6 +303,6 @@ Ja implementado:
 
 Ainda pendente ou parcial:
 
-- importacao nativa de Apple Contacts, Outlook e LinkedIn;
-- rollout completo de Supabase Auth + RLS em producao;
+- conectores nativos de Apple Contacts, Outlook e LinkedIn expostos na UX, mas ainda bloqueados por credenciais do provedor;
+- rollout completo da estrategia de auth em producao;
 - automacoes mais avancadas de match e inteligencia de networking, embora o MVP ja entregue match automatico com perfil publico/plataforma, complementaridade por contato e dispatch server-side de push por follow-up/importacao.

@@ -1,0 +1,78 @@
+Network Intelligence CRM - status para retomada
+Data: 2026-07-16
+
+O que foi feito hoje
+
+- O fluxo de auth e deploy foi validado localmente.
+- O backend subiu em `127.0.0.1:8006` com `APP_ENV=production`, `SUPABASE_URL` e `DATABASE_URL` configurados.
+- O script `scripts/check-auth-readiness.ps1 -Strict` passou com:
+  - `production_auth_ready=true`
+  - `rls_ready=true`
+  - `demo_fallback_enabled=false`
+  - `production_auth_enforced=true`
+- O frontend buildou com sucesso em producao via `npm run build`.
+- Os testes do backend passaram.
+- O smoke test do fluxo de go-live passou contra a API local.
+- O script `scripts/provision-production.ps1` foi melhorado para ler:
+  - `frontend/.env.local`
+  - `frontend/.env.production.local`
+  - `backend/.env.local`
+  - `backend/.env.production.local`
+  com prioridade para os valores de production local quando existirem.
+- A documentacao de producao foi atualizada para refletir esse comportamento.
+- O login local do frontend foi ajustado de novo para usar Supabase OAuth com `prompt=select_account`, sem exigir email digitado.
+- O build local do frontend passou apos os ajustes de login.
+
+O que ainda falta fazer
+
+1. Criar/recuperar os tokens de automacao
+   - `RENDER_API_KEY`
+   - `VERCEL_TOKEN`
+
+2. Rodar o bootstrap de producao com as URLs finais
+   - Exemplo:
+     - `.\scripts\provision-production.ps1 -FrontendUrl "https://frontend-v46onmw2s-lupiilluys-projects.vercel.app/"`
+
+3. Confirmar no Render
+   - `DATABASE_URL`
+   - `CORS_ALLOWED_ORIGINS`
+   - `WEB_PUSH_VAPID_PRIVATE_KEY`
+   - `WEB_PUSH_VAPID_SUBJECT`
+   - `SUPABASE_URL`
+   - `APP_ENV=production`
+   - `ALLOW_LEGACY_PASSWORD_LOGIN=false`
+
+4. Confirmar no Vercel
+   - `VITE_API_URL`
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
+   - `VITE_WEB_PUSH_PUBLIC_KEY`
+   - `VITE_GOOGLE_CLIENT_ID`
+   - `VITE_GOOGLE_MAPS_API_KEY`, se for usar
+
+5. Fazer o smoke test remoto apos deploy
+   - `.\scripts\go-live.ps1 -ApiBaseUrl https://sua-api.onrender.com -VercelUrl https://seu-app.vercel.app -RunSmokeTest`
+
+6. Depois disso
+   - Validar login Google e magic link no dominio final
+   - Ajustar qualquer detalhe visual/UX que ainda tenha ficado pendente
+   - Seguir com Apple login, Copilot/AG-UI e refinamentos restantes se ainda estiverem no escopo
+
+Diagnostico adicional do login
+
+- O frontend publicado em Vercel estava servindo um bundle antigo no momento da verificacao, entao as mudancas locais de login ainda nao estavam refletidas no app publico.
+- O backend do Render respondeu OK e o endpoint `/api/auth/status` indicou `production_auth_ready=true`, `rls_ready=true` e `demo_fallback_enabled=false`.
+- O problema de nao aparecer a escolha de conta Google no ambiente publicado tende a ser:
+  - bundle antigo na Vercel;
+  - configuracao do OAuth consent screen do Google ainda em modo de teste sem o email certo em `Test users`;
+  - `redirect URLs`/`Site URL` do Supabase nao batendo com o dominio usado no login.
+- O magic link nao chegando tende a ser configuracao de entrega do Supabase, principalmente SMTP. Sem SMTP customizado, o fluxo pode falhar ou ficar limitado.
+- O codigo do app ja usa `signInWithOtp` para magic link e `signInWithOAuth` para Google, então o ajuste principal agora e de configuracao/deploy, nao de rota interna do app.
+
+Notas rapidas
+
+- O schema do Supabase ja foi aplicado com sucesso.
+- O `check-auth-readiness.ps1 -Strict` passou localmente.
+- O que falta agora e publicar com as credenciais/tokens de deploy.
+- Nao colar caminho de arquivo no SQL Editor.
+- Quando precisar aplicar novo schema via terminal, o comando correto usa uma `DATABASE_URL` postgres, nao uma URL `https`.

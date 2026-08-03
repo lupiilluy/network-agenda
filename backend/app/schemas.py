@@ -503,6 +503,9 @@ class ImportIntegrationOut(BaseModel):
     mode: str
     description: str
     supported_formats: list[str] = []
+    credential_requirements: list[str] = []
+    blocked_reason: str = ""
+    setup_hint: str = ""
     available: bool = False
     action_label: str = ""
 

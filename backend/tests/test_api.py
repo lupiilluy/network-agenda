@@ -655,8 +655,10 @@ class NetworkAgendaApiTests(unittest.TestCase):
 
         providers = {item["provider"]: item for item in integrations}
         self.assertEqual(providers["google_contacts"]["status"], "implemented")
-        self.assertEqual(providers["apple_contacts_native"]["status"], "coming_soon")
+        self.assertEqual(providers["apple_contacts_native"]["status"], "blocked_by_credentials")
         self.assertIn("vcf", providers["apple_contacts_native"]["supported_formats"])
+        self.assertTrue(providers["apple_contacts_native"]["credential_requirements"])
+        self.assertTrue(providers["outlook_native"]["blocked_reason"])
 
     def test_dispatch_push_notifications_sends_due_follow_up(self):
         main.create_push_subscription(

@@ -10,7 +10,26 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   </React.StrictMode>,
 )
 
-if ('serviceWorker' in navigator) {
+const isLocalHost = ['localhost', '127.0.0.1'].includes(window.location.hostname)
+
+if (isLocalHost && 'serviceWorker' in navigator) {
+  window.addEventListener('load', async () => {
+    try {
+      const registrations = await navigator.serviceWorker.getRegistrations()
+      await Promise.all(registrations.map((registration) => registration.unregister()))
+    } catch {
+      // Ignore cleanup failures in local development.
+    }
+    try {
+      const keys = await caches.keys()
+      await Promise.all(keys.map((key) => caches.delete(key)))
+    } catch {
+      // Ignore cache cleanup failures in local development.
+    }
+  })
+}
+
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker
       .register('/sw.js')
