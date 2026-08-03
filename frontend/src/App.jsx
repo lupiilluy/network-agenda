@@ -15731,6 +15731,16 @@ export default function App() {
   }
 
   async function loginWithGoogle() {
+    const client = getSupabaseClient()
+    if (client) {
+      const { error } = await client.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: window.location.origin },
+      })
+      if (error) throw error
+      return
+    }
+
     const { profile } = await getGoogleProfileWithToken()
     const response = await apiRequest('/api/google-login', {
       method: 'POST',
