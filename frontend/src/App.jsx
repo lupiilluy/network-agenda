@@ -58,6 +58,7 @@ const GOOGLE_AUTH_ENABLED = Boolean(GOOGLE_CLIENT_ID)
 const SUPABASE_AUTH_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
 const GOOGLE_LOGIN_SCOPE = 'openid email profile'
 const GOOGLE_CONTACTS_SCOPE = 'https://www.googleapis.com/auth/contacts.readonly'
+const GOOGLE_OTHER_CONTACTS_SCOPE = 'https://www.googleapis.com/auth/contacts.other.readonly'
 const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
 const GOOGLE_PHOTOS_SCOPE = 'https://www.googleapis.com/auth/photoslibrary.readonly'
 const GOOGLE_ACCOUNT_PROFILE_SCOPE = `${GOOGLE_LOGIN_SCOPE} https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/user.birthday.read`
@@ -2291,35 +2292,43 @@ async function fetchGoogleProfile(accessToken) {
 }
 
 async function fetchGoogleContacts(accessToken) {
-  const people = []
-  let pageToken = ''
+  async function fetchPeoplePage(url, peopleField, parameterName) {
+    const people = []
+    let pageToken = ''
 
-  do {
-    const params = new URLSearchParams({
-      personFields: 'names,phoneNumbers,addresses,emailAddresses,occupations,organizations,photos',
-      pageSize: '200',
-      ...(pageToken ? { pageToken } : {}),
-    })
-    const response = await fetch(`https://people.googleapis.com/v1/people/me/connections?${params.toString()}`, {
+    do {
+      const params = new URLSearchParams({
+        [parameterName]: 'names,phoneNumbers,addresses,emailAddresses,occupations,organizations,photos',
+        pageSize: '200',
+        ...(pageToken ? { pageToken } : {}),
+      })
+      const response = await fetch(`${url}?${params.toString()}`, {
       headers: { Authorization: `Bearer ${accessToken}` },
-    })
-    if (!response.ok) {
-      let detail = ''
-      try {
-        const payload = await response.json()
-        detail = payload?.error?.message || ''
-      } catch {
-        // Keep a useful generic message when Google does not return JSON.
+      })
+      if (!response.ok) {
+        let detail = ''
+        try {
+          const payload = await response.json()
+          detail = payload?.error?.message || ''
+        } catch {
+          // Keep a useful generic message when Google does not return JSON.
+        }
+        throw new Error(detail || 'Não foi possível ler os contatos do Google.')
       }
-      throw new Error(detail || 'Não foi possível ler os contatos do Google.')
-    }
-    const data = await response.json()
-    people.push(...(data.connections ?? []))
-    pageToken = data.nextPageToken || ''
-  } while (pageToken && people.length < 1000)
+      const data = await response.json()
+      people.push(...(data[peopleField] ?? []))
+      pageToken = data.nextPageToken || ''
+    } while (pageToken && people.length < 1000)
+    return people
+  }
+
+  const [connections, otherContacts] = await Promise.all([
+    fetchPeoplePage('https://people.googleapis.com/v1/people/me/connections', 'connections', 'personFields'),
+    fetchPeoplePage('https://people.googleapis.com/v1/otherContacts', 'otherContacts', 'readMask'),
+  ])
 
   const seen = new Set()
-  return people
+  return [...connections, ...otherContacts]
     .map(googlePersonToContact)
     .filter((contact) => {
       const key = normalize(contact.email || contact.phone || contact.name)
@@ -2341,7 +2350,7 @@ async function fetchGoogleAccountProfile(accessToken) {
 }
 
 async function getGoogleProfileAndContacts() {
-  const accessToken = await requestGoogleToken(`${GOOGLE_LOGIN_SCOPE} ${GOOGLE_CONTACTS_SCOPE}`, 'consent')
+  const accessToken = await requestGoogleToken(`${GOOGLE_LOGIN_SCOPE} ${GOOGLE_CONTACTS_SCOPE} ${GOOGLE_OTHER_CONTACTS_SCOPE}`, 'consent')
   const [profile, contacts] = await Promise.all([fetchGoogleProfile(accessToken), fetchGoogleContacts(accessToken)])
   return { profile, contacts }
 }
@@ -2353,7 +2362,7 @@ async function getGoogleProfileWithToken() {
 }
 
 async function getGoogleContactsOnly() {
-  const accessToken = await requestGoogleToken(`${GOOGLE_LOGIN_SCOPE} ${GOOGLE_CONTACTS_SCOPE}`, 'consent')
+  const accessToken = await requestGoogleToken(`${GOOGLE_LOGIN_SCOPE} ${GOOGLE_CONTACTS_SCOPE} ${GOOGLE_OTHER_CONTACTS_SCOPE}`, 'consent')
   return fetchGoogleContacts(accessToken)
 }
 
