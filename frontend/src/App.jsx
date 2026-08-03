@@ -14265,7 +14265,8 @@ export default function App() {
     setForm((current) => ({ ...current, [field]: value }))
   }
 
-  async function saveImportedContact(payload, owner = user) {
+  async function saveImportedContact(payload, owner = user, options = {}) {
+    const allowOffline = options.allowOffline !== false
     const service = inferImportedService(payload)
     let newContact = {
       id: Date.now() + Math.floor(Math.random() * 1000),
@@ -14280,14 +14281,26 @@ export default function App() {
       service,
     }
 
-    try {
-      newContact = await apiRequest('/api/contacts', {
-        method: 'POST',
-        body: JSON.stringify(newContact),
-      })
-      setBackendOnline(true)
-    } catch (error) {
+    let lastError = null
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        newContact = await apiRequest('/api/contacts', {
+          method: 'POST',
+          body: JSON.stringify(newContact),
+        })
+        setBackendOnline(true)
+        return newContact
+      } catch (error) {
+        lastError = error
+        if (!isOfflineRequestError(error) || attempt === 2) break
+        await new Promise((resolve) => window.setTimeout(resolve, 700 * (attempt + 1)))
+      }
+    }
+
+    if (lastError) {
+      const error = lastError
       if (isOfflineRequestError(error)) {
+        if (!allowOffline) throw new Error('A API não respondeu ao salvar os contatos. Tente importar novamente em alguns segundos.')
         queueLocalMutation({ type: 'contact:create', payload: newContact }, owner)
         setBackendOnline(false)
         return newContact
@@ -14295,8 +14308,7 @@ export default function App() {
       setBackendOnline(false)
       throw error
     }
-
-    return newContact
+    throw new Error('Não foi possível salvar o contato importado.')
   }
 
   function parseImport(text, filename = '') {
@@ -14328,7 +14340,7 @@ export default function App() {
     const failures = []
     for (const item of items) {
       try {
-        saved.push(await saveImportedContact(item, owner))
+        saved.push(await saveImportedContact(item, owner, { allowOffline: false }))
       } catch (error) {
         failures.push({ name: item.name || 'Contato sem nome', error: error.message || 'Erro ao salvar.' })
       }
