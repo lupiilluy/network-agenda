@@ -592,15 +592,18 @@ const dddCoordinates = {
 }
 
 async function apiRequest(path, options = {}) {
-  const accessToken = await getSupabaseAccessToken()
+  const { accessToken: suppliedAccessToken, headers: requestHeaders, ...requestOptions } = options
+  // Auth callbacks already receive the current token. Reusing it avoids re-entering
+  // Supabase session locking while onAuthStateChange is still being dispatched.
+  const accessToken = suppliedAccessToken || await getSupabaseAccessToken()
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
       'Content-Type': 'application/json',
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       ...getLocalAuthHeaders(),
-      ...(options.headers ?? {}),
+      ...(requestHeaders ?? {}),
     },
-    ...options,
+    ...requestOptions,
   })
 
   if (!response.ok) {
@@ -12482,7 +12485,7 @@ function geocodeAddress(geocoder, address) {
   })
 }
 
-function LoginPage({ user, onGoogleLogin, onPasswordLogin, onMagicLink, onSwitchAccount, theme, onToggleTheme }) {
+function LoginPage({ user, authSyncError, onGoogleLogin, onPasswordLogin, onMagicLink, onSwitchAccount, theme, onToggleTheme }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [status, setStatus] = useState('')
@@ -12522,6 +12525,11 @@ function LoginPage({ user, onGoogleLogin, onPasswordLogin, onMagicLink, onSwitch
         <div className="rounded-lg border border-slate-800 bg-slate-950/45 px-3 py-3 text-xs font-bold text-slate-400">
           Entre com e-mail e senha, Google ou receba um magic link no seu e-mail.
         </div>
+        {authSyncError ? (
+          <p className="rounded-lg border border-rose-400/30 bg-rose-500/10 p-3 text-sm font-bold text-rose-200">
+            {authSyncError}
+          </p>
+        ) : null}
         <button
           type="button"
           disabled={isGoogleLoading || !GOOGLE_AUTH_ENABLED}
@@ -13498,6 +13506,7 @@ export default function App() {
   }
   const [form, setForm] = useState(emptyContactForm)
   const [toast, setToast] = useState('')
+  const [authSyncError, setAuthSyncError] = useState('')
   const [editingContact, setEditingContact] = useState(null)
   const [selectedGroup, setSelectedGroup] = useState(null)
   const [newCount, setNewCount] = useState(0)
@@ -15731,6 +15740,7 @@ export default function App() {
   }
 
   async function loginWithGoogle() {
+    setAuthSyncError('')
     const client = getSupabaseClient()
     if (client) {
       const { error } = await client.auth.signInWithOAuth({
@@ -15760,6 +15770,7 @@ export default function App() {
   }
 
   async function sendMagicLink(email) {
+    setAuthSyncError('')
     const client = getSupabaseClient()
     if (!client) throw new Error('Configure as credenciais do Supabase para usar magic link.')
     const { error } = await client.auth.signInWithOtp({ email: email.trim(), options: { emailRedirectTo: window.location.origin } })
@@ -15774,8 +15785,10 @@ export default function App() {
     async function syncSupabaseSession(session) {
       if (!active || !session?.user?.email) return
       try {
+        setAuthSyncError('')
         const response = await apiRequest('/api/auth/session', {
           method: 'POST',
+          accessToken: session.access_token,
           body: JSON.stringify({
             sub: session.user.id,
             email: session.user.email,
@@ -15789,8 +15802,12 @@ export default function App() {
         setBackendOnline(true)
         rememberUser(loggedUser, Number(session.expires_at || 0) * 1000)
         navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
-      } catch {
-        if (active) showToast('A sessão foi criada, mas não consegui sincronizar o perfil.')
+      } catch (error) {
+        console.error('Falha ao sincronizar a sessão do Supabase:', error)
+        if (active) {
+          setBackendOnline(false)
+          setAuthSyncError(`Sua conta foi autenticada, mas o perfil não foi sincronizado: ${error.message || 'erro desconhecido.'}`)
+        }
       }
     }
 
@@ -15987,7 +16004,7 @@ export default function App() {
       />
     )
   } else if (effectiveRoute.page === 'login') {
-    page = <LoginPage user={user} theme={theme} onToggleTheme={toggleTheme} onGoogleLogin={loginWithGoogle} onPasswordLogin={loginUser} onMagicLink={sendMagicLink} onSwitchAccount={logout} />
+    page = <LoginPage user={user} authSyncError={authSyncError} theme={theme} onToggleTheme={toggleTheme} onGoogleLogin={loginWithGoogle} onPasswordLogin={loginUser} onMagicLink={sendMagicLink} onSwitchAccount={logout} />
   } else if (effectiveRoute.page === 'register') {
     page = <RegisterPage user={user} theme={theme} onToggleTheme={toggleTheme} onSaveUser={saveUser} onImportContacts={importContactsFromProfile} onImportGoogleContacts={requestGoogleContacts} onImportGoogleProfile={requestGoogleProfileDraft} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'publicProfile') {
