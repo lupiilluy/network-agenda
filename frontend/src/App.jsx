@@ -15782,6 +15782,13 @@ export default function App() {
     if (!client) return undefined
     let active = true
 
+    function reportAuthError(error) {
+      console.error('Falha ao restaurar a sessão do Supabase:', error)
+      if (!active) return
+      setBackendOnline(false)
+      setAuthSyncError(`Não foi possível concluir o login: ${error?.message || 'erro desconhecido.'}`)
+    }
+
     async function syncSupabaseSession(session) {
       if (!active || !session?.user?.email) return
       try {
@@ -15803,15 +15810,40 @@ export default function App() {
         rememberUser(loggedUser, Number(session.expires_at || 0) * 1000)
         navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
       } catch (error) {
-        console.error('Falha ao sincronizar a sessão do Supabase:', error)
-        if (active) {
-          setBackendOnline(false)
-          setAuthSyncError(`Sua conta foi autenticada, mas o perfil não foi sincronizado: ${error.message || 'erro desconhecido.'}`)
-        }
+        reportAuthError(new Error(`sua conta foi autenticada, mas o perfil não foi sincronizado: ${error.message || 'erro desconhecido.'}`))
       }
     }
 
-    client.auth.getSession().then(({ data }) => syncSupabaseSession(data.session))
+    async function restoreSupabaseSession() {
+      try {
+        let { data, error } = await client.auth.getSession()
+        if (error) throw error
+        if (data.session) {
+          await syncSupabaseSession(data.session)
+          return
+        }
+
+        const authorizationCode = new URLSearchParams(window.location.search).get('code')
+        if (!authorizationCode) return
+
+        // Supabase normally exchanges the OAuth code automatically. If that did not
+        // finish before React mounted, complete the exchange explicitly as a fallback.
+        await new Promise((resolve) => window.setTimeout(resolve, 250))
+        ;({ data, error } = await client.auth.getSession())
+        if (error) throw error
+        if (!data.session) {
+          ;({ data, error } = await client.auth.exchangeCodeForSession(authorizationCode))
+          if (error) throw error
+        }
+        if (!data.session) throw new Error('O provedor não retornou uma sessão válida.')
+        window.history.replaceState({}, '', window.location.pathname)
+        await syncSupabaseSession(data.session)
+      } catch (error) {
+        reportAuthError(error)
+      }
+    }
+
+    void restoreSupabaseSession()
     const { data } = client.auth.onAuthStateChange((_event, session) => syncSupabaseSession(session))
     return () => {
       active = false
