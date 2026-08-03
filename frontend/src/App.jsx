@@ -2291,25 +2291,42 @@ async function fetchGoogleProfile(accessToken) {
 }
 
 async function fetchGoogleContacts(accessToken) {
-  const params = new URLSearchParams({
-    personFields: 'names,phoneNumbers,addresses,emailAddresses,occupations,organizations,photos',
-    pageSize: '200',
-  })
-  const response = await fetch(`https://people.googleapis.com/v1/people/me/connections?${params.toString()}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  })
-  if (!response.ok) {
-    let detail = ''
-    try {
-      const payload = await response.json()
-      detail = payload?.error?.message || ''
-    } catch {
-      // Keep a useful generic message when Google does not return JSON.
+  const people = []
+  let pageToken = ''
+
+  do {
+    const params = new URLSearchParams({
+      personFields: 'names,phoneNumbers,addresses,emailAddresses,occupations,organizations,photos',
+      pageSize: '200',
+      ...(pageToken ? { pageToken } : {}),
+    })
+    const response = await fetch(`https://people.googleapis.com/v1/people/me/connections?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+    if (!response.ok) {
+      let detail = ''
+      try {
+        const payload = await response.json()
+        detail = payload?.error?.message || ''
+      } catch {
+        // Keep a useful generic message when Google does not return JSON.
+      }
+      throw new Error(detail || 'Não foi possível ler os contatos do Google.')
     }
-    throw new Error(detail || 'Não foi possível ler os contatos do Google.')
-  }
-  const data = await response.json()
-  return (data.connections ?? []).map(googlePersonToContact).filter((contact) => contact.name && contact.phone)
+    const data = await response.json()
+    people.push(...(data.connections ?? []))
+    pageToken = data.nextPageToken || ''
+  } while (pageToken && people.length < 1000)
+
+  const seen = new Set()
+  return people
+    .map(googlePersonToContact)
+    .filter((contact) => {
+      const key = normalize(contact.email || contact.phone || contact.name)
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return Boolean(contact.name && contact.phone)
+    })
 }
 
 async function fetchGoogleAccountProfile(accessToken) {
@@ -14269,12 +14286,18 @@ export default function App() {
   async function importContactsForOwner(items, owner) {
     if (!items?.length || !owner) return []
     const saved = []
+    const failures = []
     for (const item of items) {
-      saved.push(await saveImportedContact(item, owner))
+      try {
+        saved.push(await saveImportedContact(item, owner))
+      } catch (error) {
+        failures.push({ name: item.name || 'Contato sem nome', error: error.message || 'Erro ao salvar.' })
+      }
     }
     setContacts((current) => [...saved, ...current])
     setNewCount((count) => count + saved.length)
     await refreshDuplicates(owner)
+    saved.failures = failures
     return saved
   }
 
@@ -14351,7 +14374,8 @@ export default function App() {
         },
         user,
       )
-      showToast(`${imported.length} contato${imported.length === 1 ? '' : 's'} importado${imported.length === 1 ? '' : 's'} do Google.`)
+      const failed = imported.failures?.length ?? 0
+      showToast(`${imported.length} contato${imported.length === 1 ? '' : 's'} importado${imported.length === 1 ? '' : 's'} do Google.${failed ? ` ${failed} não puderam ser salvos.` : ''}`)
     } catch (error) {
       showToast(error.message || 'Não foi possível importar contatos do Google.')
     }
