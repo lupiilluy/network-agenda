@@ -2344,7 +2344,9 @@ async function fetchGoogleContacts(accessToken) {
       const key = normalize(contact.email || contact.phone || contact.name)
       if (!key || seen.has(key)) return false
       seen.add(key)
-      return Boolean(contact.name && contact.phone)
+      // Google Contacts often has e-mail-only entries. googlePersonToContact
+      // supplies a stable placeholder phone accepted by the local schema.
+      return Boolean(contact.name && (contact.email || contact.phone))
     })
 }
 
@@ -2371,8 +2373,12 @@ async function getGoogleProfileWithToken() {
   return { profile, accessToken }
 }
 
-async function getGoogleContactsOnly() {
-  const accessToken = await requestGoogleToken(`${GOOGLE_LOGIN_SCOPE} ${GOOGLE_CONTACTS_SCOPE} ${GOOGLE_OTHER_CONTACTS_SCOPE}`, 'consent')
+async function getGoogleContactsOnly(loginHint = '') {
+  const accessToken = await requestGoogleToken(
+    `${GOOGLE_LOGIN_SCOPE} ${GOOGLE_CONTACTS_SCOPE} ${GOOGLE_OTHER_CONTACTS_SCOPE}`,
+    'consent',
+    loginHint,
+  )
   return fetchGoogleContacts(accessToken)
 }
 
@@ -14413,12 +14419,21 @@ export default function App() {
     if (!items?.length || !owner) return []
     const saved = []
     const failures = []
-    for (const item of items) {
-      try {
-        saved.push(await saveImportedContact(item, owner, { allowOffline: false }))
-      } catch (error) {
-        failures.push({ name: item.name || 'Contato sem nome', error: error.message || 'Erro ao salvar.' })
-      }
+    const batchSize = 4
+    for (let offset = 0; offset < items.length; offset += batchSize) {
+      const batch = items.slice(offset, offset + batchSize)
+      const results = await Promise.all(batch.map(async (item) => {
+        try {
+          return { contact: await saveImportedContact(item, owner, { allowOffline: false }) }
+        } catch (error) {
+          return { failure: { name: item.name || 'Contato sem nome', error: error.message || 'Erro ao salvar.' } }
+        }
+      }))
+      results.forEach((result) => {
+        if (result.contact) saved.push(result.contact)
+        if (result.failure) failures.push(result.failure)
+      })
+      showToast(`Importando contatos do Google: ${Math.min(offset + batch.length, items.length)}/${items.length}`)
     }
     setContacts((current) => [...saved, ...current])
     setNewCount((count) => count + saved.length)
@@ -14428,7 +14443,7 @@ export default function App() {
   }
 
   async function requestGoogleContacts() {
-    return getGoogleContactsOnly()
+    return getGoogleContactsOnly(user?.email || '')
   }
 
   async function requestGoogleProfileDraft() {
