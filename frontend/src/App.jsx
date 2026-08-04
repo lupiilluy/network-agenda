@@ -12711,9 +12711,10 @@ function GoogleContactsPermissionModal({ user, isImporting, status, onAuthorize,
         </p>
         <p className="mt-2 text-xs font-semibold leading-5 text-slate-500">A permissão é solicitada pelo Google. Você pode continuar sem importar e sincronizar depois em Configurações.</p>
         {status ? (
-          <p className={['mt-4 rounded-lg border px-3 py-2 text-xs font-bold leading-5', status.startsWith('Erro:') ? 'border-rose-400/30 bg-rose-500/10 text-rose-100' : 'border-cyan-400/20 bg-cyan-500/10 text-cyan-100'].join(' ')}>
-            {status}
-          </p>
+          <div role={status.startsWith('Erro:') ? 'alert' : 'status'} className={['mt-4 rounded-lg border px-3 py-3 text-xs font-bold leading-5', status.startsWith('Erro:') ? 'border-red-300 bg-red-600 text-white shadow-lg shadow-red-950/40' : 'border-cyan-400/20 bg-cyan-500/10 text-cyan-100'].join(' ')}>
+            {status.startsWith('Erro:') ? <p className="mb-1 font-mono text-[10px] font-black uppercase tracking-widest text-red-100">Falha na importação</p> : null}
+            <p className="break-words">{status}</p>
+          </div>
         ) : null}
         <div className="mt-6 grid gap-2 sm:grid-cols-2">
           <button type="button" onClick={onContinue} disabled={isImporting} className="secondary-button h-11 rounded-lg px-4 text-sm font-black disabled:opacity-60">Agora não</button>
@@ -14460,7 +14461,7 @@ export default function App() {
     showToast(`${saved.length} contato${saved.length === 1 ? '' : 's'} importado${saved.length === 1 ? '' : 's'}.`)
   }
 
-  async function importContactsForOwner(items, owner) {
+  async function importContactsForOwner(items, owner, { notify = true } = {}) {
     if (!items?.length || !owner) return []
     const payloads = items.map((item) => ({
       owner_id: contactOwnerId(owner),
@@ -14473,7 +14474,7 @@ export default function App() {
       ...item,
       service: inferImportedService(item),
     }))
-    showToast(`Salvando ${payloads.length} contatos da agenda Google...`)
+    if (notify) showToast(`Salvando ${payloads.length} contatos da agenda Google...`)
     const saved = await apiRequest('/api/contacts/import', {
       method: 'POST',
       body: JSON.stringify(payloads),
@@ -14492,26 +14493,28 @@ export default function App() {
     return getGoogleAccountDraft()
   }
 
-  async function importGoogleContactsFromSettings() {
+  async function importGoogleContactsFromSettings({ notify = true } = {}) {
+    const announce = (message) => {
+      setGoogleImportStatus(message)
+      if (notify) showToast(message)
+    }
     if (!user) {
-      showToast('Entre antes de importar contatos do Google.')
+      announce('Erro: Entre antes de importar contatos do Google.')
       return false
     }
     setIsImporting(true)
-    setGoogleImportStatus('Solicitando autorização ao Google Contacts...')
-    showToast('Abrindo permissão do Google Contacts...')
+    announce('Solicitando autorização ao Google Contacts...')
     try {
       const googleContacts = await requestGoogleContacts()
-      setGoogleImportStatus(`${googleContacts.length} contatos encontrados na agenda Google.`)
+      announce(`${googleContacts.length} contatos encontrados na agenda Google.`)
       if (!googleContacts.length) {
         const otherContactsDetail = googleContacts.googleOtherContactsError ? ` Detalhe do Google: ${googleContacts.googleOtherContactsError}` : ''
         const message = `O Google Contacts não retornou contatos para esta conta.${otherContactsDetail}`
-        setGoogleImportStatus(`Erro: ${message}`)
-        showToast(message)
+        announce(`Erro: ${message}`)
         return false
       }
-      setGoogleImportStatus(`Salvando ${googleContacts.length} contatos na sua agenda...`)
-      const imported = await importContactsForOwner(googleContacts, user)
+      announce(`Salvando ${googleContacts.length} contatos na sua agenda...`)
+      const imported = await importContactsForOwner(googleContacts, user, { notify })
       const connectedUser = rememberUser({
         ...user,
         googleConnected: true,
@@ -14544,12 +14547,11 @@ export default function App() {
       const failed = imported.failures?.length ?? 0
       const firstFailure = imported.failures?.[0]?.error
       showToast(`${imported.length} contato${imported.length === 1 ? '' : 's'} importado${imported.length === 1 ? '' : 's'} do Google.${failed ? ` ${failed} não puderam ser salvos: ${firstFailure || 'verifique a conexão com a API.'}` : ''}`)
-      setGoogleImportStatus(`${imported.length} contatos importados com sucesso.`)
+      announce(`${imported.length} contatos importados com sucesso.`)
       return failed === 0
     } catch (error) {
       const message = error.message || 'Não foi possível importar contatos do Google.'
-      setGoogleImportStatus(`Erro: ${message}`)
-      showToast(message)
+      announce(`Erro: ${message}`)
       return false
     } finally {
       setIsImporting(false)
@@ -14557,7 +14559,7 @@ export default function App() {
   }
 
   async function authorizeInitialGoogleContacts() {
-    const imported = await importGoogleContactsFromSettings()
+    const imported = await importGoogleContactsFromSettings({ notify: false })
     if (imported) setShowGoogleContactsPermission(false)
   }
 
