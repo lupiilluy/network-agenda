@@ -13562,6 +13562,19 @@ function Toast({ message }) {
   )
 }
 
+function AppLoadingOverlay({ title, description }) {
+  return (
+    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/80 p-6 backdrop-blur-sm" role="status" aria-live="polite">
+      <div className="w-full max-w-sm rounded-2xl border border-cyan-400/25 bg-[#071424] p-6 text-center shadow-2xl shadow-cyan-950/50">
+        <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-cyan-200/20 border-t-cyan-300" />
+        <p className="mt-4 font-mono text-[10px] font-black uppercase tracking-[0.2em] text-cyan-300">Network Agenda</p>
+        <h2 className="mt-2 text-lg font-black text-slate-50">{title}</h2>
+        <p className="mt-2 text-sm font-semibold leading-6 text-slate-400">{description}</p>
+      </div>
+    </div>
+  )
+}
+
 class RouteErrorBoundary extends ReactLib.Component {
   constructor(props) {
     super(props)
@@ -13694,6 +13707,7 @@ export default function App() {
   const [selectedGroup, setSelectedGroup] = useState(null)
   const [newCount, setNewCount] = useState(0)
   const [isImporting, setIsImporting] = useState(false)
+  const [isLoggingIn, setIsLoggingIn] = useState(false)
   const [googleImportStatus, setGoogleImportStatus] = useState('')
   const [googleImportDetails, setGoogleImportDetails] = useState('')
   const [showGoogleContactsPermission, setShowGoogleContactsPermission] = useState(false)
@@ -16081,51 +16095,63 @@ export default function App() {
   }
 
   async function loginUser(credentials) {
-    const response = await apiRequest('/api/login', {
-      method: 'POST',
-      body: JSON.stringify(credentials),
-    })
-    const loggedUser = apiUserToLocal(response)
-    if (!loggedUser) throw new Error('Usuário não encontrado.')
-    setBackendOnline(true)
-    setUser(loggedUser)
-    setNetworkUsers((current) => {
-      const others = current.filter((item) => normalize(item.email) !== normalize(loggedUser.email))
-      return [loggedUser, ...others]
-    })
-    storeSessionUser(loggedUser)
-    showToast('Login realizado.')
-    navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
+    setIsLoggingIn(true)
+    try {
+      const response = await apiRequest('/api/login', {
+        method: 'POST',
+        body: JSON.stringify(credentials),
+      })
+      const loggedUser = apiUserToLocal(response)
+      if (!loggedUser) throw new Error('Usuário não encontrado.')
+      setBackendOnline(true)
+      setUser(loggedUser)
+      setNetworkUsers((current) => {
+        const others = current.filter((item) => normalize(item.email) !== normalize(loggedUser.email))
+        return [loggedUser, ...others]
+      })
+      storeSessionUser(loggedUser)
+      showToast('Login realizado.')
+      navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
+    } finally {
+      setIsLoggingIn(false)
+    }
   }
 
   async function loginWithGoogle() {
     setAuthSyncError('')
+    setIsLoggingIn(true)
     const client = getSupabaseClient()
     if (client) {
       const { error } = await client.auth.signInWithOAuth({
         provider: 'google',
         options: { redirectTo: window.location.origin },
       })
-      if (error) throw error
+      if (error) {
+        setIsLoggingIn(false)
+        throw error
+      }
       return
     }
-
-    const { profile } = await getGoogleProfileWithToken()
-    const response = await apiRequest('/api/google-login', {
-      method: 'POST',
-      body: JSON.stringify({
-        sub: profile.sub || profile.email,
-        email: profile.email,
-        name: profile.name || profile.email,
-        picture: profile.picture || '',
-      }),
-    })
-    const loggedUser = apiUserToLocal(response)
-    if (!loggedUser) throw new Error('Usuário não encontrado.')
-    setBackendOnline(true)
-    rememberUser(loggedUser)
-    showToast('Login realizado com Google.')
-    navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
+    try {
+      const { profile } = await getGoogleProfileWithToken()
+      const response = await apiRequest('/api/google-login', {
+        method: 'POST',
+        body: JSON.stringify({
+          sub: profile.sub || profile.email,
+          email: profile.email,
+          name: profile.name || profile.email,
+          picture: profile.picture || '',
+        }),
+      })
+      const loggedUser = apiUserToLocal(response)
+      if (!loggedUser) throw new Error('Usuário não encontrado.')
+      setBackendOnline(true)
+      rememberUser(loggedUser)
+      showToast('Login realizado com Google.')
+      navigate(loadOnboardingCompletion(loggedUser) ? ROUTES.DASHBOARD : ROUTES.ONBOARDING)
+    } finally {
+      setIsLoggingIn(false)
+    }
   }
 
   async function sendMagicLink(email) {
@@ -16592,6 +16618,8 @@ export default function App() {
       onEnableNotifications={enableNotifications}
     >
       <Toast message={toast} />
+      {isLoggingIn ? <AppLoadingOverlay title="Entrando na sua conta" description="Validando sua sessão e preparando sua agenda." /> : null}
+      {isImporting ? <AppLoadingOverlay title="Sincronizando sua agenda" description="Lendo contatos e salvando atualizações com segurança." /> : null}
       <RouteErrorBoundary key={`${effectiveRoute.page}:${effectiveRoute.contactId ?? effectiveRoute.groupId ?? effectiveRoute.categoryId ?? ''}`} onNavigate={navigate}>
         {page}
       </RouteErrorBoundary>

@@ -1709,7 +1709,7 @@ def sync_custom_field_values_for_scope(
         )
 
 
-def sync_contact_structures(connection: DbConnection, contact_id: int, payload: dict) -> None:
+def sync_contact_structures(connection: DbConnection, contact_id: int, payload: dict, refresh_tag_counts: bool = True) -> None:
     owner_id = str(payload.get("owner_id") or "demo-user")
     connection.execute("DELETE FROM contact_phones WHERE contact_id = ? AND owner_id = ?", (contact_id, owner_id))
     connection.execute("DELETE FROM contact_emails WHERE contact_id = ? AND owner_id = ?", (contact_id, owner_id))
@@ -1764,7 +1764,8 @@ def sync_contact_structures(connection: DbConnection, contact_id: int, payload: 
     )
 
     sync_contact_platform_link(connection, contact_id, owner_id, payload)
-    refresh_tag_usage(connection, owner_id)
+    if refresh_tag_counts:
+        refresh_tag_usage(connection, owner_id)
 
 
 def sync_owner_contact_platform_links(connection: DbConnection, owner_id: str) -> None:
@@ -2120,7 +2121,7 @@ def row_to_user(row) -> dict:
     }
 
 
-def insert_contact(connection: DbConnection, payload: dict):
+def insert_contact(connection: DbConnection, payload: dict, refresh_tag_counts: bool = True):
     owner_id = str(payload.get("owner_id") or "demo-user")
     note = payload.get("note") or ""
     incoming_service = payload.get("service")
@@ -2233,7 +2234,7 @@ def insert_contact(connection: DbConnection, payload: dict):
         "next_follow_up_at": next_follow_up_at,
         "crm_note": crm_note,
     }
-    sync_contact_structures(connection, int(contact_id), sync_payload)
+    sync_contact_structures(connection, int(contact_id), sync_payload, refresh_tag_counts=refresh_tag_counts)
     return connection.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
 
 

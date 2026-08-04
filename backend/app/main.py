@@ -82,6 +82,7 @@ from .database import (
     row_to_public_profile,
     row_to_public_user_profile,
     row_to_user,
+    refresh_tag_usage,
     save_custom_field_definition,
     sync_owner_contact_platform_links,
     upsert_push_dispatch_event,
@@ -1278,13 +1279,14 @@ def import_contacts(payloads: list[dict]) -> list[dict]:
         saved_contacts: list[dict] = []
         for index, payload in enumerate(payloads):
             data = normalized_payload(payload, index, owner_id)
-            row = insert_contact(connection, data)
+            row = insert_contact(connection, data, refresh_tag_counts=False)
             if row is None:
                 raise HTTPException(status_code=500, detail="Não foi possível salvar um contato importado.")
             # Building match metadata compares every contact against the whole
             # agenda. During a bulk import that becomes quadratic and can make
             # the HTTP request appear stuck, so return the lightweight row.
             saved_contacts.append(row_to_contact(row))
+        refresh_tag_usage(connection, owner_id)
         connection.commit()
         return saved_contacts
 
