@@ -14490,17 +14490,43 @@ export default function App() {
 
   async function importContactsForOwner(items, owner, { notify = true } = {}) {
     if (!items?.length || !owner) return []
-    const payloads = items.map((item) => ({
-      owner_id: contactOwnerId(owner),
-      city: item.city || 'Minha região',
-      address: item.address || item.city || '',
-      trust: 'Novo',
-      source: 'Google People API',
-      note: '',
-      avatar_url: item.avatar_url || '',
-      ...item,
-      service: inferImportedService(item),
-    }))
+    const clipped = (value, max) => String(value ?? '').trim().slice(0, max)
+    const payloads = items.map((item, index) => {
+      const email = clipped(item.email, 160)
+      const rawName = clipped(item.name, 120)
+      const rawPhone = clipped(item.phone, 40)
+      const name = rawName.length >= 2 ? rawName : (email.length >= 2 ? email : `Contato Google ${index + 1}`)
+      const phone = rawPhone.length >= 4 ? rawPhone : `google-import-${index + 1}`
+      return {
+        owner_id: contactOwnerId(owner),
+        name,
+        phone,
+        service: clipped(inferImportedService(item), 160) || 'contato para revisar',
+        note: clipped(item.note, 500),
+        city: clipped(item.city, 120) || 'Minha região',
+        address: clipped(item.address || item.city, 240),
+        trust: 'Novo',
+        source: 'Google People API',
+        description: clipped(item.description, 1200),
+        demand: '',
+        demand_tags: '',
+        solves: '',
+        tags: '',
+        email,
+        whatsapp: '',
+        instagram: '',
+        linkedin: '',
+        organization: clipped(item.organization, 200),
+        custom_url: '',
+        avatar_url: clipped(item.avatar_url, 200000),
+        custom_fields: '[]',
+        crm_status: 'Novo',
+        crm_priority: 'Média',
+        last_contact_at: '',
+        next_follow_up_at: '',
+        crm_note: '',
+      }
+    })
     if (notify) showToast(`Salvando ${payloads.length} contatos da agenda Google...`)
     const saved = await apiRequest('/api/contacts/import', {
       method: 'POST',
