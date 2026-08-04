@@ -2272,14 +2272,14 @@ async function requestGoogleToken(scope = GOOGLE_LOGIN_SCOPE, prompt = 'select_a
         if (response?.access_token) {
           resolve(response.access_token)
         } else {
-          reject(new Error(response?.error_description || 'Permissão do Google não concluída.'))
+          reject(new Error(response?.error_description || response?.error || 'Permissão do Google não concluída.'))
         }
       },
-      error_callback: () => {
+      error_callback: (response) => {
         if (settled) return
         settled = true
         window.clearTimeout(timeout)
-        reject(new Error('Permissão do Google cancelada.'))
+        reject(new Error(response?.message || response?.error_description || response?.type || 'Permissão do Google cancelada.'))
       },
     })
     client.requestAccessToken()
@@ -2290,7 +2290,10 @@ async function fetchGoogleProfile(accessToken) {
   const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
     headers: { Authorization: `Bearer ${accessToken}` },
   })
-  if (!response.ok) throw new Error('Não foi possível ler o perfil do Google.')
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new Error(`Google recusou a identificação da conta (${response.status}): ${detail.slice(0, 280) || 'sem detalhe.'}`)
+  }
   return response.json()
 }
 
@@ -2305,9 +2308,20 @@ async function fetchGoogleContacts(accessToken) {
         pageSize: '200',
         ...(pageToken ? { pageToken } : {}),
       })
-      const response = await fetch(`${url}?${params.toString()}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      })
+      const controller = new AbortController()
+      const timeout = window.setTimeout(() => controller.abort(), 30000)
+      let response
+      try {
+        response = await fetch(`${url}?${params.toString()}`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          signal: controller.signal,
+        })
+      } catch (error) {
+        if (error?.name === 'AbortError') throw new Error(`Google Contacts demorou mais de 30 segundos para responder (${url}).`)
+        throw new Error(`Não foi possível acessar Google Contacts: ${error?.message || 'falha de rede.'}`)
+      } finally {
+        window.clearTimeout(timeout)
+      }
       if (!response.ok) {
         let detail = ''
         try {
@@ -6848,7 +6862,7 @@ function importIntegrationStatusMeta(status) {
   }
 }
 
-function ImportContactsPage({ user, contacts, importJobs, importIntegrations, isImporting, onImportGoogleContacts, onImportFile, onNavigate }) {
+function ImportContactsPage({ user, contacts, importJobs, importIntegrations, isImporting, googleImportStatus, onImportGoogleContacts, onImportFile, onNavigate }) {
   const fileInputRef = useRef(null)
   const googleConnected = hasGoogleConnection(user)
   const recentJobs = Array.isArray(importJobs) ? importJobs.slice(0, 6) : []
@@ -6869,6 +6883,13 @@ function ImportContactsPage({ user, contacts, importJobs, importIntegrations, is
       </section>
 
       <input ref={fileInputRef} type="file" accept=".csv,.txt,.vcf" onChange={onImportFile} className="hidden" />
+
+      {googleImportStatus ? (
+        <section className={['rounded-lg border px-4 py-3 text-sm font-bold', googleImportStatus.startsWith('Erro:') ? 'border-rose-400/30 bg-rose-500/10 text-rose-100' : 'border-cyan-400/20 bg-cyan-500/10 text-cyan-100'].join(' ')}>
+          <p className="font-mono text-[10px] font-black uppercase tracking-widest opacity-70">Resultado da última tentativa Google Contacts</p>
+          <p className="mt-1 break-words">{googleImportStatus}</p>
+        </section>
+      ) : null}
 
       <section className="grid gap-3 lg:grid-cols-3">
         <article className="glass-panel rounded-lg p-4">
@@ -16362,7 +16383,7 @@ export default function App() {
       />
     )
   } else if (effectiveRoute.page === 'import') {
-    page = <ImportContactsPage user={user} contacts={contactsWithCategory} importJobs={importJobs} importIntegrations={importIntegrations} isImporting={isImporting} onImportGoogleContacts={importGoogleContactsFromSettings} onImportFile={handleImportFile} onNavigate={navigate} />
+    page = <ImportContactsPage user={user} contacts={contactsWithCategory} importJobs={importJobs} importIntegrations={importIntegrations} isImporting={isImporting} googleImportStatus={googleImportStatus} onImportGoogleContacts={importGoogleContactsFromSettings} onImportFile={handleImportFile} onNavigate={navigate} />
   } else if (effectiveRoute.page === 'graph') {
     page = <GraphPage contacts={contactsWithCategory} publicProfiles={publicProfilesWithCategory} users={networkUsers} groups={sharedGroups} groupContactsById={groupContactsById} user={user} onNavigate={navigate} onOpenGroup={setSelectedGroup} />
   } else if (effectiveRoute.page === 'contact') {
