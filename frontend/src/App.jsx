@@ -14543,10 +14543,17 @@ export default function App() {
       }
     })
     if (notify) showToast(`Salvando ${payloads.length} contatos da agenda Google...`)
-    const saved = await apiRequest('/api/contacts/import', {
-      method: 'POST',
-      body: JSON.stringify(payloads),
-    })
+    const saved = []
+    const batchSize = 5
+    for (let offset = 0; offset < payloads.length; offset += batchSize) {
+      const batch = payloads.slice(offset, offset + batchSize)
+      setGoogleImportStatus(`Salvando contatos na agenda: ${Math.min(offset + batch.length, payloads.length)}/${payloads.length}`)
+      const importedBatch = await apiRequest('/api/contacts/import', {
+        method: 'POST',
+        body: JSON.stringify(batch),
+      })
+      saved.push(...importedBatch)
+    }
     setContacts((current) => [...saved, ...current])
     setNewCount((count) => count + saved.length)
     await refreshDuplicates(owner)
