@@ -610,8 +610,10 @@ async function apiRequest(path, options = {}) {
 
   if (!response.ok) {
     let message = `Erro da API: ${response.status}`
+    let responseBody = null
     try {
       const data = await response.json()
+      responseBody = data
       if (typeof data?.detail === 'string') {
         message = data.detail
       } else if (Array.isArray(data?.detail)) {
@@ -626,6 +628,8 @@ async function apiRequest(path, options = {}) {
     }
     const error = new Error(message)
     error.status = response.status
+    error.apiBody = responseBody
+    error.apiPath = path
     throw error
   }
 
@@ -14576,7 +14580,18 @@ export default function App() {
       return failed === 0
     } catch (error) {
       const message = error.message || 'Não foi possível importar contatos do Google.'
-      announce(`Erro: ${message}`, `${diagnosticBase}\nEtapa: falhou\nTipo: ${error?.name || 'Error'}\nMensagem: ${message}`)
+      let rawResponse = ''
+      if (error?.apiBody) {
+        try {
+          rawResponse = JSON.stringify(error.apiBody, null, 2)
+        } catch {
+          rawResponse = String(error.apiBody)
+        }
+      }
+      announce(
+        `Erro: ${message}`,
+        `${diagnosticBase}\nEtapa: falhou\nTipo: ${error?.name || 'Error'}\nMensagem: ${message}${error?.status ? `\nHTTP: ${error.status}` : ''}${error?.apiPath ? `\nRota: ${error.apiPath}` : ''}${rawResponse ? `\nResposta bruta da API:\n${rawResponse}` : ''}`,
+      )
       return false
     } finally {
       setIsImporting(false)
