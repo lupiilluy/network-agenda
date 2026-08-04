@@ -2326,11 +2326,11 @@ async function fetchGoogleContacts(accessToken) {
         let detail = ''
         try {
           const payload = await response.json()
-          detail = payload?.error?.message || ''
+          detail = JSON.stringify(payload?.error || payload)
         } catch {
-          // Keep a useful generic message when Google does not return JSON.
+          detail = await response.text().catch(() => '')
         }
-        throw new Error(detail || 'Não foi possível ler os contatos do Google.')
+        throw new Error(`Google People API HTTP ${response.status} em ${url}: ${detail.slice(0, 1200) || 'sem detalhe.'}`)
       }
       const data = await response.json()
       people.push(...(data[peopleField] ?? []))
@@ -12697,7 +12697,7 @@ function LoginPage({ user, authSyncError, onGoogleLogin, onPasswordLogin, onMagi
   )
 }
 
-function GoogleContactsPermissionModal({ user, isImporting, status, onAuthorize, onContinue }) {
+function GoogleContactsPermissionModal({ user, isImporting, status, details, onAuthorize, onContinue }) {
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/85 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="google-contacts-title">
       <div className="w-full max-w-md rounded-2xl border border-cyan-400/30 bg-[#071424] p-6 shadow-2xl shadow-cyan-950/50">
@@ -12714,6 +12714,7 @@ function GoogleContactsPermissionModal({ user, isImporting, status, onAuthorize,
           <div role={status.startsWith('Erro:') ? 'alert' : 'status'} className={['mt-4 rounded-lg border px-3 py-3 text-xs font-bold leading-5', status.startsWith('Erro:') ? 'border-red-300 bg-red-600 text-white shadow-lg shadow-red-950/40' : 'border-cyan-400/20 bg-cyan-500/10 text-cyan-100'].join(' ')}>
             {status.startsWith('Erro:') ? <p className="mb-1 font-mono text-[10px] font-black uppercase tracking-widest text-red-100">Falha na importação</p> : null}
             <p className="break-words">{status}</p>
+            {details ? <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded border border-red-200/40 bg-red-950/30 p-2 font-mono text-[10px] leading-4 text-red-50">{details}</pre> : null}
           </div>
         ) : null}
         <div className="mt-6 grid gap-2 sm:grid-cols-2">
@@ -13669,6 +13670,7 @@ export default function App() {
   const [newCount, setNewCount] = useState(0)
   const [isImporting, setIsImporting] = useState(false)
   const [googleImportStatus, setGoogleImportStatus] = useState('')
+  const [googleImportDetails, setGoogleImportDetails] = useState('')
   const [showGoogleContactsPermission, setShowGoogleContactsPermission] = useState(false)
   const [duplicateSuggestions, setDuplicateSuggestions] = useState(() => initialOfflineData?.duplicateSuggestions ?? [])
   const [isCheckingDuplicates, setIsCheckingDuplicates] = useState(false)
@@ -14037,6 +14039,7 @@ export default function App() {
     const dismissedForUser = sessionStorage.getItem(`network-agenda-google-contacts-prompt:${contactOwnerId(user)}`)
     setShowGoogleContactsPermission(!dismissedForUser)
     setGoogleImportStatus('')
+    setGoogleImportDetails('')
   }, [user?.id, user?.email, user?.googleContactsImportedAt])
 
   useEffect(() => {
@@ -14494,26 +14497,28 @@ export default function App() {
   }
 
   async function importGoogleContactsFromSettings({ notify = true } = {}) {
-    const announce = (message) => {
+    const announce = (message, details = '') => {
       setGoogleImportStatus(message)
+      setGoogleImportDetails(details)
       if (notify) showToast(message)
     }
+    const diagnosticBase = `Horário: ${new Date().toISOString()}\nConta esperada: ${user?.email || 'não identificada'}\nAPI: ${API_BASE_URL}`
     if (!user) {
-      announce('Erro: Entre antes de importar contatos do Google.')
+      announce('Erro: Entre antes de importar contatos do Google.', diagnosticBase)
       return false
     }
     setIsImporting(true)
-    announce('Solicitando autorização ao Google Contacts...')
+    announce('Solicitando autorização ao Google Contacts...', `${diagnosticBase}\nEtapa: OAuth token client`)
     try {
       const googleContacts = await requestGoogleContacts()
-      announce(`${googleContacts.length} contatos encontrados na agenda Google.`)
+      announce(`${googleContacts.length} contatos encontrados na agenda Google.`, `${diagnosticBase}\nEtapa: People API people/me/connections`)
       if (!googleContacts.length) {
         const otherContactsDetail = googleContacts.googleOtherContactsError ? ` Detalhe do Google: ${googleContacts.googleOtherContactsError}` : ''
         const message = `O Google Contacts não retornou contatos para esta conta.${otherContactsDetail}`
-        announce(`Erro: ${message}`)
+        announce(`Erro: ${message}`, `${diagnosticBase}\nEtapa: leitura concluída com 0 contatos\nOther Contacts: ${googleContacts.googleOtherContactsError || 'sem erro retornado'}`)
         return false
       }
-      announce(`Salvando ${googleContacts.length} contatos na sua agenda...`)
+      announce(`Salvando ${googleContacts.length} contatos na sua agenda...`, `${diagnosticBase}\nEtapa: POST /api/contacts/import\nContatos enviados: ${googleContacts.length}`)
       const imported = await importContactsForOwner(googleContacts, user, { notify })
       const connectedUser = rememberUser({
         ...user,
@@ -14547,11 +14552,11 @@ export default function App() {
       const failed = imported.failures?.length ?? 0
       const firstFailure = imported.failures?.[0]?.error
       showToast(`${imported.length} contato${imported.length === 1 ? '' : 's'} importado${imported.length === 1 ? '' : 's'} do Google.${failed ? ` ${failed} não puderam ser salvos: ${firstFailure || 'verifique a conexão com a API.'}` : ''}`)
-      announce(`${imported.length} contatos importados com sucesso.`)
+      announce(`${imported.length} contatos importados com sucesso.`, `${diagnosticBase}\nEtapa: importação concluída\nContatos salvos: ${imported.length}`)
       return failed === 0
     } catch (error) {
       const message = error.message || 'Não foi possível importar contatos do Google.'
-      announce(`Erro: ${message}`)
+      announce(`Erro: ${message}`, `${diagnosticBase}\nEtapa: falhou\nTipo: ${error?.name || 'Error'}\nMensagem: ${message}`)
       return false
     } finally {
       setIsImporting(false)
@@ -16533,6 +16538,7 @@ export default function App() {
           user={user}
           isImporting={isImporting}
           status={googleImportStatus}
+          details={googleImportDetails}
           onAuthorize={authorizeInitialGoogleContacts}
           onContinue={continueWithoutGoogleContacts}
         />
