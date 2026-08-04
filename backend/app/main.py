@@ -1220,6 +1220,25 @@ def create_contact(payload: ContactCreate) -> dict:
         return saved_contact
 
 
+@app.post("/api/contacts/import", response_model=list[ContactOut], status_code=201)
+def import_contacts(payloads: list[ContactCreate]) -> list[dict]:
+    """Persist a Google/CSV import in one authenticated database transaction."""
+    if not payloads:
+        return []
+    with get_connection() as connection:
+        owner_id = authenticated_owner_id(payloads[0].owner_id)
+        saved_contacts: list[dict] = []
+        for payload in payloads:
+            data = payload.model_dump()
+            data["owner_id"] = owner_id
+            row = insert_contact(connection, data)
+            if row is None:
+                raise HTTPException(status_code=500, detail="Não foi possível salvar um contato importado.")
+            saved_contacts.append(row_to_contact(row, connection))
+        connection.commit()
+        return saved_contacts
+
+
 @app.put("/api/contacts/{contact_id}", response_model=ContactOut)
 def edit_contact(contact_id: int, payload: ContactCreate) -> dict:
     with get_connection() as connection:

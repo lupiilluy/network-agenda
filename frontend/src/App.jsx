@@ -14425,28 +14425,25 @@ export default function App() {
 
   async function importContactsForOwner(items, owner) {
     if (!items?.length || !owner) return []
-    const saved = []
-    const failures = []
-    const batchSize = 4
-    for (let offset = 0; offset < items.length; offset += batchSize) {
-      const batch = items.slice(offset, offset + batchSize)
-      const results = await Promise.all(batch.map(async (item) => {
-        try {
-          return { contact: await saveImportedContact(item, owner, { allowOffline: false }) }
-        } catch (error) {
-          return { failure: { name: item.name || 'Contato sem nome', error: error.message || 'Erro ao salvar.' } }
-        }
-      }))
-      results.forEach((result) => {
-        if (result.contact) saved.push(result.contact)
-        if (result.failure) failures.push(result.failure)
-      })
-      showToast(`Importando contatos do Google: ${Math.min(offset + batch.length, items.length)}/${items.length}`)
-    }
+    const payloads = items.map((item) => ({
+      owner_id: contactOwnerId(owner),
+      city: item.city || 'Minha região',
+      address: item.address || item.city || '',
+      trust: 'Novo',
+      source: 'Google People API',
+      note: '',
+      avatar_url: item.avatar_url || '',
+      ...item,
+      service: inferImportedService(item),
+    }))
+    showToast(`Salvando ${payloads.length} contatos da agenda Google...`)
+    const saved = await apiRequest('/api/contacts/import', {
+      method: 'POST',
+      body: JSON.stringify(payloads),
+    })
     setContacts((current) => [...saved, ...current])
     setNewCount((count) => count + saved.length)
     await refreshDuplicates(owner)
-    saved.failures = failures
     return saved
   }
 
