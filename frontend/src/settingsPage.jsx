@@ -135,7 +135,7 @@ function ImportIntegrationCard({ integration, onNavigate, onImportGoogleContacts
   )
 }
 
-export default function SettingsPageSection({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, customFieldDefinitions, importIntegrations, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncPending, onRetryPendingMutation, onDismissPendingMutation, onDiscardGoogleImportPending, onExportContacts, onClearRecents, onSaveCustomField, onDeleteCustomField, onSaveUser, onSendPushTest, onLogout }) {
+export default function SettingsPageSection({ user, contacts, duplicateCount, backendOnline, pendingMutations, recents, customFieldDefinitions, importIntegrations, onNavigate, onRefreshDuplicates, onImportGoogleContacts, onSyncGoogleContacts, onSyncPending, onRetryPendingMutation, onDismissPendingMutation, onDiscardGoogleImportPending, onExportContacts, onClearRecents, onSaveCustomField, onDeleteCustomField, onSaveUser, onSendPushTest, onLogout }) {
   const visibleName = user?.name || 'Perfil'
   const googleContactsImported = Boolean(user?.googleContactsImportedAt)
   const [notificationPreference, setNotificationPreference] = useState(user?.notificationPreference || 'relevant')
@@ -268,8 +268,8 @@ export default function SettingsPageSection({ user, contacts, duplicateCount, ba
             icon={CheckCircle}
             title="Google conectado"
             description={`${contacts.length} contato${contacts.length === 1 ? '' : 's'} na agenda. A importação do Google já foi concluída.`}
-            actionLabel="Editar perfil"
-            onAction={() => onNavigate(ROUTES.REGISTER)}
+            actionLabel="Sincronizar Google"
+            onAction={onSyncGoogleContacts}
           />
         ) : (
           <SettingsAction

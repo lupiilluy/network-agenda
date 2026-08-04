@@ -59,6 +59,7 @@ const SUPABASE_AUTH_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
 const GOOGLE_LOGIN_SCOPE = 'openid email profile'
 const GOOGLE_CONTACTS_SCOPE = 'https://www.googleapis.com/auth/contacts.readonly'
 const GOOGLE_OTHER_CONTACTS_SCOPE = 'https://www.googleapis.com/auth/contacts.other.readonly'
+const GOOGLE_CONTACTS_WRITE_SCOPE = 'https://www.googleapis.com/auth/contacts'
 const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
 const GOOGLE_PHOTOS_SCOPE = 'https://www.googleapis.com/auth/photoslibrary.readonly'
 const GOOGLE_ACCOUNT_PROFILE_SCOPE = `${GOOGLE_LOGIN_SCOPE} https://www.googleapis.com/auth/user.phonenumbers.read https://www.googleapis.com/auth/user.birthday.read`
@@ -2364,6 +2365,39 @@ async function getGoogleProfileWithToken() {
 async function getGoogleContactsOnly() {
   const accessToken = await requestGoogleToken(`${GOOGLE_LOGIN_SCOPE} ${GOOGLE_CONTACTS_SCOPE} ${GOOGLE_OTHER_CONTACTS_SCOPE}`, 'consent')
   return fetchGoogleContacts(accessToken)
+}
+
+function contactIdentityKeys(contact) {
+  const keys = []
+  const email = normalize(contact?.email).trim()
+  const phone = onlyDigits(contact?.phone)
+  if (email) keys.push(`email:${email}`)
+  if (phone) keys.push(`phone:${phone}`)
+  return keys
+}
+
+async function createGoogleContact(accessToken, contact) {
+  const response = await fetch('https://people.googleapis.com/v1/people:createContact', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      names: [{ givenName: String(contact.name || 'Contato').trim() }],
+      phoneNumbers: contact.phone ? [{ value: contact.phone }] : [],
+      emailAddresses: contact.email ? [{ value: contact.email }] : [],
+      addresses: contact.address ? [{ formattedValue: contact.address }] : [],
+      organizations: contact.organization ? [{ name: contact.organization }] : [],
+    }),
+  })
+  if (!response.ok) {
+    let detail = ''
+    try {
+      detail = (await response.json())?.error?.message || ''
+    } catch {
+      // Keep the generic message when Google does not return JSON.
+    }
+    throw new Error(detail || `Google recusou o contato ${contact.name || ''}.`)
+  }
+  return response.json()
 }
 
 async function getGoogleAccountDraft() {
@@ -14432,6 +14466,74 @@ export default function App() {
     }
   }
 
+  async function syncGoogleContacts() {
+    if (!user) {
+      showToast('Entre na conta antes de sincronizar com o Google.')
+      return
+    }
+    setIsImporting(true)
+    showToast('Sincronizando agenda com o Google...')
+    try {
+      const accessToken = await requestGoogleToken(
+        `${GOOGLE_LOGIN_SCOPE} ${GOOGLE_CONTACTS_WRITE_SCOPE} ${GOOGLE_OTHER_CONTACTS_SCOPE}`,
+        'consent',
+      )
+      const googleContacts = await fetchGoogleContacts(accessToken)
+      const localByIdentity = new globalThis.Map()
+      contacts.forEach((contact) => {
+        contactIdentityKeys(contact).forEach((key) => localByIdentity.set(key, contact))
+      })
+      const googleIdentities = new Set(googleContacts.flatMap(contactIdentityKeys))
+      let updated = 0
+      let imported = 0
+      let pushed = 0
+      const failures = []
+
+      for (const googleContact of googleContacts) {
+        const existing = contactIdentityKeys(googleContact).map((key) => localByIdentity.get(key)).find(Boolean)
+        try {
+          if (existing) {
+            await saveEditedContact(
+              {
+                ...existing,
+                ...googleContact,
+                id: existing.id,
+                owner_id: contactOwnerId(user),
+                trust: existing.trust || 'Novo',
+                source: 'Google People API',
+              },
+              { silent: true, skipRefresh: true },
+            )
+            updated += 1
+          } else {
+            await saveImportedContact(googleContact, user, { allowOffline: false })
+            imported += 1
+          }
+        } catch (error) {
+          failures.push(error.message || googleContact.name || 'Contato Google')
+        }
+      }
+
+      for (const contact of contacts) {
+        const identities = contactIdentityKeys(contact)
+        if (identities.some((key) => googleIdentities.has(key))) continue
+        try {
+          await createGoogleContact(accessToken, contact)
+          pushed += 1
+        } catch (error) {
+          failures.push(error.message || contact.name || 'Contato da agenda')
+        }
+      }
+
+      await refreshContactsFromBackend(user)
+      showToast(`Google sincronizado: ${updated} atualizado${updated === 1 ? '' : 's'}, ${imported} importado${imported === 1 ? '' : 's'}, ${pushed} enviado${pushed === 1 ? '' : 's'}${failures.length ? `, ${failures.length} com falha` : ''}.`)
+    } catch (error) {
+      showToast(error.message || 'Não foi possível sincronizar com o Google.')
+    } finally {
+      setIsImporting(false)
+    }
+  }
+
   async function refreshDuplicates(owner = user) {
     if (!owner) return
     setIsCheckingDuplicates(true)
@@ -16269,6 +16371,7 @@ export default function App() {
         onNavigate={navigate}
         onRefreshDuplicates={refreshDuplicates}
         onImportGoogleContacts={importGoogleContactsFromSettings}
+        onSyncGoogleContacts={syncGoogleContacts}
         onSyncPending={syncPendingNow}
         onRetryPendingMutation={retryPendingMutation}
         onDismissPendingMutation={dismissPendingMutation}
