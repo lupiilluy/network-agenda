@@ -2230,6 +2230,16 @@ function loadRecentSearches() {
 let googleMapsPromise
 let googleIdentityPromise
 
+function googleOAuthErrorDetail(value, fallback) {
+  if (!value) return fallback
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return fallback
+  }
+}
+
 function loadGoogleIdentity() {
   if (window.google?.accounts?.oauth2) return Promise.resolve(window.google)
   if (!GOOGLE_CLIENT_ID) return Promise.reject(new Error('Configure VITE_GOOGLE_CLIENT_ID para usar login e contatos do Google.'))
@@ -2272,14 +2282,14 @@ async function requestGoogleToken(scope = GOOGLE_LOGIN_SCOPE, prompt = 'select_a
         if (response?.access_token) {
           resolve(response.access_token)
         } else {
-          reject(new Error(response?.error_description || response?.error || 'Permissão do Google não concluída.'))
+          reject(new Error(googleOAuthErrorDetail(response?.error_description || response?.error || response, 'Permissão do Google não concluída.')))
         }
       },
       error_callback: (response) => {
         if (settled) return
         settled = true
         window.clearTimeout(timeout)
-        reject(new Error(response?.message || response?.error_description || response?.type || 'Permissão do Google cancelada.'))
+        reject(new Error(googleOAuthErrorDetail(response?.message || response?.error_description || response, 'Permissão do Google cancelada.')))
       },
     })
     client.requestAccessToken()
