@@ -213,7 +213,14 @@ def get_connection() -> Iterator[DbConnection]:
     if use_postgres():
         if psycopg is None:
             raise RuntimeError("DATABASE_URL usa Postgres, mas psycopg nao esta instalado. Rode pip install -r requirements.txt.")
-        raw_connection = psycopg.connect(os.getenv("DATABASE_URL", "").strip(), row_factory=dict_row)
+        # Supabase uses PgBouncer transaction pooling in production. Automatic
+        # prepared statements leak across pooled sessions and cause duplicate
+        # statement errors, so keep psycopg in simple-query mode.
+        raw_connection = psycopg.connect(
+            os.getenv("DATABASE_URL", "").strip(),
+            row_factory=dict_row,
+            prepare_threshold=None,
+        )
         connection = DbConnection(raw_connection, "postgres")
     else:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
