@@ -2332,14 +2332,21 @@ async function fetchGoogleContacts(accessToken) {
   )
   // Other Contacts is optional and can be restricted independently by Google.
   // Its failure must not prevent importing the user's main Google contacts.
-  const otherContacts = await fetchPeoplePage(
-    'https://people.googleapis.com/v1/otherContacts',
-    'otherContacts',
-    'readMask',
-  ).catch(() => [])
+  let otherContacts = []
+  let otherContactsError = ''
+  try {
+    otherContacts = await fetchPeoplePage(
+      'https://people.googleapis.com/v1/otherContacts',
+      'otherContacts',
+      'readMask',
+    )
+  } catch (error) {
+    // This collection is optional, but retain Google's response for diagnosis.
+    otherContactsError = error?.message || 'O Google recusou a coleção Other Contacts.'
+  }
 
   const seen = new Set()
-  return [...connections, ...otherContacts]
+  const contacts = [...connections, ...otherContacts]
     .map(googlePersonToContact)
     .filter((contact) => {
       const key = normalize(contact.email || contact.phone || contact.name)
@@ -2349,6 +2356,8 @@ async function fetchGoogleContacts(accessToken) {
       // supplies a stable placeholder phone accepted by the local schema.
       return Boolean(contact.name && (contact.email || contact.phone))
     })
+  contacts.googleOtherContactsError = otherContactsError
+  return contacts
 }
 
 async function fetchGoogleAccountProfile(accessToken) {
@@ -14474,31 +14483,11 @@ export default function App() {
       const googleContacts = await requestGoogleContacts()
       setGoogleImportStatus(`${googleContacts.length} contatos encontrados na agenda Google.`)
       if (!googleContacts.length) {
-        const connectedUser = rememberUser({ ...user, googleConnected: true, googleContactsImportedAt: new Date().toISOString() })
-        showToast('Nenhum contato do Google disponível para importar.')
-        void recordImportJob(
-          {
-            source: 'Google Contacts',
-            filename: '',
-            status: 'completed',
-            total_count: 0,
-            imported_count: 0,
-            skipped_count: 0,
-            failed_count: 0,
-            details: 'Conta conectada sem contatos elegíveis para importação.',
-          },
-          user,
-        )
-        try {
-          await apiRequest('/api/users', {
-            method: 'POST',
-            body: JSON.stringify(userToApiPayload(connectedUser)),
-          })
-          setBackendOnline(true)
-        } catch {
-          setBackendOnline(false)
-        }
-        return true
+        const otherContactsDetail = googleContacts.googleOtherContactsError ? ` Detalhe do Google: ${googleContacts.googleOtherContactsError}` : ''
+        const message = `O Google Contacts não retornou contatos para esta conta.${otherContactsDetail}`
+        setGoogleImportStatus(`Erro: ${message}`)
+        showToast(message)
+        return false
       }
       setGoogleImportStatus(`Salvando ${googleContacts.length} contatos na sua agenda...`)
       const imported = await importContactsForOwner(googleContacts, user)
