@@ -1221,16 +1221,58 @@ def create_contact(payload: ContactCreate) -> dict:
 
 
 @app.post("/api/contacts/import", response_model=list[ContactOut], status_code=201)
-def import_contacts(payloads: list[ContactCreate]) -> list[dict]:
+def import_contacts(payloads: list[dict]) -> list[dict]:
     """Persist a Google/CSV import in one authenticated database transaction."""
     if not payloads:
         return []
+
+    def text(value: object, limit: int) -> str:
+        return str(value or "").strip()[:limit]
+
+    def normalized_payload(payload: dict, index: int, owner_id: str) -> dict:
+        email = text(payload.get("email"), 160)
+        name = text(payload.get("name"), 120)
+        phone = text(payload.get("phone"), 40)
+        if len(name) < 2:
+            name = email if len(email) >= 2 else f"Contato Google {index + 1}"
+        if len(phone) < 4:
+            phone = f"google-import-{index + 1}"
+        service = text(payload.get("service"), 160) or "contato para revisar"
+        return {
+            "owner_id": owner_id,
+            "name": name,
+            "phone": phone,
+            "service": service,
+            "note": text(payload.get("note"), 500),
+            "city": text(payload.get("city"), 120) or "Minha região",
+            "address": text(payload.get("address"), 240),
+            "trust": text(payload.get("trust"), 40) or "Novo",
+            "source": text(payload.get("source"), 80) or "Google People API",
+            "description": text(payload.get("description"), 1200),
+            "demand": text(payload.get("demand"), 800),
+            "demand_tags": text(payload.get("demand_tags"), 500),
+            "solves": text(payload.get("solves"), 800),
+            "tags": text(payload.get("tags"), 500),
+            "email": email,
+            "whatsapp": text(payload.get("whatsapp"), 80),
+            "instagram": text(payload.get("instagram"), 160),
+            "linkedin": text(payload.get("linkedin"), 200),
+            "organization": text(payload.get("organization"), 200),
+            "custom_url": text(payload.get("custom_url"), 240),
+            "avatar_url": text(payload.get("avatar_url"), 200000),
+            "custom_fields": "[]",
+            "crm_status": text(payload.get("crm_status"), 40) or "Novo",
+            "crm_priority": text(payload.get("crm_priority"), 20) or "Média",
+            "last_contact_at": text(payload.get("last_contact_at"), 20),
+            "next_follow_up_at": text(payload.get("next_follow_up_at"), 32),
+            "crm_note": text(payload.get("crm_note"), 500),
+        }
+
     with get_connection() as connection:
-        owner_id = authenticated_owner_id(payloads[0].owner_id)
+        owner_id = authenticated_owner_id(payloads[0].get("owner_id"))
         saved_contacts: list[dict] = []
-        for payload in payloads:
-            data = payload.model_dump()
-            data["owner_id"] = owner_id
+        for index, payload in enumerate(payloads):
+            data = normalized_payload(payload, index, owner_id)
             row = insert_contact(connection, data)
             if row is None:
                 raise HTTPException(status_code=500, detail="Não foi possível salvar um contato importado.")
