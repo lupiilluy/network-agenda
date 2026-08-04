@@ -1234,7 +1234,10 @@ def import_contacts(payloads: list[ContactCreate]) -> list[dict]:
             row = insert_contact(connection, data)
             if row is None:
                 raise HTTPException(status_code=500, detail="Não foi possível salvar um contato importado.")
-            saved_contacts.append(row_to_contact(row, connection))
+            # Building match metadata compares every contact against the whole
+            # agenda. During a bulk import that becomes quadratic and can make
+            # the HTTP request appear stuck, so return the lightweight row.
+            saved_contacts.append(row_to_contact(row))
         connection.commit()
         return saved_contacts
 
