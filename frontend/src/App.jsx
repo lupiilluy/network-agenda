@@ -2263,6 +2263,7 @@ async function requestGoogleToken(scope = GOOGLE_LOGIN_SCOPE, prompt = 'select_a
       client_id: GOOGLE_CLIENT_ID,
       scope,
       prompt,
+      include_granted_scopes: true,
       ...(loginHint ? { hint: loginHint } : {}),
       callback: (response) => {
         if (settled) return
@@ -2379,7 +2380,11 @@ async function getGoogleContactsOnly(loginHint = '') {
     'consent',
     loginHint,
   )
-  return fetchGoogleContacts(accessToken)
+  const [profile, contacts] = await Promise.all([fetchGoogleProfile(accessToken), fetchGoogleContacts(accessToken)])
+  if (loginHint && profile?.email && normalize(profile.email) !== normalize(loginHint)) {
+    throw new Error(`O Google autorizou ${profile.email}, mas você entrou como ${loginHint}. Use a mesma conta para importar a agenda.`)
+  }
+  return contacts
 }
 
 function contactIdentityKeys(contact) {
@@ -13558,7 +13563,9 @@ function getRecommendedGroups(publicProfiles, user, query) {
 export default function App() {
   const [user, setUser] = useState(loadStoredUser)
   const initialOfflineData = loadOfflineSnapshot(user)
-  const [contacts, setContacts] = useState(() => Array.isArray(initialOfflineData?.contacts) ? initialOfflineData.contacts : contactsSeed)
+  // Demonstration contacts must never be shown as if they were the signed-in
+  // user's Google agenda. Real data arrives from the API or the local cache.
+  const [contacts, setContacts] = useState(() => Array.isArray(initialOfflineData?.contacts) ? initialOfflineData.contacts : [])
   const [publicProfiles, setPublicProfiles] = useState(() => Array.isArray(initialOfflineData?.publicProfiles) ? initialOfflineData.publicProfiles : publicProfilesSeed)
   const [networkUsers, setNetworkUsers] = useState(() => initialOfflineData?.networkUsers ?? [])
   const [sharedGroups, setSharedGroups] = useState(() => Array.isArray(initialOfflineData?.sharedGroups) ? initialOfflineData.sharedGroups : [])
@@ -14087,11 +14094,12 @@ export default function App() {
         } else if (syncSummary.conflicts > 0) {
           showToast(`${syncSummary.conflicts} alteração${syncSummary.conflicts === 1 ? '' : 'es'} entrou${syncSummary.conflicts === 1 ? '' : 'ram'} em conflito. Revise em Configurações.`)
         }
-      } catch {
+      } catch (error) {
         if (!cancelled) {
           const cached = loadOfflineSnapshot(user)
           if (cached) applyOfflineSnapshot(cached)
           setBackendOnline(false)
+          showToast(`Não foi possível carregar a agenda: ${error?.message || 'a API não respondeu.'}`)
         }
       }
     }
