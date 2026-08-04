@@ -14544,7 +14544,7 @@ export default function App() {
     })
     if (notify) showToast(`Salvando ${payloads.length} contatos da agenda Google...`)
     const saved = []
-    const batchSize = 5
+    const batchSize = 1
     for (let offset = 0; offset < payloads.length; offset += batchSize) {
       const batch = payloads.slice(offset, offset + batchSize)
       setGoogleImportStatus(`Salvando contatos na agenda: ${Math.min(offset + batch.length, payloads.length)}/${payloads.length}`)
@@ -14553,9 +14553,9 @@ export default function App() {
         body: JSON.stringify(batch),
       })
       saved.push(...importedBatch)
+      setContacts((current) => [...importedBatch, ...current])
+      setNewCount((count) => count + importedBatch.length)
     }
-    setContacts((current) => [...saved, ...current])
-    setNewCount((count) => count + saved.length)
     await refreshDuplicates(owner)
     return saved
   }
