@@ -12656,6 +12656,31 @@ function LoginPage({ user, authSyncError, onGoogleLogin, onPasswordLogin, onMagi
   )
 }
 
+function GoogleContactsPermissionModal({ user, isImporting, onAuthorize, onContinue }) {
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/85 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="google-contacts-title">
+      <div className="w-full max-w-md rounded-2xl border border-cyan-400/30 bg-[#071424] p-6 shadow-2xl shadow-cyan-950/50">
+        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-cyan-400/10 text-cyan-300">
+          <ContactRound size={22} />
+        </div>
+        <p className="mt-4 font-mono text-[10px] font-black uppercase tracking-[0.18em] text-cyan-300">Sincronização da agenda</p>
+        <h2 id="google-contacts-title" className="mt-2 text-xl font-black text-slate-50">Importar seus contatos do Google?</h2>
+        <p className="mt-3 text-sm font-semibold leading-6 text-slate-300">
+          {user?.name ? `${user.name}, ` : ''}autorize o acesso ao Google Contacts para montar sua agenda, mapa e grafo com os seus contatos reais.
+        </p>
+        <p className="mt-2 text-xs font-semibold leading-5 text-slate-500">A permissão é solicitada pelo Google. Você pode continuar sem importar e sincronizar depois em Configurações.</p>
+        <div className="mt-6 grid gap-2 sm:grid-cols-2">
+          <button type="button" onClick={onContinue} disabled={isImporting} className="secondary-button h-11 rounded-lg px-4 text-sm font-black disabled:opacity-60">Agora não</button>
+          <button type="button" onClick={onAuthorize} disabled={isImporting} className="primary-button inline-flex h-11 items-center justify-center gap-2 rounded-lg px-4 text-sm font-black disabled:opacity-60">
+            <Cloud size={16} />
+            {isImporting ? 'Importando...' : 'Autorizar e importar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function RegisterPage({ user, onSaveUser, onImportContacts, onImportGoogleContacts, onImportGoogleProfile, onNavigate, theme, onToggleTheme }) {
   return (
     <AuthLayout title="Meu perfil" description="Atualize seus dados pessoais, contato, endereço e conexão Google." theme={theme} onToggleTheme={onToggleTheme}>
@@ -13594,6 +13619,7 @@ export default function App() {
   const [selectedGroup, setSelectedGroup] = useState(null)
   const [newCount, setNewCount] = useState(0)
   const [isImporting, setIsImporting] = useState(false)
+  const [showGoogleContactsPermission, setShowGoogleContactsPermission] = useState(false)
   const [duplicateSuggestions, setDuplicateSuggestions] = useState(() => initialOfflineData?.duplicateSuggestions ?? [])
   const [isCheckingDuplicates, setIsCheckingDuplicates] = useState(false)
   const [isChatThinking, setIsChatThinking] = useState(false)
@@ -13955,6 +13981,12 @@ export default function App() {
   useEffect(() => {
     refreshPendingMutations(user)
   }, [user?.id, user?.email])
+
+  useEffect(() => {
+    if (!user?.id || user.googleContactsImportedAt) return
+    const dismissedForUser = sessionStorage.getItem(`network-agenda-google-contacts-prompt:${contactOwnerId(user)}`)
+    setShowGoogleContactsPermission(!dismissedForUser)
+  }, [user?.id, user?.email, user?.googleContactsImportedAt])
 
   useEffect(() => {
     if (!user) return
@@ -14406,13 +14438,14 @@ export default function App() {
   async function importGoogleContactsFromSettings() {
     if (!user) {
       showToast('Entre antes de importar contatos do Google.')
-      return
+      return false
     }
+    setIsImporting(true)
     showToast('Abrindo permissão do Google Contacts...')
     try {
       const googleContacts = await requestGoogleContacts()
       if (!googleContacts.length) {
-        const connectedUser = rememberUser({ ...user, googleConnected: true })
+        const connectedUser = rememberUser({ ...user, googleConnected: true, googleContactsImportedAt: new Date().toISOString() })
         showToast('Nenhum contato do Google disponível para importar.')
         void recordImportJob(
           {
@@ -14436,7 +14469,7 @@ export default function App() {
         } catch {
           setBackendOnline(false)
         }
-        return
+        return true
       }
       const imported = await importContactsForOwner(googleContacts, user)
       const connectedUser = rememberUser({
@@ -14471,9 +14504,23 @@ export default function App() {
       const failed = imported.failures?.length ?? 0
       const firstFailure = imported.failures?.[0]?.error
       showToast(`${imported.length} contato${imported.length === 1 ? '' : 's'} importado${imported.length === 1 ? '' : 's'} do Google.${failed ? ` ${failed} não puderam ser salvos: ${firstFailure || 'verifique a conexão com a API.'}` : ''}`)
+      return failed === 0
     } catch (error) {
       showToast(error.message || 'Não foi possível importar contatos do Google.')
+      return false
+    } finally {
+      setIsImporting(false)
     }
+  }
+
+  async function authorizeInitialGoogleContacts() {
+    const imported = await importGoogleContactsFromSettings()
+    if (imported) setShowGoogleContactsPermission(false)
+  }
+
+  function continueWithoutGoogleContacts() {
+    if (user) sessionStorage.setItem(`network-agenda-google-contacts-prompt:${contactOwnerId(user)}`, 'dismissed')
+    setShowGoogleContactsPermission(false)
   }
 
   async function syncGoogleContacts() {
@@ -16436,6 +16483,14 @@ export default function App() {
       <RouteErrorBoundary key={`${effectiveRoute.page}:${effectiveRoute.contactId ?? effectiveRoute.groupId ?? effectiveRoute.categoryId ?? ''}`} onNavigate={navigate}>
         {page}
       </RouteErrorBoundary>
+      {showGoogleContactsPermission && user ? (
+        <GoogleContactsPermissionModal
+          user={user}
+          isImporting={isImporting}
+          onAuthorize={authorizeInitialGoogleContacts}
+          onContinue={continueWithoutGoogleContacts}
+        />
+      ) : null}
       {editingContact ? <EditContactModal contact={editingContact} tagSuggestions={tagSuggestions} customFieldDefinitions={customFieldDefinitions} onClose={() => setEditingContact(null)} onSave={saveEditedContact} /> : null}
       {selectedGroup ? <GroupModal profile={selectedGroup} onClose={() => setSelectedGroup(null)} onToast={showToast} /> : null}
     </Shell>
