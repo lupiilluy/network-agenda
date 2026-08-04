@@ -2249,7 +2249,7 @@ function loadGoogleIdentity() {
   return googleIdentityPromise
 }
 
-async function requestGoogleToken(scope = GOOGLE_LOGIN_SCOPE, prompt = 'select_account') {
+async function requestGoogleToken(scope = GOOGLE_LOGIN_SCOPE, prompt = 'select_account', loginHint = '') {
   const google = await loadGoogleIdentity()
   return new Promise((resolve, reject) => {
     let settled = false
@@ -2263,6 +2263,7 @@ async function requestGoogleToken(scope = GOOGLE_LOGIN_SCOPE, prompt = 'select_a
       client_id: GOOGLE_CLIENT_ID,
       scope,
       prompt,
+      ...(loginHint ? { hint: loginHint } : {}),
       callback: (response) => {
         if (settled) return
         settled = true
@@ -14476,7 +14477,8 @@ export default function App() {
     try {
       const accessToken = await requestGoogleToken(
         `${GOOGLE_LOGIN_SCOPE} ${GOOGLE_CONTACTS_WRITE_SCOPE} ${GOOGLE_OTHER_CONTACTS_SCOPE}`,
-        'consent',
+        '',
+        user.email,
       )
       const googleContacts = await fetchGoogleContacts(accessToken)
       const localByIdentity = new globalThis.Map()
