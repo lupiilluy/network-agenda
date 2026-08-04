@@ -1,4 +1,4 @@
-const CACHE_NAME = 'network-intelligence-v5'
+const CACHE_NAME = 'network-intelligence-v6'
 const APP_SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png']
 
 function isSameOrigin(request) {
@@ -63,7 +63,13 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
-  if (['script', 'style', 'worker', 'image', 'font', 'manifest'].includes(request.destination)) {
+  if (['script', 'style', 'worker'].includes(request.destination)) {
+    // Never boot an older React bundle after a production deployment.
+    event.respondWith(networkFirst(request, request.url))
+    return
+  }
+
+  if (['image', 'font', 'manifest'].includes(request.destination)) {
     event.respondWith(staleWhileRevalidate(request))
     return
   }

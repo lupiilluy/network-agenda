@@ -31,9 +31,16 @@ if (isLocalHost && 'serviceWorker' in navigator) {
 
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
+    let reloadingForUpdate = false
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloadingForUpdate) return
+      reloadingForUpdate = true
+      window.location.reload()
+    })
     navigator.serviceWorker
       .register('/sw.js')
       .then((registration) => {
+        void registration.update()
         registration.addEventListener('updatefound', () => {
           const worker = registration.installing
           if (!worker) return
