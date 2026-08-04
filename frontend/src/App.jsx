@@ -2324,10 +2324,18 @@ async function fetchGoogleContacts(accessToken) {
     return people
   }
 
-  const [connections, otherContacts] = await Promise.all([
-    fetchPeoplePage('https://people.googleapis.com/v1/people/me/connections', 'connections', 'personFields'),
-    fetchPeoplePage('https://people.googleapis.com/v1/otherContacts', 'otherContacts', 'readMask'),
-  ])
+  const connections = await fetchPeoplePage(
+    'https://people.googleapis.com/v1/people/me/connections',
+    'connections',
+    'personFields',
+  )
+  // Other Contacts is optional and can be restricted independently by Google.
+  // Its failure must not prevent importing the user's main Google contacts.
+  const otherContacts = await fetchPeoplePage(
+    'https://people.googleapis.com/v1/otherContacts',
+    'otherContacts',
+    'readMask',
+  ).catch(() => [])
 
   const seen = new Set()
   return [...connections, ...otherContacts]
@@ -14461,7 +14469,8 @@ export default function App() {
         user,
       )
       const failed = imported.failures?.length ?? 0
-      showToast(`${imported.length} contato${imported.length === 1 ? '' : 's'} importado${imported.length === 1 ? '' : 's'} do Google.${failed ? ` ${failed} não puderam ser salvos.` : ''}`)
+      const firstFailure = imported.failures?.[0]?.error
+      showToast(`${imported.length} contato${imported.length === 1 ? '' : 's'} importado${imported.length === 1 ? '' : 's'} do Google.${failed ? ` ${failed} não puderam ser salvos: ${firstFailure || 'verifique a conexão com a API.'}` : ''}`)
     } catch (error) {
       showToast(error.message || 'Não foi possível importar contatos do Google.')
     }
