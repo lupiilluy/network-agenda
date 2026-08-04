@@ -612,7 +612,15 @@ async function apiRequest(path, options = {}) {
     let message = `Erro da API: ${response.status}`
     try {
       const data = await response.json()
-      message = data?.detail || message
+      if (typeof data?.detail === 'string') {
+        message = data.detail
+      } else if (Array.isArray(data?.detail)) {
+        message = data.detail
+          .map((item) => `${Array.isArray(item?.loc) ? item.loc.join('.') : 'campo'}: ${item?.msg || JSON.stringify(item)}`)
+          .join(' | ')
+      } else if (data?.detail) {
+        message = JSON.stringify(data.detail)
+      }
     } catch {
       // Mantém a mensagem padrão quando a API não retorna JSON.
     }
@@ -2175,9 +2183,11 @@ function parseImportedContacts(text, filename = '') {
 }
 
 function googlePersonToContact(person, index) {
-  const phone = person.phoneNumbers?.[0]?.canonicalForm || person.phoneNumbers?.[0]?.value || ''
-  const name = person.names?.[0]?.displayName || person.emailAddresses?.[0]?.value || `Contato Google ${index + 1}`
+  const rawPhone = String(person.phoneNumbers?.[0]?.canonicalForm || person.phoneNumbers?.[0]?.value || '').trim()
+  const rawName = String(person.names?.[0]?.displayName || '').trim()
   const email = person.emailAddresses?.[0]?.value || ''
+  const name = rawName.length >= 2 ? rawName : (email.length >= 2 ? email : `Contato Google ${index + 1}`)
+  const phone = rawPhone.length >= 4 ? rawPhone : `google-${String(person.resourceName || index + 1).replace(/[^a-z0-9]/gi, '').slice(-24) || index + 1}`
   const occupation = person.occupations?.[0]?.value || ''
   const organization = [person.organizations?.[0]?.title, person.organizations?.[0]?.name].filter(Boolean).join(' - ')
   const address = person.addresses?.[0]?.formattedValue || ''
