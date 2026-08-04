@@ -121,7 +121,12 @@ AUTH_CONTEXT: ContextVar[dict | None] = ContextVar("AUTH_CONTEXT", default=None)
 
 
 def cors_allowed_origins() -> list[str]:
-    defaults = ["http://127.0.0.1:5174", "http://localhost:5174"]
+    defaults = [
+        "http://127.0.0.1:5174",
+        "http://localhost:5174",
+        "https://frontend-three-mauve-91.vercel.app",
+        "https://frontend-lupiilluys-projects.vercel.app",
+    ]
     configured = [
         origin.strip().rstrip("/")
         for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
