@@ -1279,14 +1279,31 @@ def import_contacts(payloads: list[dict]) -> list[dict]:
         saved_contacts: list[dict] = []
         for index, payload in enumerate(payloads):
             data = normalized_payload(payload, index, owner_id)
-            row = insert_contact(connection, data, refresh_tag_counts=False)
+            category = classify_service(" ".join([data["service"], data["name"], data["note"], data["source"]]))
+            search_text = normalize(" ".join(str(value) for value in data.values()))
+            row = connection.execute(
+                """
+                INSERT INTO contacts (
+                    owner_id, name, phone, service, note, city, address, trust, source,
+                    description, demand, demand_tags, solves, tags, email, whatsapp, instagram, linkedin, organization, custom_url, avatar_url, custom_fields,
+                    crm_status, crm_priority, last_contact_at, next_follow_up_at, crm_note,
+                    category_id, category_label, category_group, search_text
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING *
+                """,
+                (
+                    data["owner_id"], data["name"], data["phone"], data["service"], data["note"], data["city"], data["address"], data["trust"], data["source"],
+                    data["description"], data["demand"], data["demand_tags"], data["solves"], data["tags"], data["email"], data["whatsapp"], data["instagram"], data["linkedin"], data["organization"], data["custom_url"], data["avatar_url"], data["custom_fields"],
+                    data["crm_status"], data["crm_priority"], data["last_contact_at"], data["next_follow_up_at"], data["crm_note"],
+                    category.id, category.label, category.group, search_text,
+                ),
+            ).fetchone()
             if row is None:
                 raise HTTPException(status_code=500, detail="Não foi possível salvar um contato importado.")
             # Building match metadata compares every contact against the whole
             # agenda. During a bulk import that becomes quadratic and can make
             # the HTTP request appear stuck, so return the lightweight row.
             saved_contacts.append(row_to_contact(row))
-        refresh_tag_usage(connection, owner_id)
         connection.commit()
         return saved_contacts
 
